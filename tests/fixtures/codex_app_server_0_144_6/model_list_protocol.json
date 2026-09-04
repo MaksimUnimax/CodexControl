@@ -1,0 +1,13 @@
+{
+  "codex_version": "0.144.6",
+  "schema_sha256": "40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466",
+  "model_list_method": "model/list",
+  "request_parameter_fields": ["cursor", "includeHidden", "limit"],
+  "response_collection_field": "data",
+  "pagination_cursor_field": "nextCursor",
+  "normalized_source_fields": {"model_id": "id", "wire_model": "model", "display_name": "displayName"},
+  "supported_reasoning_effort_source": {"collection": "supportedReasoningEfforts", "identifier": "reasoningEffort"},
+  "default_reasoning_effort_field": "defaultReasoningEffort",
+  "default_model_field": "isDefault",
+  "visibility_field": "hidden"
+}

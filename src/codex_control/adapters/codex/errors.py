@@ -7,9 +7,10 @@ from .protocol import ProtocolFault, ProtocolRemoteError
 from .runtime import RuntimeErrorSafe
 from .subprocess_transport import SubprocessTransportError
 from .version_probe import VersionProbeError
+from .model_catalog import ModelCatalogError
 
 class CodexAdapterErrorCategory(str, Enum):
-    CONFIGURATION="configuration"; UNSUPPORTED_CODEX_VERSION="unsupported_codex_version"; VERSION_PROBE_FAILURE="version_probe_failure"; CAPABILITY_MANIFEST_INVALID="capability_manifest_invalid"; REQUIRED_CAPABILITY_MISSING="required_capability_missing"; RUNTIME_UNAVAILABLE="runtime_unavailable"; PROFILE_STOPPING="profile_stopping"; MANAGER_SHUTTING_DOWN="manager_shutting_down"; UNRESOLVED_PROCESS="unresolved_process"; RUNTIME_SHUTDOWN_FAILURE="runtime_shutdown_failure"; PROTOCOL_FAULT="protocol_fault"; REMOTE_APP_SERVER_ERROR="remote_app_server_error"; TRANSPORT_FAULT="transport_fault"; TIMEOUT="timeout"; INTERNAL="internal"
+    CONFIGURATION="configuration"; UNSUPPORTED_CODEX_VERSION="unsupported_codex_version"; VERSION_PROBE_FAILURE="version_probe_failure"; CAPABILITY_MANIFEST_INVALID="capability_manifest_invalid"; REQUIRED_CAPABILITY_MISSING="required_capability_missing"; RUNTIME_UNAVAILABLE="runtime_unavailable"; PROFILE_STOPPING="profile_stopping"; MANAGER_SHUTTING_DOWN="manager_shutting_down"; UNRESOLVED_PROCESS="unresolved_process"; RUNTIME_SHUTDOWN_FAILURE="runtime_shutdown_failure"; PROTOCOL_FAULT="protocol_fault"; REMOTE_APP_SERVER_ERROR="remote_app_server_error"; TRANSPORT_FAULT="transport_fault"; MODEL_CATALOG_INVALID="model_catalog_invalid"; MODEL_NOT_AVAILABLE="model_not_available"; REASONING_EFFORT_UNSUPPORTED="reasoning_effort_unsupported"; TIMEOUT="timeout"; INTERNAL="internal"
 @dataclass(frozen=True)
 class CodexAdapterError(Exception):
     category: CodexAdapterErrorCategory; profile_id: str | None = None; remote_code: int | None = None
@@ -21,6 +22,9 @@ def normalize_error(error: BaseException) -> CodexAdapterError:
     if isinstance(error, ProtocolRemoteError): return CodexAdapterError(CodexAdapterErrorCategory.REMOTE_APP_SERVER_ERROR, remote_code=error.code)
     if isinstance(error, ProtocolFault): return CodexAdapterError(CodexAdapterErrorCategory.PROTOCOL_FAULT)
     if isinstance(error, SubprocessTransportError): return CodexAdapterError(CodexAdapterErrorCategory.TRANSPORT_FAULT)
+    if isinstance(error, ModelCatalogError):
+        mapping={"model_not_available":CodexAdapterErrorCategory.MODEL_NOT_AVAILABLE,"reasoning_effort_unsupported":CodexAdapterErrorCategory.REASONING_EFFORT_UNSUPPORTED}
+        return CodexAdapterError(mapping.get(error.category, CodexAdapterErrorCategory.MODEL_CATALOG_INVALID))
     if isinstance(error, RuntimeErrorSafe):
         mapping={"executable_invalid":CodexAdapterErrorCategory.CONFIGURATION,"profile_stopping":CodexAdapterErrorCategory.PROFILE_STOPPING,"manager_shutting_down":CodexAdapterErrorCategory.MANAGER_SHUTTING_DOWN,"unresolved_process":CodexAdapterErrorCategory.UNRESOLVED_PROCESS,"kill_reap_timeout":CodexAdapterErrorCategory.RUNTIME_SHUTDOWN_FAILURE}
         return CodexAdapterError(mapping.get(error.category,CodexAdapterErrorCategory.RUNTIME_UNAVAILABLE), profile_id=error.profile_id)

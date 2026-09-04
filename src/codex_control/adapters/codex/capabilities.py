@@ -29,7 +29,7 @@ class CodexCapability(str, Enum):
 
 
 class InstalledSchemaSupport(str, Enum): PRESENT = "PRESENT"
-class AdapterImplementation(str, Enum): NOT_IMPLEMENTED = "NOT_IMPLEMENTED"
+class AdapterImplementation(str, Enum): NOT_IMPLEMENTED = "NOT_IMPLEMENTED"; IMPLEMENTED = "IMPLEMENTED"
 
 
 @dataclass(frozen=True)
