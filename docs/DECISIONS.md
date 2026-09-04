@@ -16,3 +16,4 @@ Architect-owned; individual records under `docs/adr/`.
 - ADR-0012 architect-led development; Codex implementation executor only.
 - ADR-0013 P1.5 validates reasoning effort but never guesses an opaque `thread/start.config` key; exact effort becomes a wire input at P1.6 `turn/start`.
 - ADR-0014 Codex 0.144.6 permissions approval DENY is an empty `GrantedPermissionProfile` with turn scope; ALLOW echoes only exact validated request-derived permissions with turn scope, never session-wide/broader grants.
+- ADR-0015 P1.8 `turn/interrupt` targets only the exact active P1.6 turn on its captured runtime, reuses the existing terminal collector, and resolves ambiguity only from exact terminal reconciliation; no reacquire or blind retry.
