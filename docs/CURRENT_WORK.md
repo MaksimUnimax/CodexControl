@@ -11,22 +11,25 @@ Date: 2026-09-04
 - P1.1 accepted implementation: `7f013ff2950bc185d6f0991c11960311961e53a7`.
 - P1.2 accepted implementation after two repair reviews: `f3acf2d4cf8c793d0c576ca3cd576eb3d0513ab9`.
 - P1.3 accepted implementation after three repair reviews: `7568f0b01b204b48676447db9c71ab847a0be5b2`.
+- P1.4 accepted implementation after one repair review: `981b0c359f09e82354c50bb68eb3317d389a9c15`.
 
-## P1.3 accepted capability facts
-- Version-specific manifest is fail-closed on exact Codex version `0.144.6` and exact schema SHA authority.
-- Installed client request methods tracked for V1 include `model/list`, `thread/start`, `thread/resume`, `thread/delete`, `turn/start`, `turn/interrupt`.
-- Installed agent-message lifecycle notifications include `item/agentMessage/delta` and `item/completed`.
-- Installed terminal turn notification is `turn/completed`.
-- Installed approval server requests are `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/permissions/requestApproval`, `applyPatchApproval`, and `execCommandApproval`.
-- Installed schema support remains distinct from CodexControl local implementation readiness.
-- Version probing uses fixed exec/no shell, filtered environment, bounded spawn/stdout/process/cleanup lifecycle, exact process ownership on late spawn, and no automatic retry conclusion.
-- Normalized adapter errors expose safe categories only; remote arbitrary text/environment/stderr are not propagated through default error rendering.
+## P1.4 accepted model-catalog facts
+- Product model data comes from authenticated runtime `model/list`, never from a hardcoded or bundled debug catalog.
+- Installed `model/list` request fields are `cursor`, `includeHidden`, and `limit`; P1.4 uses `includeHidden: false` and `limit: 100`.
+- Response collection is `data`; pagination cursor is `nextCursor`.
+- Model record identity `id` and exact future request model value `model` remain distinct.
+- User-selectable metadata is normalized from `displayName`, `supportedReasoningEfforts[].reasoningEffort`, `defaultReasoningEffort`, `isDefault`, and `hidden`; descriptions/unknown response fields are not retained.
+- Catalog input is bounded before hidden filtering at 100 raw entries/page; pagination is bounded to 32 pages and selectable catalog size to 512 models.
+- Catalog cache is memory-only, TTL 60 seconds, keyed by `(profile_id, runtime_generation)`, and older generations cannot become current cache after a newer generation is observed.
+- Same-key misses and forced refreshes are single-flight; caller cancellation does not cancel the shared read-only refresh; failed refreshes do not poison in-flight state or overwrite a valid old cache entry.
+- Hidden models are not selectable; model IDs are case-sensitive; unknown models and unsupported reasoning efforts fail closed.
+- Only `MODEL_LIST` is locally `IMPLEMENTED`; every other P1 capability remains `NOT_IMPLEMENTED`.
 
 ## Execution authority
 Codex must not self-start work from this document.
 
-Only **P1.4 — authenticated `model/list` normalization/cache adapter** is eligible for the next explicit implementation prompt.
+Only **P1.5 — thread start/resume adapter** is eligible for the next explicit implementation prompt.
 
-P1.4 does not authorize thread creation/resume, turns, approvals, interrupt, hard delete, Telegram, SQLite, systemd, production deployment, or architecture/roadmap edits.
+P1.5 does not authorize turn execution, approval handling, interrupt, hard delete, Telegram, SQLite, systemd, production deployment, or architecture/roadmap edits.
 
-P1.4 implementation may target the authenticated runtime interface, but real production-profile eligibility acceptance remains reserved for P7 unless an architect prompt explicitly authorizes a narrowly scoped read-only probe.
+P1.5 must use fake/simulated READY runtimes for tests. Real production-profile thread creation/resume is reserved for P7 unless an architect prompt explicitly authorizes an isolated disposable acceptance operation.
