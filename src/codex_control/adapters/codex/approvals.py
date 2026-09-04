@@ -15,7 +15,6 @@ class ApprovalHandlingStatus(StrEnum): ALLOWED="allowed"; DENIED="denied"; RESPO
 class ApprovalErrorCategory(StrEnum):
     APPROVAL_REQUEST_INVALID="approval_request_invalid"; APPROVAL_DECISION_INVALID="approval_decision_invalid"; APPROVAL_OPERATION_BUSY="approval_operation_busy"; APPROVAL_PROTOCOL_TERMINAL="approval_protocol_terminal"; APPROVAL_RESPONSE_UNKNOWN="approval_response_unknown"
 _KINDS={COMMAND:ApprovalKind.COMMAND_EXECUTION,FILE_CHANGE:ApprovalKind.FILE_CHANGE,PERMISSIONS:ApprovalKind.PERMISSIONS,APPLY_PATCH:ApprovalKind.APPLY_PATCH,EXEC_COMMAND:ApprovalKind.EXEC_COMMAND}
-class ApprovalResponseUnknown(Exception): pass
 class ApprovalError(Exception):
     def __init__(self, category:ApprovalErrorCategory|str)->None:
         try:self.category=ApprovalErrorCategory(category)
@@ -38,6 +37,9 @@ def _id(v:Any,required:bool=True)->str|None:
     return v
 def _string(v:Any)->str:
     if not isinstance(v,str) or "\0" in v or len(v)>MAX_APPROVAL_PERMISSION_VALUE_CHARS:raise ValueError
+    return v
+def _schema_string(v:Any)->str:
+    if not isinstance(v,str) or "\0" in v: raise ValueError
     return v
 def _context(lines:list[str])->tuple[str,...]:
     if len(lines)>MAX_APPROVAL_CONTEXT_LINES or any("\0" in x or len(x)>MAX_APPROVAL_CONTEXT_LINE_CHARS for x in lines) or sum(map(len,lines))>MAX_APPROVAL_CONTEXT_TOTAL_CHARS:raise ValueError
@@ -98,11 +100,15 @@ def _permissions(v:Any)->tuple[dict[str,Any],bool]:
                         if not isinstance(item,dict) or set(item)!={"access","path"} or item.get("access") not in ("read","write","deny"):raise ValueError
                         made.append({"access":item["access"],"path":_path(item["path"])})
                         effective=effective or item["access"] in ("read","write")
-                    else:made.append(_string(item));effective=True
+                    else:
+                        made.append(_string(item))
+                        # Empty legacy lists are schema-valid but grant
+                        # nothing.  ADR-0014 makes every no-op fail closed.
+                        effective=effective or bool(values)
                 f[key]=made
             if "globScanMaxDepth" in x:
                 depth=x["globScanMaxDepth"]
-                if depth is not None and (type(depth) is not int or depth<1):raise ValueError
+                if depth is not None and (type(depth) is not int or depth<1 or depth>2**64-1):raise ValueError
                 f["globScanMaxDepth"]=depth
             out["fileSystem"]=f
         else:raise ValueError
@@ -156,7 +162,7 @@ class CodexApprovalBridge:
         if not isinstance(p,dict):raise ValueError
         if kind in (ApprovalKind.COMMAND_EXECUTION,ApprovalKind.FILE_CHANGE,ApprovalKind.PERMISSIONS):
             thread=_id(p.get("threadId"));turn=_id(p.get("turnId"));item=_id(p.get("itemId"))
-            if type(p.get("startedAtMs")) is not int:raise ValueError
+            if type(p.get("startedAtMs")) is not int or not -(2**63)<=p["startedAtMs"]<=2**63-1:raise ValueError
         else:thread=_id(p.get("conversationId"));turn=None;item=_id(p.get("callId"))
         if kind is ApprovalKind.PERMISSIONS:_string(p.get("cwd"));grant,effective=_permissions(p.get("permissions"));context=_optional_context(p,("reason","cwd"))
         elif kind is ApprovalKind.COMMAND_EXECUTION:grant=None;effective=False;context=_optional_context(p,("reason","cwd","command"))
@@ -164,25 +170,41 @@ class CodexApprovalBridge:
         elif kind is ApprovalKind.APPLY_PATCH:
             changes=p.get("fileChanges")
             if not isinstance(changes,dict):raise ValueError
-            for path,change in changes.items():_string(path);self._file_change(change)
-            grant=None;effective=False;context=_optional_context(p,("reason",))
+            paths=[]
+            for path,change in changes.items():
+                # Path names are the only patch payload projected to the
+                # operator.  Content and diffs are deliberately never copied.
+                paths.append(_string(path));self._file_change(change)
+            grant=None;effective=False;context=_context(list(_optional_context(p,("reason",)))+[f"file: {path}" for path in paths])
         else:
             if not isinstance(p.get("command"),list) or not isinstance(p.get("parsedCmd"),list):raise ValueError
-            _string(p.get("cwd"));[_string(x) for x in p["command"]]
+            _string(p.get("cwd"));command=[_string(x) for x in p["command"]]
             for x in p["parsedCmd"]:self._parsed(x)
-            grant=None;effective=False;context=_optional_context(p,("cwd","reason"))
+            grant=None;effective=False;context=_context(list(_optional_context(p,("cwd","reason")))+["command: "+" ".join(command)])
         return ApprovalRequest(seq,self.profile_id,inbound.request_id,kind,thread,turn,item,context),grant,effective
     @staticmethod
     def _file_change(v:Any)->None:
         if not isinstance(v,dict) or v.get("type") not in ("add","delete","update"):raise ValueError
-        if v["type"] in ("add","delete") and set(v)!={"type","content"}:raise ValueError
-        if v["type"]=="update" and not {"type","unified_diff"}<=set(v)<={"type","unified_diff","move_path"}:raise ValueError
-        for k in ("content","unified_diff","move_path"):
-            if k in v and v[k] is not None:_string(v[k])
+        if v["type"] in ("add","delete") and "content" not in v:raise ValueError
+        if v["type"]=="update" and "unified_diff" not in v:raise ValueError
+        # Generated schema permits extra fields. Validate the nested fields
+        # it uses, but never apply permission-value limits to patch contents.
+        for k in ("content","unified_diff"):
+            if k in v:_schema_string(v[k])
+        if "move_path" in v and v["move_path"] is not None:_string(v["move_path"])
     @staticmethod
     def _parsed(v:Any)->None:
-        if not isinstance(v,dict) or v.get("type") not in ("read","list_files","search","unknown") or not isinstance(v.get("cmd"),str):raise ValueError
-        _string(v["cmd"])
+        if not isinstance(v,dict) or v.get("type") not in ("read","list_files","search","unknown") or "cmd" not in v:raise ValueError
+        _schema_string(v["cmd"])
+        kind=v["type"]
+        if kind=="read":
+            if "name" not in v or "path" not in v:raise ValueError
+            _schema_string(v["name"]);_schema_string(v["path"])
+        elif kind=="list_files":
+            if "path" in v and v["path"] is not None:_schema_string(v["path"])
+        elif kind=="search":
+            for key in ("query","path"):
+                if key in v and v[key] is not None:_schema_string(v[key])
     async def _send(self,inbound:InboundServerRequest,seq:int,kind:ApprovalKind,decision:ApprovalDecision,grant:dict[str,Any]|None,error:ApprovalErrorCategory|None)->ApprovalHandlingResult:
         result={"permissions":grant if decision is ApprovalDecision.ALLOW and grant is not None else {},"scope":"turn"} if kind is ApprovalKind.PERMISSIONS else {"decision":("accept" if decision is ApprovalDecision.ALLOW else "decline") if kind in (ApprovalKind.COMMAND_EXECUTION,ApprovalKind.FILE_CHANGE) else ("approved" if decision is ApprovalDecision.ALLOW else "denied")}
         task=asyncio.create_task(self.client.respond_server_request(inbound,result))

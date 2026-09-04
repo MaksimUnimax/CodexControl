@@ -1,4 +1,6 @@
 import asyncio,json,unittest
+import codex_control.adapters.codex.approvals as approval_module
+from pathlib import Path
 from codex_control.adapters.codex.approvals import *
 from codex_control.adapters.codex.protocol import CodexProtocolClient
 
@@ -55,3 +57,27 @@ class Tests(unittest.IsolatedAsyncioTestCase):
   release=asyncio.Event();o=Operator();o.release=release;b=self.bridge(o)
   a=await self.inbound(COMMAND,{"itemId":"a","startedAtMs":1,"threadId":"t","turnId":"u"},"a");z=await self.inbound(COMMAND,{"itemId":"b","startedAtMs":1,"threadId":"t","turnId":"u"},"b")
   ta=asyncio.create_task(b.handle_request(a));await o.started.wait();tb=asyncio.create_task(b.handle_request(z));await asyncio.sleep(0);self.assertEqual(len(o.requests),1);release.set();await ta;await tb;self.assertEqual([x.item_or_call_id for x in o.requests],["a","b"])
+ async def test_permission_noops_deny_without_operator(self):
+  noops=[{}, {"network":{}},{"network":{"enabled":False}},{"network":{"enabled":None}},{"fileSystem":{}},{"fileSystem":{"read":[]}},{"fileSystem":{"write":[]}},{"fileSystem":{"entries":[]}},{"fileSystem":{"entries":[{"access":"deny","path":{"type":"path","path":"/x"}}]}},{"fileSystem":{"globScanMaxDepth":1}},{"network":{},"fileSystem":{"read":[],"write":[]}}]
+  for n,permissions in enumerate(noops):
+   op=Operator(ApprovalDecision.ALLOW); p=permission(network=None);p["permissions"]=permissions
+   result=await self.bridge(op).handle_request(await self.inbound(PERMISSIONS,p,"noop"+str(n)))
+   self.assertEqual(result.status,ApprovalHandlingStatus.DENIED);self.assertFalse(op.requests);self.assertEqual(self.t.sent[-1]["result"],{"permissions":{},"scope":"turn"})
+ async def test_parsed_command_variants_malformed_and_context(self):
+  variants=[{"type":"read","cmd":"cat x","name":"cat","path":"/x"},{"type":"list_files","cmd":"ls","path":None},{"type":"search","cmd":"rg x","query":"x","path":"/x"},{"type":"unknown","cmd":"x"}]
+  for n,parsed in enumerate(variants):
+   op=Operator(ApprovalDecision.ALLOW);p={"callId":"c","conversationId":"t","cwd":"/x","command":["rg","x"],"parsedCmd":[parsed]};r=await self.bridge(op).handle_request(await self.inbound(EXEC_COMMAND,p,"v"+str(n)));self.assertEqual(r.status,ApprovalHandlingStatus.ALLOWED);self.assertIn("command: rg x",op.requests[0].context_lines)
+  malformed=[{"type":"read","cmd":"x","path":"/x"},{"type":"read","cmd":"x","name":1,"path":"/x"},{"type":"list_files","cmd":"x","path":1},{"type":"search","cmd":"x","query":1},{"type":"unknown"},{"type":"future","cmd":"x"}]
+  for n,parsed in enumerate(malformed):
+   op=Operator();p={"callId":"c","conversationId":"t","cwd":"/x","command":["x"],"parsedCmd":[parsed]};r=await self.bridge(op).handle_request(await self.inbound(EXEC_COMMAND,p,"m"+str(n)));self.assertEqual(r.status,ApprovalHandlingStatus.DENIED);self.assertFalse(op.requests);self.assertEqual(self.t.sent[-1]["result"],{"decision":"denied"})
+ async def test_apply_patch_context_excludes_content_and_context_bounds(self):
+  secret="PRIVATE_FILE_CONTENT_MUST_NOT_LEAK";op=Operator(ApprovalDecision.ALLOW);p={"callId":"c","conversationId":"t","fileChanges":{"/safe":{"type":"add","content":secret}}};r=await self.bridge(op).handle_request(await self.inbound(APPLY_PATCH,p,"patch"));self.assertEqual(r.status,ApprovalHandlingStatus.ALLOWED);self.assertIn("file: /safe",op.requests[0].context_lines);self.assertNotIn(secret," ".join(op.requests[0].context_lines)+repr(op.requests[0]))
+  self.assertEqual(len(approval_module._context(["x"*2048])),1)
+  for lines in (["x"*2049],["x"*2048]*5,["x"]*33):
+   with self.assertRaises(ValueError):approval_module._context(lines)
+ def test_approval_fixture_freezes_nested_schema_facts(self):
+  facts=json.loads((Path(__file__).parents[1]/"fixtures"/"codex_app_server_0_144_6"/"approval_protocol.json").read_text())
+  self.assertEqual(facts["codex_version"],"codex-cli 0.144.6");self.assertEqual(len(facts["server_requests"]),5)
+  self.assertEqual(set(facts["permissions_nested_schema"]["entry"]["access"]),{"read","write","deny"})
+  self.assertEqual(set(facts["parsed_command_schema"]["variants"]),{"read","list_files","search","unknown"})
+  self.assertEqual(set(facts["legacy_file_change_schema"]["variants"]),{"add","delete","update"})

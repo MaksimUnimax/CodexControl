@@ -68,8 +68,21 @@ class CodexProtocolClient:
         if not isinstance(request,InboundServerRequest) or self._pending_server.get(request.request_id) is not request: raise ProtocolFault("server_response_not_owned")
         if self._state is not ProtocolState.READY: raise ProtocolApprovalResponseUnknown()
         del self._pending_server[request.request_id]
-        try: await self._transport.send({"id":request.request_id,"result":result})
-        except Exception: self._fault("approval_response_unknown"); raise ProtocolApprovalResponseUnknown() from None
+        try:
+            await self._transport.send({"id":request.request_id,"result":result})
+        except asyncio.CancelledError:
+            # Cancellation of the owned transport attempt is not caller
+            # cancellation: the wire effect is ambiguous and the protocol may
+            # no longer be used for an approval response.
+            self._fault("approval_response_unknown")
+            raise ProtocolApprovalResponseUnknown() from None
+        except Exception:
+            self._fault("approval_response_unknown")
+            raise ProtocolApprovalResponseUnknown() from None
+        # The reader can observe EOF/fault while send is suspended.  A normal
+        # return is success only while READY still holds at completion.
+        if self._state is not ProtocolState.READY:
+            raise ProtocolApprovalResponseUnknown()
     async def wait_terminal(self)->ProtocolState: await self._terminal.wait(); return self._state
     async def close(self)->None:
         if self._state not in (ProtocolState.CLOSED,ProtocolState.FAULTED): self._state=ProtocolState.CLOSED; self._fail_pending(ProtocolFault("client_closed"))

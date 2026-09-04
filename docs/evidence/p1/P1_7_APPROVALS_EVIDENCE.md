@@ -59,3 +59,19 @@ fixture now records all five installed request/response schemas and complete
 decision alternatives. Same-runtime bridge handling is serialized while distinct
 bridges have independent locks. This is implementation evidence only and does
 not claim architect acceptance.
+
+## Architect third repair pass
+
+Candidate requiring third repair: `32303470fc353b533e648fdb36f2d20bd936a30d`.
+
+This pass removes the stale nonexistent `ApprovalResponseUnknown` import from
+error normalization. It makes a terminal state observed while an owned response
+send is in flight resolve as response-unknown, and inner transport send
+cancellation faults the protocol. Permission normalizing now treats empty
+legacy read/write arrays, empty/false/null network values, deny-only entries,
+and depth-only profiles as no-op denials. Exact nested ParsedCommand fields are
+validated; apply-patch context contains only bounded affected path names, and
+legacy exec-command context contains bounded argv. Event-gated terminal send,
+envelope, pre-READY, no-op permissions, parsed-command, patch redaction, argv,
+and context-bound tests were added. This evidence does not claim architect
+acceptance.

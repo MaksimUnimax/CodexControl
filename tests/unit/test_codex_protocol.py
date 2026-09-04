@@ -224,6 +224,52 @@ class CodexProtocolTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertIs(self.client.state, ProtocolState.CLOSED)
 
+    async def test_terminal_during_server_response_send_is_unknown_once(self):
+        await self._ready()
+        started = asyncio.Event(); release = asyncio.Event()
+        original_send = self.transport.send
+        async def gated(message):
+            self.transport.sent.append(message)
+            if message.get("id") == "approval":
+                started.set(); await release.wait()
+        self.transport.send = gated
+        self.transport.deliver({"id":"approval", "method":"item/commandExecution/requestApproval", "params":{}})
+        await asyncio.sleep(0)
+        request = await self.client.next_server_request()
+        response = asyncio.create_task(self.client.respond_server_request(request, {"decision":"accept"}))
+        await started.wait()
+        self.transport.eof()
+        await asyncio.sleep(0)
+        release.set()
+        from codex_control.adapters.codex.protocol import ProtocolApprovalResponseUnknown
+        with self.assertRaises(ProtocolApprovalResponseUnknown): await response
+        self.assertIn(self.client.state, (ProtocolState.CLOSED, ProtocolState.FAULTED))
+        self.assertEqual(sum(x.get("id") == "approval" for x in self.transport.sent), 1)
+        self.transport.send = original_send
+
+    async def test_complete_invalid_envelope_matrix_and_unsupported_method(self):
+        bad = [
+            {"id":1,"method":"x","result":{}}, {"id":1,"method":"x","error":{}},
+            {"id":1,"method":"x","result":{},"error":{}}, {"id":1}, {"id":1,"params":{}},
+            {"result":{}}, {"error":{}}, {"method":"x","result":{}}, {"method":"x","error":{}},
+            {"id":1,"method":"item/commandExecution/requestApproval"}, {"id":1,"method":7,"params":{}},
+        ]
+        for message in bad + [{"id":7,"method":"future/unknown","params":{}}]:
+            transport=FakeLineTransport(); client=CodexProtocolClient(transport,client_version="x")
+            init=asyncio.create_task(client.initialize()); await asyncio.sleep(0)
+            transport.deliver({"id":1,"result":{"userAgent":"x","codexHome":"/safe","platformFamily":"unix","platformOs":"linux"}}); await init
+            transport.deliver(message); await asyncio.sleep(0)
+            self.assertIs(client.state, ProtocolState.FAULTED); self.assertTrue(client._server_requests.empty())
+            await client.close()
+
+    async def test_valid_server_request_during_initializing_faults(self):
+        task=asyncio.create_task(self.client.initialize()); await asyncio.sleep(0)
+        self.transport.deliver({"id":9,"method":"item/commandExecution/requestApproval","params":{}})
+        await asyncio.sleep(0)
+        self.assertIs(self.client.state, ProtocolState.FAULTED); self.assertTrue(self.client._server_requests.empty())
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError): await task
+
     def test_fixture_identifies_installed_version(self):
         fixture = Path(__file__).parents[1] / "fixtures" / "codex_app_server_0_144_6" / "initialize_protocol.json"
         facts = json.loads(fixture.read_text())
