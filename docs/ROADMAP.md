@@ -13,8 +13,8 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P1.1 exact 0.144.6 stdio protocol fixtures/types + initialize handshake. Accepted implementation: `7f013ff2950bc185d6f0991c11960311961e53a7`.
 - [DONE] P1.2 child supervisor + per-profile single-flight runtime manager. Accepted implementation after two repair reviews: `f3acf2d4cf8c793d0c576ca3cd576eb3d0513ab9`.
 - [DONE] P1.3 installed capability manifest/version probe + normalized safe errors. Accepted implementation after three repair reviews: `7568f0b01b204b48676447db9c71ab847a0be5b2`.
-- [NEXT] P1.4 authenticated `model/list` normalization/cache adapter.
-- [PLANNED] P1.5 thread start/resume.
+- [DONE] P1.4 authenticated `model/list` normalization + generation-scoped in-memory cache. Accepted implementation after one repair review: `981b0c359f09e82354c50bb68eb3317d389a9c15`.
+- [NEXT] P1.5 thread start/resume.
 - [PLANNED] P1.6 turn start + ordered user-visible agent-message/terminal handling.
 - [PLANNED] P1.7 bidirectional server-request envelope + approval request/response port using fake operator.
 - [PLANNED] P1.8 interrupt.
