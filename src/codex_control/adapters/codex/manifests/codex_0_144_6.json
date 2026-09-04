@@ -1,0 +1,25 @@
+{
+  "manifest_format": 1,
+  "codex_cli_version": "0.144.6",
+  "schema_sha256": "40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466",
+  "framing": "newline-delimited UTF-8 JSON messages",
+  "approval_response_schemas": ["CommandExecutionRequestApprovalResponse", "FileChangeRequestApprovalResponse", "PermissionsRequestApprovalResponse", "ApplyPatchApprovalResponse", "ExecCommandApprovalResponse"],
+  "wire": {
+    "client_requests": ["model/list", "thread/start", "thread/resume", "thread/delete", "turn/start", "turn/interrupt"],
+    "client_notifications": ["initialized"],
+    "server_requests": ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "applyPatchApproval", "execCommandApproval"],
+    "server_notifications": ["item/agentMessage/delta", "item/completed", "turn/completed"]
+  },
+  "capabilities": {
+    "MODEL_LIST": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["model/list"]},
+    "THREAD_START": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["thread/start"]},
+    "THREAD_RESUME": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["thread/resume"]},
+    "THREAD_DELETE": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["thread/delete"]},
+    "TURN_START": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["turn/start"]},
+    "TURN_INTERRUPT": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["turn/interrupt"]},
+    "AGENT_MESSAGE_EVENTS": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "server_notifications": ["item/agentMessage/delta", "item/completed"]},
+    "TURN_TERMINAL_EVENTS": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "server_notifications": ["turn/completed"]},
+    "APPROVAL_SERVER_REQUESTS": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "server_requests": ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "applyPatchApproval", "execCommandApproval"]},
+    "APPROVAL_RESPONSE_SCHEMA": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "approval_response_schemas": ["CommandExecutionRequestApprovalResponse", "FileChangeRequestApprovalResponse", "PermissionsRequestApprovalResponse", "ApplyPatchApprovalResponse", "ExecCommandApprovalResponse"]}
+  }
+}
