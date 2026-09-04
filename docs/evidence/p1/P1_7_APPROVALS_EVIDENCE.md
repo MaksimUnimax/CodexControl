@@ -101,3 +101,22 @@ redaction, context-bound, permission, response ambiguity and capability
 coverage.  Final exact test counts are recorded by the executor report after
 the required regression commands; this evidence does not claim architect
 acceptance.
+
+## Architect fifth acceptance-proof pass
+
+Candidate entering pass: `a354037f88529ab4706560f7857a97b3c5b2aa0c`.
+The latest Issue #7 clarification reclassified cancel-vs-dequeue and final
+pre-send cancellation as proof gaps unless a deterministic test reproduces a
+violation. The event-gated proofs pass on the entering production code; no
+production source changed in this pass.
+
+Committed tests cover request-completion-wins cancellation, pre-ownership
+cancellation cleanup and preservation, repeated command/permissions
+ALLOW-to-pre-send cancellation DENY, owned protocol-terminal UNKNOWN,
+simultaneous request/terminal outcomes, public FIFO serialization,
+two-runtime independence, same-ID client/server/notification interleaving,
+ordinary response-send exceptions, response instance/reuse, exact context
+limits and overflow DENY, exact fixture records, all-five nontrivial
+normalization, and local-sequence monotonicity. Existing tests retain all-five
+malformed/mapping, redaction, EOF and inner-cancellation proofs. This remains
+implementation evidence only and does not claim architect acceptance.

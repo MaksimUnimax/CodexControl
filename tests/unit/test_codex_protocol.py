@@ -300,6 +300,58 @@ class CodexProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.transport.eof(); await asyncio.sleep(0)
         self.assertIs(self.client.state, ProtocolState.FAULTED)
 
+    async def test_full_same_id_client_server_notification_interleaving(self):
+        await self._ready()
+        client_request = asyncio.create_task(self.client.request("normal/request", {"safe": True}))
+        await asyncio.sleep(0)
+        wire_id = self.transport.sent[-1]["id"]
+        self.transport.deliver({"id": wire_id, "method": "item/commandExecution/requestApproval", "params": {"PRIVATE_SERVER_PARAMS_MUST_NOT_LEAK": True}})
+        self.transport.deliver({"method": "thread/started", "params": {"notification": True}})
+        server_request = await self.client.next_server_request()
+        self.assertEqual((server_request.request_id, server_request.method), (wire_id, "item/commandExecution/requestApproval"))
+        self.assertEqual(await self.client.next_notification(), {"method": "thread/started", "params": {"notification": True}})
+        self.assertFalse(client_request.done())
+        await self.client.respond_server_request(server_request, {"decision": "decline"})
+        self.assertEqual(self.transport.sent[-1], {"id": wire_id, "result": {"decision": "decline"}})
+        self.assertFalse(client_request.done())
+        self.transport.deliver({"id": wire_id, "result": {"client": "resolved"}})
+        self.assertEqual(await client_request, {"client": "resolved"})
+
+    async def test_server_response_exception_is_one_ambiguous_attempt(self):
+        await self._ready()
+        self.transport.deliver({"id": "raise", "method": "item/commandExecution/requestApproval", "params": {}})
+        await asyncio.sleep(0)
+        request = await self.client.next_server_request()
+        original_send = self.transport.send
+        async def raising(message):
+            self.transport.sent.append(message)
+            raise OSError("PRIVATE_COMMAND_OUTPUT_MUST_NOT_LEAK")
+        self.transport.send = raising
+        from codex_control.adapters.codex.protocol import ProtocolApprovalResponseUnknown
+        with self.assertRaises(ProtocolApprovalResponseUnknown):
+            await self.client.respond_server_request(request, {"decision": "accept"})
+        self.assertEqual(sum(x.get("id") == "raise" for x in self.transport.sent), 1)
+        self.assertIs(self.client.state, ProtocolState.FAULTED)
+        self.transport.send = original_send
+
+    async def test_response_instance_matrix_and_wire_id_reuse(self):
+        await self._ready()
+        self.transport.deliver({"id": 7, "method": "item/commandExecution/requestApproval", "params": {}}); await asyncio.sleep(0)
+        first = await self.client.next_server_request()
+        await self.client.respond_server_request(first, {"decision": "decline"})
+        sends = len(self.transport.sent)
+        with self.assertRaises(ProtocolFault): await self.client.respond_server_request(first, {"decision": "decline"})
+        reconstructed = InboundServerRequest(first.local_sequence, 7, first.method, first._params)
+        with self.assertRaises(ProtocolFault): await self.client.respond_server_request(reconstructed, {"decision": "decline"})
+        with self.assertRaises(ProtocolFault): await self.client.respond_server_request(InboundServerRequest(99, "unknown", first.method, first._params), {"decision": "decline"})
+        self.assertEqual(len(self.transport.sent), sends)
+        self.transport.deliver({"id": 7, "method": "item/commandExecution/requestApproval", "params": {}}); await asyncio.sleep(0)
+        second = await self.client.next_server_request()
+        self.assertNotEqual(first.local_sequence, second.local_sequence)
+        with self.assertRaises(ProtocolFault): await self.client.respond_server_request(first, {"decision": "decline"})
+        await self.client.respond_server_request(second, {"decision": "decline"})
+        self.assertEqual(self.transport.sent[-1], {"id": 7, "result": {"decision": "decline"}})
+
 
 if __name__ == "__main__":
     unittest.main()
