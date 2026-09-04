@@ -24,7 +24,9 @@ class TurnSnapshot:
 
 
 def bind_dialogue(server_id: str, selection: CodexSelection, thread_id: str) -> DialogueBinding:
-    return DialogueBinding(server_id, selection.profile.profile_id, thread_id, selection.model, selection.reasoning_effort)
+    # Durable identity is intentionally only the profile-bound exact thread ID.
+    # Per-turn model/effort selection is owned by the later turn boundary.
+    return DialogueBinding(server_id, selection.profile.profile_id, thread_id)
 
 
 def capture_turn(binding: DialogueBinding) -> TurnSnapshot:

@@ -12,8 +12,8 @@
   },
   "capabilities": {
     "MODEL_LIST": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "client_requests": ["model/list"]},
-    "THREAD_START": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["thread/start"]},
-    "THREAD_RESUME": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["thread/resume"]},
+    "THREAD_START": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "client_requests": ["thread/start"]},
+    "THREAD_RESUME": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "client_requests": ["thread/resume"]},
     "THREAD_DELETE": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["thread/delete"]},
     "TURN_START": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["turn/start"]},
     "TURN_INTERRUPT": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["turn/interrupt"]},

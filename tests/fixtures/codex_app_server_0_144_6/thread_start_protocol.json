@@ -1,0 +1,13 @@
+{
+  "codex_version": "0.144.6",
+  "schema_sha256": "40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466",
+  "method": "thread/start",
+  "sent_parameter_fields": ["cwd", "approvalPolicy", "sandbox", "model", "ephemeral"],
+  "approval_policy": "on-request",
+  "sandbox": "workspace-write",
+  "persistent_ephemeral_value": false,
+  "typed_reasoning_effort_field": null,
+  "config_additional_properties": true,
+  "omitted_parameter_fields": ["baseInstructions", "config", "developerInstructions"],
+  "result_thread_id_path": ["thread", "id"]
+}
