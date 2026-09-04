@@ -70,3 +70,9 @@ class CapabilityManifestTests(unittest.TestCase):
     def test_manifest_has_no_secret_fields(self):
         text = resources.files("codex_control.adapters.codex.manifests").joinpath("codex_0_144_6.json").read_text().lower()
         for term in ("token", "auth", "cookie", "account"): self.assertNotIn(term, text)
+    def test_only_model_list_is_locally_implemented(self):
+        manifest = load_manifest()
+        self.assertIs(manifest.capabilities[CodexCapability.MODEL_LIST].adapter_implementation, AdapterImplementation.IMPLEMENTED)
+        for capability in CodexCapability:
+            if capability is not CodexCapability.MODEL_LIST:
+                self.assertIs(manifest.capabilities[capability].adapter_implementation, AdapterImplementation.NOT_IMPLEMENTED)

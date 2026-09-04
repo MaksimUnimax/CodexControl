@@ -8,6 +8,7 @@ from typing import Any, Callable, Protocol
 
 MODEL_LIST_METHOD = "model/list"
 MODEL_LIST_PAGE_SIZE = 100
+MAX_MODEL_LIST_PAGE_ITEMS = MODEL_LIST_PAGE_SIZE
 DEFAULT_MODEL_CATALOG_TTL_SECONDS = 60.0
 MAX_MODEL_LIST_PAGES = 32
 MAX_MODEL_CATALOG_SIZE = 512
@@ -22,8 +23,14 @@ MAX_MODEL_LIST_CURSOR_CHARS = 4096
 class ModelCatalogError(Exception):
     """Finite, payload-free catalog error categories."""
     def __init__(self, category: str) -> None:
-        self.category = category
-        super().__init__(category)
+        self.category = category if category in {
+            "model_not_available",
+            "reasoning_effort_unsupported",
+            "catalog_response_invalid",
+            "catalog_limit_exceeded",
+            "pagination_invalid",
+        } else "catalog_response_invalid"
+        super().__init__(self.category)
 
 
 @dataclass(frozen=True)
@@ -171,6 +178,8 @@ class CodexModelCatalogAdapter:
     def _parse_page(response: Any) -> tuple[list[Any], str | None]:
         if not isinstance(response, dict) or not isinstance(response.get("data"), list):
             raise ModelCatalogError("catalog_response_invalid")
+        if len(response["data"]) > MAX_MODEL_LIST_PAGE_ITEMS:
+            raise ModelCatalogError("catalog_limit_exceeded")
         next_cursor = response.get("nextCursor")
         if next_cursor is not None and (not isinstance(next_cursor, str) or len(next_cursor) > MAX_MODEL_LIST_CURSOR_CHARS):
             raise ModelCatalogError("pagination_invalid")

@@ -5,6 +5,7 @@ from codex_control.adapters.codex.runtime import RuntimeErrorSafe
 from codex_control.adapters.codex.subprocess_transport import SubprocessTransportError
 from codex_control.adapters.codex.version_probe import VersionProbeError
 from codex_control.adapters.codex.capabilities import CapabilityManifestError
+from codex_control.adapters.codex.model_catalog import ModelCatalogError
 
 class ErrorTests(unittest.TestCase):
     def test_protocol_and_remote_are_safe(self):
@@ -40,3 +41,22 @@ class ErrorTests(unittest.TestCase):
     def test_no_normalized_error_encodes_retry_decision(self):
         for error in (normalize_error(SubprocessTransportError("x")), normalize_error(VersionProbeError("version_probe_busy")), normalize_error(CapabilityManifestError("manifest_sha_mismatch"))):
             self.assertFalse(hasattr(error, "retryable")); self.assertFalse(hasattr(error, "safe_to_retry")); self.assertNotIn("retry", str(error) + repr(error))
+
+    def test_model_catalog_errors_normalize_and_redact_payloads_without_retry_fields(self):
+        cases = (
+            ("model_not_available", CodexAdapterErrorCategory.MODEL_NOT_AVAILABLE),
+            ("reasoning_effort_unsupported", CodexAdapterErrorCategory.REASONING_EFFORT_UNSUPPORTED),
+            ("catalog_response_invalid", CodexAdapterErrorCategory.MODEL_CATALOG_INVALID),
+            ("catalog_limit_exceeded", CodexAdapterErrorCategory.MODEL_CATALOG_INVALID),
+            ("pagination_invalid", CodexAdapterErrorCategory.MODEL_CATALOG_INVALID),
+        )
+        for source, target in cases:
+            with self.subTest(source=source):
+                error = normalize_error(ModelCatalogError(source))
+                self.assertEqual(error.category, target)
+                self.assertFalse(hasattr(error, "retryable"))
+                self.assertFalse(hasattr(error, "safe_to_retry"))
+        raw_payload = "PRIVATE_MODEL_DESCRIPTION_MUST_NOT_APPEAR"
+        source = ModelCatalogError(raw_payload)
+        self.assertNotIn(raw_payload, str(source) + repr(source))
+        self.assertEqual(normalize_error(source).category, CodexAdapterErrorCategory.MODEL_CATALOG_INVALID)

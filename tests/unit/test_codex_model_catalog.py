@@ -26,8 +26,12 @@ class Runtime:
 
 
 class Manager:
-    def __init__(self, runtimes): self.runtimes, self.calls = runtimes, []
-    async def acquire(self, profile_id): self.calls.append(profile_id); return self.runtimes[profile_id]
+    def __init__(self, runtimes): self.runtimes, self.calls, self.acquire_events = runtimes, [], {}
+    async def acquire(self, profile_id):
+        self.calls.append(profile_id)
+        event = self.acquire_events.get(len(self.calls))
+        if event is not None: event.set()
+        return self.runtimes[profile_id]
 
 
 class Clock:
@@ -78,6 +82,27 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ModelCatalogError) as raised: await self.adapter.get_catalog("p")
         self.assertNotIn("PRIVATE_MODEL_TEXT_SHOULD_NOT_LEAK", repr(raised.exception)); self.assertFalse(self.adapter._cache)
 
+    async def test_raw_page_with_exactly_100_items_is_accepted(self):
+        self.client.pages = [{"data": [model(identifier=f"id-{index}", wire=f"wire-{index}") for index in range(MAX_MODEL_LIST_PAGE_ITEMS)]}]
+        catalog = await self.adapter.get_catalog("p")
+        self.assertEqual(len(catalog.models), MAX_MODEL_LIST_PAGE_ITEMS)
+
+    async def test_raw_page_with_101_visible_items_fails_closed_without_cache_or_payload(self):
+        payload = "PRIVATE_VISIBLE_MODEL_DESCRIPTION"
+        self.client.pages = [{"data": [model(identifier=f"id-{index}", wire=f"wire-{index}", description=payload) for index in range(MAX_MODEL_LIST_PAGE_ITEMS + 1)]}]
+        with self.assertRaisesRegex(ModelCatalogError, "catalog_limit_exceeded") as raised:
+            await self.adapter.get_catalog("p")
+        self.assertNotIn(payload, str(raised.exception) + repr(raised.exception))
+        self.assertFalse(self.adapter._cache)
+
+    async def test_raw_page_with_101_hidden_items_fails_closed_without_cache_or_payload(self):
+        payload = "PRIVATE_HIDDEN_MODEL_DESCRIPTION"
+        self.client.pages = [{"data": [model(identifier=f"hidden-{index}", wire=f"hidden-wire-{index}", hidden=True, description=payload) for index in range(MAX_MODEL_LIST_PAGE_ITEMS + 1)]}]
+        with self.assertRaisesRegex(ModelCatalogError, "catalog_limit_exceeded") as raised:
+            await self.adapter.get_catalog("p")
+        self.assertNotIn(payload, str(raised.exception) + repr(raised.exception))
+        self.assertFalse(self.adapter._cache)
+
     async def test_malformed_cases_and_bounds(self):
         cases = [
             {"data":[model(efforts=("low","low"))]}, {"data":[model(default="bad")]}, {"data":[model(identifier="x"*(MAX_MODEL_ID_CHARS+1))]},
@@ -123,3 +148,108 @@ class CatalogTests(unittest.IsolatedAsyncioTestCase):
         gate2=asyncio.Event(); old_client=Client([{"data":[model()]}],gate2); self.manager.runtimes["p"]=Runtime("p",1,old_client); old_task=asyncio.create_task(self.adapter.get_catalog("p",refresh=True)); await old_client.requested.wait()
         new_client=Client([{"data":[model(identifier="new",wire="new")]}]); self.manager.runtimes["p"]=Runtime("p",2,new_client); await self.adapter.get_catalog("p"); gate2.set(); await old_task
         self.assertNotIn(("p",1),self.adapter._cache); self.assertIn(("p",2),self.adapter._cache)
+
+    async def test_simultaneous_cache_misses_share_one_refresh(self):
+        gate = asyncio.Event()
+        client = Client([{"data": [model()]}], gate)
+        manager = Manager({"p": Runtime("p", 1, client)})
+        fifth_acquire = asyncio.Event()
+        manager.acquire_events[5] = fifth_acquire
+        self.adapter = CodexModelCatalogAdapter(manager, clock=self.clock)
+        callers = [asyncio.create_task(self.adapter.get_catalog("p")) for _ in range(5)]
+        await client.requested.wait()
+        await fifth_acquire.wait()
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(len(self.adapter._inflight), 1)
+        gate.set()
+        catalogs = await asyncio.gather(*callers)
+        self.assertTrue(all(catalog is catalogs[0] for catalog in catalogs))
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(len(self.adapter._cache), 1)
+        self.assertFalse(self.adapter._inflight)
+
+    async def test_simultaneous_forced_refreshes_share_one_refresh(self):
+        await self.adapter.get_catalog("p")
+        gate = asyncio.Event()
+        refreshed_client = Client([{"data": [model(identifier="refreshed", wire="refreshed-wire")]}], gate)
+        self.manager.runtimes["p"] = Runtime("p", 1, refreshed_client)
+        first = asyncio.create_task(self.adapter.get_catalog("p", refresh=True))
+        await refreshed_client.requested.wait()
+        second_acquire = asyncio.Event()
+        self.manager.acquire_events[3] = second_acquire
+        second = asyncio.create_task(self.adapter.get_catalog("p", refresh=True))
+        await second_acquire.wait()
+        self.assertEqual(len(refreshed_client.calls), 1)
+        self.assertEqual(len(self.adapter._inflight), 1)
+        gate.set()
+        first_catalog, second_catalog = await asyncio.gather(first, second)
+        self.assertIs(first_catalog, second_catalog)
+        self.assertEqual(first_catalog.models[0].model_id, "refreshed")
+        self.assertEqual(len(refreshed_client.calls), 1)
+        self.assertFalse(self.adapter._inflight)
+
+    async def test_all_cancelled_waiters_leave_shared_refresh_owned(self):
+        gate = asyncio.Event()
+        client = Client([{"data": [model()]}], gate)
+        manager = Manager({"p": Runtime("p", 1, client)})
+        third_acquire = asyncio.Event()
+        manager.acquire_events[3] = third_acquire
+        self.adapter = CodexModelCatalogAdapter(manager, clock=self.clock)
+        callers = [asyncio.create_task(self.adapter.get_catalog("p")) for _ in range(3)]
+        await client.requested.wait()
+        await third_acquire.wait()
+        refresh_task = self.adapter._inflight[("p", 1)]
+        for caller in callers:
+            caller.cancel()
+        for caller in callers:
+            with self.assertRaises(asyncio.CancelledError):
+                await caller
+        self.assertFalse(refresh_task.done())
+        self.assertIs(self.adapter._inflight[("p", 1)], refresh_task)
+        gate.set()
+        completed = await refresh_task
+        self.assertIs(self.adapter._cache[("p", 1)], completed)
+        self.assertFalse(self.adapter._inflight)
+        self.assertIs(completed, await self.adapter.get_catalog("p"))
+        self.assertEqual(len(client.calls), 1)
+
+    async def test_failed_cache_miss_clears_inflight_and_later_fetch_succeeds(self):
+        self.client.pages = [RuntimeError("read failed")]
+        with self.assertRaises(RuntimeError):
+            await self.adapter.get_catalog("p")
+        self.assertFalse(self.adapter._cache)
+        self.assertNotIn(("p", 1), self.adapter._inflight)
+        self.client.pages = [{"data": [model(identifier="recovered", wire="recovered-wire")]}]
+        catalog = await self.adapter.get_catalog("p")
+        self.assertEqual(catalog.models[0].model_id, "recovered")
+        self.assertEqual(len(self.client.calls), 2)
+        self.assertIs(self.adapter._cache[("p", 1)], catalog)
+
+    async def test_multiple_generations_retain_only_current_profile_cache(self):
+        other_client = Client([{"data": [model(identifier="other", wire="other-wire")]}])
+        self.manager.runtimes["q"] = Runtime("q", 1, other_client)
+        other_catalog = await self.adapter.get_catalog("q")
+        for generation in range(1, 6):
+            client = Client([{"data": [model(identifier=f"p-{generation}", wire=f"p-wire-{generation}")]}])
+            self.manager.runtimes["p"] = Runtime("p", generation, client)
+            catalog = await self.adapter.get_catalog("p")
+            self.assertEqual(catalog.runtime_generation, generation)
+        self.assertEqual(set(key for key in self.adapter._cache if key[0] == "p"), {("p", 5)})
+        self.assertFalse([key for key in self.adapter._inflight if key[0] == "p" and key[1] < 5])
+        self.assertEqual(self.adapter._observed_generation["p"], 5)
+        self.assertIs(self.adapter._cache[("q", 1)], other_catalog)
+
+    async def test_hidden_model_cannot_be_selected(self):
+        self.client.pages = [{"data": [model(identifier="visible", wire="visible-wire"), model(identifier="hidden", wire="hidden-wire", hidden=True)]}]
+        catalog = await self.adapter.get_catalog("p")
+        with self.assertRaisesRegex(ModelCatalogError, "model_not_available"):
+            catalog.resolve_model("hidden")
+        with self.assertRaisesRegex(ModelCatalogError, "model_not_available"):
+            catalog.resolve_wire_model("hidden")
+
+    async def test_model_id_lookup_is_case_sensitive(self):
+        self.client.pages = [{"data": [model(identifier="Model-ABC", wire="wire-abc")]}]
+        catalog = await self.adapter.get_catalog("p")
+        self.assertEqual(catalog.resolve_model("Model-ABC").model_id, "Model-ABC")
+        with self.assertRaisesRegex(ModelCatalogError, "model_not_available"):
+            catalog.resolve_model("model-abc")
