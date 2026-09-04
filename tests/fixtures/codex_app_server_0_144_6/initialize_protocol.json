@@ -1,0 +1,12 @@
+{
+  "codex_path": "/usr/local/bin/codex",
+  "codex_version": "codex-cli 0.144.6",
+  "framing": "one UTF-8 JSON object per newline-delimited stdio line",
+  "jsonrpc_field_on_wire": false,
+  "schema_command": "codex app-server generate-json-schema --out /tmp/codex-app-server-schema-0.144.6.AKb2Ma",
+  "schema_sha256": "40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466",
+  "request_envelope": {"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "codex_control", "title": "CodexControl", "version": "TEST_VERSION"}, "capabilities": {}}},
+  "initialized_notification": {"method": "initialized"},
+  "initialize_result_required_fields": ["userAgent", "codexHome", "platformFamily", "platformOs"],
+  "initialize_capability_fields": ["experimentalApi", "mcpServerOpenaiFormElicitation", "optOutNotificationMethods", "requestAttestation"]
+}
