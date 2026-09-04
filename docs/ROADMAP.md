@@ -16,8 +16,8 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P1.4 authenticated `model/list` normalization + generation-scoped in-memory cache. Accepted implementation after one repair review: `981b0c359f09e82354c50bb68eb3317d389a9c15`.
 - [DONE] P1.5 thread start/resume + ambiguity-safe profile-bound thread identity. Accepted implementation after two repair reviews: `e7851d813944d3326b7fd9317da9e21f216557fa`.
 - [DONE] P1.6 turn start + ordered completed-agent-message projection + terminal handling. Accepted implementation after two repair reviews: `de36b3ef3657a464b29ff2d17692fce5fc2b2388`.
-- [NEXT] P1.7 bidirectional server-request envelope + approval request/response port using fake operator.
-- [PLANNED] P1.8 interrupt.
+- [DONE] P1.7 bidirectional server-request envelope + approval request/response port using fake operator. Accepted implementation/proof HEAD after iterative repair review: `bbd7445087dfb59185d49787d562637e282ba5aa`.
+- [NEXT] P1.8 interrupt.
 - [PLANNED] P1.9 thread/delete + ambiguity handling.
 - [PLANNED] P1.10 T0/T1/T2 acceptance; no real production conversation.
 
