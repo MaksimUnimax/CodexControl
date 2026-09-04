@@ -14,32 +14,55 @@ Date: 2026-09-04
 - P1.4 accepted implementation after one repair review: `981b0c359f09e82354c50bb68eb3317d389a9c15`.
 - P1.5 accepted implementation after two repair reviews: `e7851d813944d3326b7fd9317da9e21f216557fa`.
 - P1.6 accepted implementation after two repair reviews: `de36b3ef3657a464b29ff2d17692fce5fc2b2388`.
+- P1.7 accepted implementation/proof HEAD after iterative repair review: `bbd7445087dfb59185d49787d562637e282ba5aa`.
+- ADR-0014 defines exact permissions approval semantics.
+- ADR-0015 defines exact P1.8 interrupt ownership/reconciliation semantics.
 
-## P1.6 accepted turn-lifecycle facts
-- Installed `turn/start` requires `input` and `threadId`; exact successful turn identity is `turn.id`.
-- Plain text input is sent as `[{"type":"text","text":...}]`; product input is bounded to 65,536 characters, NUL-free, and preserved exactly.
-- Per-turn exact model selection uses P1.4 `wire_model` through typed `model`; reasoning effort uses exact typed `effort`. ADR-0013 is satisfied without opaque config guessing.
-- Installed `TurnStartParams.effort` is optional/nullable and references `#/definitions/v2/ReasoningEffort`; the referenced JSON type is string, no enum is declared, and `minLength` is 1. Accepted P1.4 always supplies a validated non-empty advertised default when caller effort is absent.
-- `turn/start` also uses trusted `cwd`, approval policy `on-request`, and `sandboxPolicy: {"type":"workspaceWrite"}`; no arbitrary config/base/developer/provider fields are injected.
-- P1.6 captures one runtime before catalog lookup and requires catalog profile/generation to match that exact runtime; there is no lifecycle-level reacquire/rebase or blind retry.
-- Pre-dispatch cancellation sends no turn RPC. After dispatch, repeated caller cancellation cannot detach/cancel the exact side-effect request; the same invocation resolves to CONFIRMED, REJECTED, or UNKNOWN. Inner request cancellation after dispatch is TURN_START_UNKNOWN.
-- Durable/external turn identity is exact `profile_id + thread_id + turn_id`; turn IDs are opaque, case/whitespace preserving, NUL-free, and bounded to 512 characters.
-- A single collector owns the exact active turn notification stream. Canonical user-visible output comes only from completed `item/completed` items whose `item.type == agentMessage`; deltas are transient and never canonical output.
-- Completed agent-message item IDs are exact/bounded and duplicates fail closed. Agent text allows empty strings because the installed schema has no minLength; one message is bounded to 1,000,000 characters, at most 256 messages and 2,000,000 total completed user-visible characters are accepted per turn.
-- Non-agent command/file-change/reasoning/internal items are never projected as user-visible answer content.
-- Recognized malformed delta/completed/terminal envelopes for the active stream fail closed as TURN_STREAM_UNKNOWN; well-formed other-thread/other-turn events are ignored.
-- `turn/completed` exact status mapping: `completed` -> COMPLETED; `failed` and `interrupted` -> definitive FAILED; `inProgress` on terminal notification or invalid status -> TURN_STREAM_UNKNOWN.
-- Collector observes protocol terminal state and cannot hang waiting only on notifications. Queued matching terminal notifications are processed deterministically before protocol-terminal UNKNOWN where safely available.
-- Active-turn notification consumption is bounded to 16,384 notifications.
-- Active collector state and completed terminal results are separate. Terminal publication is exact-token/lock protected; active state clears atomically and at most one immutable completed result is retained per profile/thread key. A newer CONFIRMED turn evicts the prior completed result; stale publication cannot overwrite replacement state.
-- A cancelled read-only `wait_turn` waiter does not cancel the collector; a later waiter may retrieve the retained exact terminal result while it remains current for that key.
-- `MODEL_LIST`, `THREAD_START`, `THREAD_RESUME`, `TURN_START`, `AGENT_MESSAGE_EVENTS`, and `TURN_TERMINAL_EVENTS` are locally `IMPLEMENTED`; `THREAD_DELETE`, `TURN_INTERRUPT`, `APPROVAL_SERVER_REQUESTS`, and `APPROVAL_RESPONSE_SCHEMA` remain `NOT_IMPLEMENTED`.
+## P1.7 accepted approval/protocol facts
+- P1.1 bidirectional framing is now extended safely: client responses, server requests and notifications are mutually exclusive; mixed envelopes fail closed.
+- Exact accepted approval server-request methods are `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/permissions/requestApproval`, `applyPatchApproval`, and `execCommandApproval`.
+- Server-request IDs are exact directional identities: signed-64 integers or non-empty NUL-free strings <=256; client/server request-ID namespaces are independent even when values are equal.
+- At most 64 server requests may remain pending. Duplicate pending IDs and request 65 fault safely.
+- `InboundServerRequest` is immutable/redacted and each response requires the exact live request instance. A later new request may reuse a completed wire ID with a new local sequence; stale/reconstructed instances cannot respond.
+- Server response wire shape is exact `{id, result}` with no `jsonrpc`, `method`, or `params`.
+- Response send is one-attempt. Transport exception/cancellation or protocol terminal during send is response UNKNOWN; there is no blind retry or replacement response.
+- `CodexApprovalBridge` is bound to one exact profile/client and serializes approvals for that runtime; independent bridge/runtime pairs remain independent.
+- Cancellation before request ownership cleans helper tasks. After ownership, public cancellation cannot abandon the request: before response-send it fails closed to DENY; after response-send it remains attached to the one owned response task.
+- Operator context is finite/allowlisted and bounded to 32 lines, 2,048 chars/line, 8,192 total. Raw server params, patch contents/diffs, command output, environment/auth material and hidden reasoning are not generic log/repr payloads.
+- Product decision model is `ALLOW | DENY`. Command/file-change use `accept`/`decline`; legacy apply-patch/exec-command use `approved`/`denied`; session/persistent alternatives are never selected.
+- ADR-0014 permissions DENY is `{"permissions":{},"scope":"turn"}`. ALLOW is only a validated reconstructed request-derived permission grant with turn scope; no privilege broadening/session grant.
+- `MODEL_LIST`, `THREAD_START`, `THREAD_RESUME`, `TURN_START`, `AGENT_MESSAGE_EVENTS`, `TURN_TERMINAL_EVENTS`, `APPROVAL_SERVER_REQUESTS`, and `APPROVAL_RESPONSE_SCHEMA` are locally IMPLEMENTED. `TURN_INTERRUPT` and `THREAD_DELETE` remain NOT_IMPLEMENTED.
+- Final P1.7 proof suites reported protocol 28, approvals 22, errors 15, capabilities 17, full 192; compile/import and fresh-process approval normalization passed.
+- A pre-existing pending-task warning was observed from an accepted P1.6 test path during the P1.7 full suite. P1.7 did not modify that code/test path, so it is non-blocking test-hygiene debt rather than a P1.7 regression.
+
+## P1.8 exact architect authority
+P1.8 implements installed Codex 0.144.6 `turn/interrupt` only.
+
+Exact installed/exact-version facts already established for planning:
+- method: `turn/interrupt`;
+- request params: exact `threadId` and `turnId` only;
+- response type: empty `TurnInterruptResponse` object;
+- normal turn interrupts are recorded as pending and the app-server replies when the target turn reaches a terminal core event; pending interrupt responses are released on both aborted and naturally completed turns;
+- the same terminal path emits normal `turn/completed` evidence consumed by accepted P1.6.
+
+Binding design from ADR-0015:
+- public interrupt input is only an exact active P1.6 `TurnBinding`; arbitrary IDs and empty-turn-id startup interrupt are forbidden product paths;
+- P1.6 privately retains exact active runtime/client metadata captured at `turn/start` so P1.8 can use that same runtime. P1.8 must not call runtime-manager acquire/rebase for the interrupt;
+- interrupt lives inside the P1.6 turn-lifecycle ownership boundary and reuses the existing collector task. It must never consume notifications independently;
+- at most one interrupt may be in flight per profile/thread key; same-key duplicate is BUSY before dispatch, different runtime keys are independent;
+- exactly one interrupt RPC; no automatic retry;
+- pre-dispatch public cancellation may propagate with zero RPC; after dispatch repeated public cancellation remains attached to the one exact interrupt request;
+- definitive remote rejection with no already-proven terminal target is `TURN_INTERRUPT_REJECTED` and retains only safe numeric remote code;
+- successful RPC plus definitive target collector terminal is `TURN_INTERRUPT_CONFIRMED`;
+- ambiguous/rejected RPC plus already/provably terminal exact target may resolve as `TURN_INTERRUPT_RECONCILED` using only the existing collector evidence;
+- ambiguous RPC plus non-definitive/UNKNOWN target state is `TURN_INTERRUPT_UNKNOWN`;
+- do not wait indefinitely for natural completion after a definitive remote rejection; only an already-completed definitive collector may override rejection into reconciliation;
+- malformed successful interrupt response is ambiguous and raw response data is discarded;
+- capability readiness after accepted P1.8 may change only `TURN_INTERRUPT` to IMPLEMENTED; `THREAD_DELETE` remains NOT_IMPLEMENTED.
 
 ## Execution authority
 Codex must not self-start work from this document.
 
-Only **P1.7 — bidirectional server-request envelope + approval request/response port using a fake operator** is eligible for the next explicit implementation prompt.
+Only **P1.8 — exact active-turn interrupt + terminal reconciliation** is eligible for the next explicit implementation prompt.
 
-P1.7 owns the previously deferred P1.1 inbound `id + method + params` server-request distinction, exact installed approval request parsing, exact response-envelope emission, one-time approval ownership, and fake-operator acceptance tests. It does not authorize real Telegram approval UI, real production approvals, turn interrupt, thread delete, SQLite, systemd, or production deployment.
-
-P1.7 must re-verify the exact installed Codex 0.144.6 schema before implementation. If exact approval request/response shapes or enum values cannot be determined from the installed schema, Codex must stop for architect decision rather than guess.
+P1.8 does not authorize thread deletion, Telegram, SQLite, systemd, production deployment, real production interruption, or application-level approval-state orchestration.
