@@ -29,3 +29,13 @@
 - No Codex business RPC was sent.
 - No production service changed.
 - No architecture document changed.
+
+## Architect repair pass
+
+- Rejected candidate: `6ee87a6fc55957ed035d42990777b409049f3a46`.
+- `CodexRuntimeManager` now requires an injected trusted CodexControl client version. It does not default to, infer from, or send the target app-server version; tests inject `0.1.0-test` and verify the initialize envelope.
+- READY publication is a single manager-lock linearization point: successful initialize, protocol READY, live child, no global shutdown and no profile shutdown reservation are checked before the exact generation changes to READY and becomes current. Event-gated tests cover profile shutdown winning, manager shutdown winning, READY winning before shutdown, and STOPPED never regressing to READY.
+- Explicit profile shutdown reserves the profile and concurrent acquire fails with `profile_stopping`; manager-wide shutdown is terminal.
+- Shutdown has bounded graceful, terminate and kill/reap waits. The named `DEFAULT_KILL_REAP_TIMEOUT_SECONDS` controls the final wait. A timed-out final reap faults the runtime with `kill_reap_timeout`, retains unresolved process ownership and blocks replacement generation creation.
+- The runtime suite has 24 tests. Explicit failure/lifecycle tests include default exec/no-shell, blocked initialize, remote-error cleanup, protocol-fault cleanup, premature initialize exit, post-READY protocol fault, retry after resolved fault, single-flight failure clearing, three clean shutdown paths, kill/reap timeout, and an event-gated stale-watcher/new-generation race.
+- Repair verification: `PYTHONPATH=src python3 -m unittest tests.unit.test_codex_runtime -v` passed (24 tests). This evidence records repair facts only; P1.2 is not architect accepted.
