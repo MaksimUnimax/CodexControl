@@ -12,9 +12,10 @@ from .thread_lifecycle import ThreadBinding, TrustedWorkingDirectory
 MAX_TURN_ID_CHARS=512; MAX_TURN_ITEM_ID_CHARS=512; MAX_TURN_INPUT_CHARS=65536
 MAX_AGENT_MESSAGE_CHARS=1000000; MAX_AGENT_MESSAGES_PER_TURN=256; MAX_TOTAL_AGENT_MESSAGE_CHARS=2000000; MAX_TURN_NOTIFICATIONS=16384
 TURN_START_METHOD="turn/start"
+TURN_INTERRUPT_METHOD="turn/interrupt"
 
 class TurnLifecycleError(Exception):
-    _ALLOWED=frozenset((CodexAdapterErrorCategory.TURN_REQUEST_INVALID,CodexAdapterErrorCategory.TURN_PRECONDITION_CHANGED,CodexAdapterErrorCategory.TURN_OPERATION_BUSY,CodexAdapterErrorCategory.TURN_START_REJECTED,CodexAdapterErrorCategory.TURN_START_UNKNOWN,CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN,CodexAdapterErrorCategory.TURN_TERMINAL_FAILED))
+    _ALLOWED=frozenset((CodexAdapterErrorCategory.TURN_REQUEST_INVALID,CodexAdapterErrorCategory.TURN_PRECONDITION_CHANGED,CodexAdapterErrorCategory.TURN_OPERATION_BUSY,CodexAdapterErrorCategory.TURN_START_REJECTED,CodexAdapterErrorCategory.TURN_START_UNKNOWN,CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN,CodexAdapterErrorCategory.TURN_TERMINAL_FAILED,CodexAdapterErrorCategory.TURN_INTERRUPT_NOT_ACTIVE,CodexAdapterErrorCategory.TURN_INTERRUPT_BUSY))
     def __init__(self, category: CodexAdapterErrorCategory|str)->None:
         try: parsed=CodexAdapterErrorCategory(category)
         except (TypeError,ValueError): parsed=CodexAdapterErrorCategory.TURN_REQUEST_INVALID
@@ -43,16 +44,23 @@ class TurnBinding:
 class AgentMessageCompleted: sequence:int; item_id:str; text:str
 class TurnStartStatus(StrEnum): CONFIRMED="TURN_START_CONFIRMED"; REJECTED="TURN_START_REJECTED"; UNKNOWN="TURN_START_UNKNOWN"
 class TurnTerminalStatus(StrEnum): COMPLETED="COMPLETED"; FAILED="FAILED"; UNKNOWN="UNKNOWN"
+class TurnInterruptStatus(StrEnum): CONFIRMED="CONFIRMED"; RECONCILED="RECONCILED"; REJECTED="REJECTED"; UNKNOWN="UNKNOWN"
 @dataclass(frozen=True)
 class TurnStartResult: status:TurnStartStatus; binding:TurnBinding|None=None; error:CodexAdapterError|None=None
 @dataclass(frozen=True)
 class TurnTerminalResult: binding:TurnBinding; status:TurnTerminalStatus; messages:tuple[AgentMessageCompleted,...]; error:CodexAdapterError|None=None
+@dataclass(frozen=True)
+class TurnInterruptResult:
+    status:TurnInterruptStatus; binding:TurnBinding; terminal_result:TurnTerminalResult|None=None; error:CodexAdapterError|None=None
+@dataclass(frozen=True)
+class _ActiveTurn:
+    binding:TurnBinding; token:object; runtime:Any
 class RuntimeManagerLike(Protocol):
     async def acquire(self,profile_id:str)->Any: ...
 
 class CodexTurnLifecycleAdapter:
     def __init__(self,manager:RuntimeManagerLike,catalog:CodexModelCatalogAdapter)->None:
-        self._manager,self._catalog=manager,catalog; self._lock=asyncio.Lock(); self._active:dict[tuple[str,str],object]={}; self._collectors:dict[TurnBinding,asyncio.Task[TurnTerminalResult]]={}; self._completed:dict[tuple[str,str],tuple[TurnBinding,TurnTerminalResult]]={}
+        self._manager,self._catalog=manager,catalog; self._lock=asyncio.Lock(); self._active:dict[tuple[str,str],object]={}; self._active_turns:dict[TurnBinding,_ActiveTurn]={}; self._interrupts:dict[tuple[str,str],object]={}; self._collectors:dict[TurnBinding,asyncio.Task[TurnTerminalResult]]={}; self._completed:dict[tuple[str,str],tuple[TurnBinding,TurnTerminalResult]]={}
     async def start_turn(self,*,thread_binding:ThreadBinding,model_id:str,reasoning_effort:str|None,user_text:str,working_directory:TrustedWorkingDirectory)->TurnStartResult:
         if not isinstance(thread_binding,ThreadBinding) or not isinstance(model_id,str) or not model_id or "\0" in model_id or not isinstance(working_directory,TrustedWorkingDirectory) or not isinstance(user_text,str) or not user_text or "\0" in user_text or len(user_text)>MAX_TURN_INPUT_CHARS: raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_REQUEST_INVALID)
         key=(thread_binding.profile_id,thread_binding.thread_id); token=object()
@@ -77,6 +85,7 @@ class CodexTurnLifecycleAdapter:
                 if self._active.get(key) is not token:
                     return TurnStartResult(TurnStartStatus.UNKNOWN,error=CodexAdapterError(CodexAdapterErrorCategory.TURN_START_UNKNOWN))
                 self._completed.pop(key,None)
+                self._active_turns[result.binding]=_ActiveTurn(result.binding,token,runtime)
                 self._collectors[result.binding]=asyncio.create_task(self._collect(runtime,result.binding,token))
                 keep=True
             return result
@@ -115,6 +124,71 @@ class CodexTurnLifecycleAdapter:
             if task is None:
                 return completed[1]
         return await asyncio.shield(task)
+    async def _before_interrupt_dispatch(self)->None:
+        """Test seam only: production has no pre-dispatch work."""
+    async def interrupt_turn(self,binding:TurnBinding)->TurnInterruptResult:
+        if not isinstance(binding,TurnBinding): raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_REQUEST_INVALID)
+        key=(binding.profile_id,binding.thread_id); reservation=object()
+        async with self._lock:
+            active=self._active_turns.get(binding)
+            collector=self._collectors.get(binding)
+            # Identity, rather than dataclass equality, rejects reconstructed
+            # values and values owned by a different lifecycle adapter.
+            if active is None or active.binding is not binding or collector is None:
+                raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_INTERRUPT_NOT_ACTIVE)
+            if key in self._interrupts: raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_INTERRUPT_BUSY)
+            self._interrupts[key]=reservation
+        dispatched=asyncio.Event()
+        async def invoke()->Any:
+            await self._before_interrupt_dispatch()
+            dispatched.set()
+            return await active.runtime.client.request(TURN_INTERRUPT_METHOD,{"threadId":binding.thread_id,"turnId":binding.turn_id})
+        request=asyncio.create_task(invoke())
+        try:
+            wire="unknown"
+            while True:
+                try:
+                    response=await asyncio.shield(request)
+                    wire="success" if isinstance(response,dict) else "ambiguous"
+                    break
+                except asyncio.CancelledError:
+                    if request.cancelled(): wire="ambiguous"; break
+                    if not dispatched.is_set():
+                        request.cancel(); await asyncio.gather(request,return_exceptions=True); raise
+                    continue
+                except ProtocolRemoteError as error:
+                    terminal=self._definitive_if_done(collector)
+                    if terminal is not None:return TurnInterruptResult(TurnInterruptStatus.RECONCILED,binding,terminal)
+                    return TurnInterruptResult(TurnInterruptStatus.REJECTED,binding,error=CodexAdapterError(CodexAdapterErrorCategory.TURN_INTERRUPT_REJECTED,remote_code=error.code))
+                except Exception: wire="ambiguous"; break
+            terminal=await self._interrupt_terminal(collector)
+            if wire=="success" and terminal is not None:return TurnInterruptResult(TurnInterruptStatus.CONFIRMED,binding,terminal)
+            if wire!="success" and terminal is not None:return TurnInterruptResult(TurnInterruptStatus.RECONCILED,binding,terminal)
+            return TurnInterruptResult(TurnInterruptStatus.UNKNOWN,binding,error=CodexAdapterError(CodexAdapterErrorCategory.TURN_INTERRUPT_UNKNOWN))
+        finally:
+            # The request is always owned through completion after dispatch;
+            # pre-dispatch cancellation explicitly cancels it above.
+            if dispatched.is_set() and not request.done():
+                while True:
+                    try: await asyncio.shield(request); break
+                    except asyncio.CancelledError: continue
+                    except Exception: break
+            await self._release_interrupt(key,reservation)
+    def _definitive_if_done(self,collector:asyncio.Task[TurnTerminalResult])->TurnTerminalResult|None:
+        if not collector.done() or collector.cancelled(): return None
+        try: result=collector.result()
+        except Exception: return None
+        return result if result.status in (TurnTerminalStatus.COMPLETED,TurnTerminalStatus.FAILED) else None
+    async def _interrupt_terminal(self,collector:asyncio.Task[TurnTerminalResult])->TurnTerminalResult|None:
+        while True:
+            try:
+                result=await asyncio.shield(collector)
+                return result if result.status in (TurnTerminalStatus.COMPLETED,TurnTerminalStatus.FAILED) else None
+            except asyncio.CancelledError: continue
+            except Exception:return None
+    async def _release_interrupt(self,key:tuple[str,str],reservation:object)->None:
+        async with self._lock:
+            if self._interrupts.get(key) is reservation:self._interrupts.pop(key,None)
     async def _collect(self,runtime:Any,binding:TurnBinding,token:object)->TurnTerminalResult:
         messages:list[AgentMessageCompleted]=[]; seen:set[str]=set(); count=0; notification=asyncio.create_task(runtime.client.next_notification()); terminal=asyncio.create_task(runtime.client.wait_terminal()); result=self._unknown(binding,messages)
         try:
@@ -190,4 +264,7 @@ class CodexTurnLifecycleAdapter:
             self._active.pop(key,None)
             if self._collectors.get(binding) is current:
                 self._collectors.pop(binding,None)
+            active=self._active_turns.get(binding)
+            if active is not None and active.token is token:
+                self._active_turns.pop(binding,None)
             self._completed[key]=(binding,result)

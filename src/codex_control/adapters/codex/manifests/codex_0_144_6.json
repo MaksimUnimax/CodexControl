@@ -16,7 +16,7 @@
     "THREAD_RESUME": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "client_requests": ["thread/resume"]},
     "THREAD_DELETE": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["thread/delete"]},
     "TURN_START": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "client_requests": ["turn/start"]},
-    "TURN_INTERRUPT": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["turn/interrupt"]},
+    "TURN_INTERRUPT": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "client_requests": ["turn/interrupt"]},
     "AGENT_MESSAGE_EVENTS": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "server_notifications": ["item/agentMessage/delta", "item/completed"]},
     "TURN_TERMINAL_EVENTS": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "server_notifications": ["turn/completed"]},
     "APPROVAL_SERVER_REQUESTS": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "server_requests": ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "applyPatchApproval", "execCommandApproval"]},

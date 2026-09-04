@@ -72,7 +72,7 @@ class CapabilityManifestTests(unittest.TestCase):
         for term in ("token", "auth", "cookie", "account"): self.assertNotIn(term, text)
     def test_p1_7_approval_capabilities_are_locally_implemented(self):
         manifest = load_manifest()
-        implemented = {CodexCapability.MODEL_LIST, CodexCapability.THREAD_START, CodexCapability.THREAD_RESUME, CodexCapability.TURN_START, CodexCapability.AGENT_MESSAGE_EVENTS, CodexCapability.TURN_TERMINAL_EVENTS, CodexCapability.APPROVAL_SERVER_REQUESTS, CodexCapability.APPROVAL_RESPONSE_SCHEMA}
+        implemented = {CodexCapability.MODEL_LIST, CodexCapability.THREAD_START, CodexCapability.THREAD_RESUME, CodexCapability.TURN_START, CodexCapability.TURN_INTERRUPT, CodexCapability.AGENT_MESSAGE_EVENTS, CodexCapability.TURN_TERMINAL_EVENTS, CodexCapability.APPROVAL_SERVER_REQUESTS, CodexCapability.APPROVAL_RESPONSE_SCHEMA}
         for capability in CodexCapability:
             if capability in implemented:
                 self.assertIs(manifest.capabilities[capability].adapter_implementation, AdapterImplementation.IMPLEMENTED)
