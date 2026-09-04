@@ -65,6 +65,34 @@ class CodexProtocolTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProtocolFault):
             await self.client.respond_server_request(request,{"decision":"decline"})
 
+    async def test_server_request_id_matrix_pending_bound_and_reuse(self):
+        await self._ready()
+        for ident in (0, -(2**63), 2**63-1, "a", "x"*256, " Case Preserved "):
+            self.transport.deliver({"id":ident,"method":"item/commandExecution/requestApproval","params":{}})
+        await asyncio.sleep(0)
+        accepted=[await self.client.next_server_request() for _ in range(6)]
+        self.assertEqual([x.request_id for x in accepted],[0,-(2**63),2**63-1,"a","x"*256," Case Preserved "])
+        for request in accepted: await self.client.respond_server_request(request,{"decision":"decline"})
+        self.transport.deliver({"id":7,"method":"item/commandExecution/requestApproval","params":{}});await asyncio.sleep(0)
+        old=await self.client.next_server_request();await self.client.respond_server_request(old,{"decision":"decline"})
+        self.transport.deliver({"id":7,"method":"item/commandExecution/requestApproval","params":{}});await asyncio.sleep(0)
+        new=await self.client.next_server_request();self.assertNotEqual(old.local_sequence,new.local_sequence)
+        with self.assertRaises(ProtocolFault):await self.client.respond_server_request(old,{"decision":"decline"})
+        await self.client.respond_server_request(new,{"decision":"decline"})
+        self.assertEqual(sum(x.get("id")==7 for x in self.transport.sent),2)
+
+    async def test_invalid_server_ids_and_65th_fault(self):
+        for ident in (True,False,None,1.5,{},[],-(2**63)-1,2**63,"","x"*257,"abc\0def"):
+            transport=FakeLineTransport();client=CodexProtocolClient(transport,client_version="x")
+            init=asyncio.create_task(client.initialize());await asyncio.sleep(0);transport.deliver({"id":1,"result":{"userAgent":"x","codexHome":"/safe","platformFamily":"unix","platformOs":"linux"}});await init
+            transport.deliver({"id":ident,"method":"item/commandExecution/requestApproval","params":{}});await asyncio.sleep(0)
+            self.assertIs(client.state,ProtocolState.FAULTED);self.assertTrue(client._server_requests.empty());await client.close()
+        await self._ready()
+        for ident in range(MAX_PENDING_SERVER_REQUESTS):self.transport.deliver({"id":ident,"method":"item/commandExecution/requestApproval","params":{}})
+        await asyncio.sleep(0);self.assertIs(self.client.state,ProtocolState.READY);self.assertEqual(len(self.client._pending_server),64)
+        self.transport.deliver({"id":64,"method":"item/commandExecution/requestApproval","params":{}});await asyncio.sleep(0)
+        self.assertIs(self.client.state,ProtocolState.FAULTED)
+
     async def test_mixed_envelope_and_pre_ready_server_request_fault(self):
         task=asyncio.create_task(self.client.initialize()); await asyncio.sleep(0)
         self.transport.deliver({"id":9,"method":"item/commandExecution/requestApproval","params":{},"result":{}})

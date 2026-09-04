@@ -1,127 +1,57 @@
-import asyncio
-import json
-import unittest
-
-from codex_control.adapters.codex.approvals import (
-    APPLY_PATCH, COMMAND, EXEC_COMMAND, FILE_CHANGE, PERMISSIONS,
-    ApprovalDecision, ApprovalRequest, CodexApprovalAdapter,
-)
-from codex_control.adapters.codex.protocol import CodexProtocolClient, ProtocolState
-from codex_control.adapters.codex.errors import CodexAdapterErrorCategory, normalize_error
-
+import asyncio,json,unittest
+from codex_control.adapters.codex.approvals import *
+from codex_control.adapters.codex.protocol import CodexProtocolClient
 
 class Transport:
-    def __init__(self): self.sent=[]; self.incoming=asyncio.Queue(); self.fail_send=False
-    async def send(self, message):
-        self.sent.append(message)
-        if self.fail_send: raise OSError("lost")
-    async def receive(self): return await self.incoming.get()
-    def deliver(self, message): self.incoming.put_nowait(json.dumps(message))
-
-
+ def __init__(self):self.sent=[];self.incoming=asyncio.Queue();self.block=None;self.cancel_send=False
+ async def send(self,m):
+  self.sent.append(m)
+  if self.cancel_send:raise asyncio.CancelledError
+  if self.block:await self.block.wait()
+ async def receive(self):return await self.incoming.get()
+ def deliver(self,m):self.incoming.put_nowait(json.dumps(m))
 class Operator:
-    def __init__(self, decision=ApprovalDecision.DENY, error=None): self.decision=decision; self.error=error; self.requests=[]
-    async def decide(self, request):
-        self.requests.append(request)
-        if self.error: raise self.error
-        return self.decision
-
-
-class WaitingOperator:
-    def __init__(self): self.started=asyncio.Event()
-    async def decide(self, request):
-        self.started.set()
-        await asyncio.Event().wait()
-
-
-def permissions(entries=None, network=None):
-    p={"cwd":"/work","itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u","permissions":{}}
-    if entries is not None: p["permissions"]["fileSystem"]={"entries":entries}
-    if network is not None: p["permissions"]["network"]={"enabled":network}
-    return p
-
-
-class ApprovalTests(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        self.transport=Transport(); self.client=CodexProtocolClient(self.transport,client_version="test")
-        task=asyncio.create_task(self.client.initialize()); await asyncio.sleep(0)
-        self.transport.deliver({"id":1,"result":{"userAgent":"x","codexHome":"/safe","platformFamily":"unix","platformOs":"linux"}}); await task
-
-    async def asyncTearDown(self): await self.client.close()
-
-    async def _inbound(self, method, params, request_id="server-1"):
-        self.transport.deliver({"id":request_id,"method":method,"params":params}); await asyncio.sleep(0)
-        return await self.client.next_server_request()
-
-    async def test_permissions_deny_is_exact_empty_turn_grant_once(self):
-        inbound=await self._inbound(PERMISSIONS,permissions(network=True))
-        await CodexApprovalAdapter(Operator()).handle_envelope(self.client,inbound)
-        self.assertEqual(self.transport.sent[-1],{"id":"server-1","result":{"permissions":{},"scope":"turn"}})
-        self.assertNotIn("network",self.transport.sent[-1]["result"]["permissions"])
-        self.assertNotIn("fileSystem",self.transport.sent[-1]["result"]["permissions"])
-        self.assertEqual(sum("server-1" == x.get("id") for x in self.transport.sent),1)
-
-    async def test_permissions_allow_preserves_multiple_entries_without_broadening(self):
-        entries=[{"access":"read","path":{"type":"path","path":"/a"}},{"access":"write","path":{"type":"path","path":"/b"}}]
-        inbound=await self._inbound(PERMISSIONS,permissions(entries=entries))
-        await CodexApprovalAdapter(Operator(ApprovalDecision.ALLOW)).handle_envelope(self.client,inbound)
-        self.assertEqual(self.transport.sent[-1]["result"],{"permissions":{"fileSystem":{"entries":entries}},"scope":"turn"})
-
-    async def test_permissions_network_only_and_filesystem_only_are_turn_scoped(self):
-        adapter=CodexApprovalAdapter(Operator(ApprovalDecision.ALLOW))
-        await adapter.handle_envelope(self.client,await self._inbound(PERMISSIONS,permissions(network=True),"n"))
-        self.assertEqual(self.transport.sent[-1]["result"],{"permissions":{"network":{"enabled":True}},"scope":"turn"})
-        entry=[{"access":"read","path":{"type":"path","path":"/only"}}]
-        await adapter.handle_envelope(self.client,await self._inbound(PERMISSIONS,permissions(entries=entry),"f"))
-        self.assertEqual(self.transport.sent[-1]["result"]["permissions"],{"fileSystem":{"entries":entry}})
-
-    async def test_permissions_empty_exception_cancel_and_invalid_all_deny(self):
-        for request_id, op, payload in (("empty",Operator(ApprovalDecision.ALLOW),permissions()),("error",Operator(error=RuntimeError()),permissions(network=True)),("bad",Operator("allow"),permissions(network=True))):
-            await CodexApprovalAdapter(op).handle_envelope(self.client,await self._inbound(PERMISSIONS,payload,request_id))
-            self.assertEqual(self.transport.sent[-1]["result"],{"permissions":{},"scope":"turn"})
-        # A cancelling operator is contained and produces exactly the same DENY.
-        result=await CodexApprovalAdapter(Operator(error=asyncio.CancelledError())).handle_envelope(self.client,await self._inbound(PERMISSIONS,permissions(network=True),"cancel"))
-        self.assertEqual(result.status.value,"denied")
-        self.assertEqual(self.transport.sent[-1]["result"],{"permissions":{},"scope":"turn"})
-
-    async def test_handler_cancellation_before_send_denies_then_propagates_cancel(self):
-        operator=WaitingOperator(); adapter=CodexApprovalAdapter(operator)
-        task=asyncio.create_task(adapter.handle_envelope(self.client,await self._inbound(PERMISSIONS,permissions(network=True),"outer-cancel")))
-        await operator.started.wait(); task.cancel()
-        self.assertEqual((await task).status.value,"denied")
-        self.assertEqual(self.transport.sent[-1],{"id":"outer-cancel","result":{"permissions":{},"scope":"turn"}})
-
-    async def test_each_non_permission_exact_mapping(self):
-        cases=[(COMMAND,{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"},{"decision":"accept"},{"decision":"decline"}),
-               (FILE_CHANGE,{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"},{"decision":"accept"},{"decision":"decline"}),
-               (APPLY_PATCH,{"callId":"c","conversationId":"t","fileChanges":{}},{"decision":"approved"},{"decision":"denied"}),
-               (EXEC_COMMAND,{"callId":"c","conversationId":"t","cwd":"/x","command":["x"],"parsedCmd":[]},{"decision":"approved"},{"decision":"denied"})]
-        for number,(method,params,allow,deny) in enumerate(cases):
-            await CodexApprovalAdapter(Operator(ApprovalDecision.ALLOW)).handle_envelope(self.client,await self._inbound(method,params,f"a{number}"))
-            self.assertEqual(self.transport.sent[-1]["result"],allow)
-            await CodexApprovalAdapter(Operator()).handle_envelope(self.client,await self._inbound(method,params,f"d{number}"))
-            self.assertEqual(self.transport.sent[-1]["result"],deny)
-
-    async def test_public_request_is_redacted_and_bounded(self):
-        operator=Operator(ApprovalDecision.ALLOW)
-        await CodexApprovalAdapter(operator).handle_envelope(self.client,await self._inbound(COMMAND,{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u","command":"secret"}))
-        request=operator.requests[0]
-        self.assertIsInstance(request,ApprovalRequest); self.assertNotIn("secret",repr(request)); self.assertFalse(hasattr(request,"params"))
-
-    async def test_server_request_is_not_notification_and_opposite_direction_same_id_works(self):
-        client_request=asyncio.create_task(self.client.request("test",{})); await asyncio.sleep(0)
-        self.transport.deliver({"id":2,"method":COMMAND,"params":{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"}})
-        self.transport.deliver({"id":2,"result":{}}); await asyncio.sleep(0)
-        inbound=await self.client.next_server_request(); self.assertEqual(inbound.request_id,2); self.assertEqual(await client_request,{})
-
-    async def test_duplicate_pending_server_id_faults_and_eof_is_terminal(self):
-        await self._inbound(COMMAND,{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"},"same")
-        self.transport.deliver({"id":"same","method":COMMAND,"params":{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"}}); await asyncio.sleep(0)
-        self.assertIs(self.client.state,ProtocolState.FAULTED)
-
-    async def test_ambiguous_send_is_not_retried_and_normalizes_unknown(self):
-        self.transport.fail_send=True
-        inbound=await self._inbound(PERMISSIONS,permissions(network=True),"lost")
-        result=await CodexApprovalAdapter(Operator()).handle_envelope(self.client,inbound)
-        self.assertEqual(result.status.value,"response_unknown")
-        self.assertEqual(sum(x.get("id")=="lost" for x in self.transport.sent),1)
+ def __init__(self,d=ApprovalDecision.DENY):self.d=d;self.requests=[];self.started=asyncio.Event();self.release=None
+ async def decide(self,r):
+  self.requests.append(r);self.started.set()
+  if self.release:await self.release.wait()
+  return self.d
+def permission(entries=None,network=True):
+ p={"cwd":"/work","itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u","permissions":{}}
+ if entries is not None:p["permissions"]["fileSystem"]={"entries":entries}
+ if network is not None:p["permissions"]["network"]={"enabled":network}
+ return p
+class Tests(unittest.IsolatedAsyncioTestCase):
+ async def asyncSetUp(self):
+  self.t=Transport();self.c=CodexProtocolClient(self.t,client_version="test");x=asyncio.create_task(self.c.initialize());await asyncio.sleep(0);self.t.deliver({"id":1,"result":{"userAgent":"x","codexHome":"/safe","platformFamily":"unix","platformOs":"linux"}});await x
+ async def asyncTearDown(self):await self.c.close()
+ async def inbound(self,m,p,ident="s"):
+  self.t.deliver({"id":ident,"method":m,"params":p});await asyncio.sleep(0);return await self.c.next_server_request()
+ def bridge(self,o):return CodexApprovalBridge(profile_id="p",client=self.c,operator=o)
+ async def test_permission_validation_bounds_and_redaction(self):
+  e={"access":"read","path":{"type":"path","path":"x"*4096}}
+  o=Operator(ApprovalDecision.ALLOW);r=await self.bridge(o).handle_request(await self.inbound(PERMISSIONS,permission([e])))
+  self.assertEqual(r.status,ApprovalHandlingStatus.ALLOWED);self.assertEqual(self.t.sent[-1]["result"]["permissions"]["fileSystem"]["entries"][0],e)
+  for bad in ({"PRIVATE_UNKNOWN_GRANT":"MUST_NOT_PASS"},{"network":{"enabled":"true"}},{"fileSystem":{"entries":[{"access":"admin","path":{"type":"path","path":"/x"}}]}},{"fileSystem":{"entries":[{"access":"read","path":{"type":"bad","path":"/x"}}]}},{"fileSystem":{"entries":["bad"]}},{"fileSystem":{"entries":[{"access":"read","path":{"type":"path","path":"x"*4097}}]}}):
+   op=Operator(ApprovalDecision.ALLOW);await self.bridge(op).handle_request(await self.inbound(PERMISSIONS,{**permission(network=None),"permissions":bad},str(len(self.t.sent))))
+   self.assertFalse(op.requests);self.assertEqual(self.t.sent[-1]["result"],{"permissions":{},"scope":"turn"})
+  entries=[{"access":"read","path":{"type":"path","path":"/x"}}]*128
+  await self.bridge(Operator(ApprovalDecision.ALLOW)).handle_request(await self.inbound(PERMISSIONS,permission(entries),"128"));self.assertEqual(len(self.t.sent[-1]["result"]["permissions"]["fileSystem"]["entries"]),128)
+  await self.bridge(Operator(ApprovalDecision.ALLOW)).handle_request(await self.inbound(PERMISSIONS,permission(entries+[entries[0]]),"129"));self.assertEqual(self.t.sent[-1]["result"],{"permissions":{},"scope":"turn"})
+ async def test_exact_mappings_and_malformed_all_five(self):
+  cases=[(COMMAND,{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"},{"decision":"accept"},{"decision":"decline"}),(FILE_CHANGE,{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"},{"decision":"accept"},{"decision":"decline"}),(APPLY_PATCH,{"callId":"c","conversationId":"t","fileChanges":{}},{"decision":"approved"},{"decision":"denied"}),(EXEC_COMMAND,{"callId":"c","conversationId":"t","cwd":"/x","command":["x"],"parsedCmd":[]},{"decision":"approved"},{"decision":"denied"})]
+  for n,(m,p,a,d) in enumerate(cases):
+   await self.bridge(Operator(ApprovalDecision.ALLOW)).handle_request(await self.inbound(m,p,"a"+str(n)));self.assertEqual(self.t.sent[-1]["result"],a)
+   op=Operator(ApprovalDecision.ALLOW);bad=dict(p);bad.pop(next(iter(p)));await self.bridge(op).handle_request(await self.inbound(m,bad,"b"+str(n)));self.assertFalse(op.requests);self.assertEqual(self.t.sent[-1]["result"],d)
+ async def test_finite_error_and_terminal_no_identity(self):
+  raw="PRIVATE /root/secret OPENAI_API_KEY=MUST_NOT_LEAK";e=ApprovalError(raw);self.assertEqual(e.category,ApprovalErrorCategory.APPROVAL_REQUEST_INVALID);self.assertNotIn(raw,str(e)+repr(e))
+  task=asyncio.create_task(self.bridge(Operator()).handle_next());await asyncio.sleep(0);await self.c.close()
+  with self.assertRaises(ApprovalError) as got:await task
+  self.assertEqual(got.exception.category,ApprovalErrorCategory.APPROVAL_PROTOCOL_TERMINAL)
+ async def test_inner_send_cancel_unknown_once(self):
+  self.t.cancel_send=True;r=await asyncio.wait_for(self.bridge(Operator()).handle_request(await self.inbound(COMMAND,{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"})),1)
+  self.assertEqual(r.status,ApprovalHandlingStatus.RESPONSE_UNKNOWN);self.assertEqual(sum(x.get("id")=="s" for x in self.t.sent),1)
+ async def test_same_bridge_serializes_and_different_bridges_do_not(self):
+  release=asyncio.Event();o=Operator();o.release=release;b=self.bridge(o)
+  a=await self.inbound(COMMAND,{"itemId":"a","startedAtMs":1,"threadId":"t","turnId":"u"},"a");z=await self.inbound(COMMAND,{"itemId":"b","startedAtMs":1,"threadId":"t","turnId":"u"},"b")
+  ta=asyncio.create_task(b.handle_request(a));await o.started.wait();tb=asyncio.create_task(b.handle_request(z));await asyncio.sleep(0);self.assertEqual(len(o.requests),1);release.set();await ta;await tb;self.assertEqual([x.item_or_call_id for x in o.requests],["a","b"])

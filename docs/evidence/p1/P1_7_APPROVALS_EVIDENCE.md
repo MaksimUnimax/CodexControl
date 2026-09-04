@@ -37,3 +37,25 @@ Focused checks passed:
 - `python -m compileall -q src` — passed.
 
 Focused approval coverage proves exact permissions DENY; ALLOW with multiple filesystem entries; network-only and filesystem-only mappings; empty request/operator exception/operator cancellation/invalid decision denial; all other approval method allow/deny maps; redaction; opposite-direction same-ID support; duplicate pending server ID rejection; and ambiguous send one-attempt normalization.
+
+## Architect second repair pass
+
+Candidate requiring second repair: `042143c0d816508fc0aa919a433db6f9d422b1e9`.
+
+The earlier statement that this candidate already used a fully “bounded, immutable,
+validated projection” was incorrect: its permissions ALLOW path used a raw
+`deepcopy` of the request grant. This repair replaces it with an exact-version
+structured normalizer for `RequestPermissionProfile`/`GrantedPermissionProfile`,
+including 4096-character permission values, 128 aggregate entries, exact access
+values and filesystem-path variants. Unknown/malformed/no-op grants deny without
+operator projection; ALLOW is reconstructed only from normalized values and is
+always turn-scoped.
+
+The repair also removes the unbound compatibility adapter, makes approval errors
+and result error categories finite, repairs owned response-task cancellation
+(including inner cancellation -> UNKNOWN), owns repeated pre-send cancellation,
+and raises protocol-terminal before ownership without invented metadata. The
+fixture now records all five installed request/response schemas and complete
+decision alternatives. Same-runtime bridge handling is serialized while distinct
+bridges have independent locks. This is implementation evidence only and does
+not claim architect acceptance.

@@ -1,6 +1,7 @@
 import unittest
 from codex_control.adapters.codex.errors import *
 from codex_control.adapters.codex.protocol import ProtocolFault, ProtocolRemoteError
+from codex_control.adapters.codex.approvals import ApprovalError, ApprovalErrorCategory
 from codex_control.adapters.codex.runtime import RuntimeErrorSafe
 from codex_control.adapters.codex.subprocess_transport import SubprocessTransportError
 from codex_control.adapters.codex.version_probe import VersionProbeError
@@ -10,6 +11,15 @@ from codex_control.adapters.codex.thread_lifecycle import ThreadLifecycleError
 from codex_control.adapters.codex.turn_lifecycle import TurnLifecycleError
 
 class ErrorTests(unittest.TestCase):
+    def test_approval_errors_are_finite_and_normalization_is_total(self):
+        for category in ApprovalErrorCategory:
+            self.assertEqual(normalize_error(ApprovalError(category)).category, CodexAdapterErrorCategory(category.value))
+        private="PRIVATE /root/secret OPENAI_API_KEY=MUST_NOT_LEAK"
+        error=ApprovalError(private)
+        normalized=normalize_error(error)
+        self.assertEqual(normalized.category, CodexAdapterErrorCategory.APPROVAL_REQUEST_INVALID)
+        self.assertNotIn(private, str(error)+repr(error)+str(normalized)+repr(normalized))
+        self.assertFalse(hasattr(normalized,"retryable")); self.assertFalse(hasattr(normalized,"safe_to_retry"))
     def test_protocol_and_remote_are_safe(self):
         self.assertEqual(normalize_error(ProtocolFault("raw")).category, CodexAdapterErrorCategory.PROTOCOL_FAULT)
         self.assertEqual(normalize_error(ProtocolRemoteError(42)).remote_code, 42)

@@ -26,7 +26,7 @@ def normalize_error(error: BaseException) -> CodexAdapterError:
     if isinstance(error, ApprovalResponseUnknown): return CodexAdapterError(CodexAdapterErrorCategory.APPROVAL_RESPONSE_UNKNOWN)
     if isinstance(error, ApprovalError):
         mapping={"approval_request_invalid":CodexAdapterErrorCategory.APPROVAL_REQUEST_INVALID,"approval_decision_invalid":CodexAdapterErrorCategory.APPROVAL_DECISION_INVALID,"approval_operation_busy":CodexAdapterErrorCategory.APPROVAL_OPERATION_BUSY,"approval_protocol_terminal":CodexAdapterErrorCategory.APPROVAL_PROTOCOL_TERMINAL,"approval_response_unknown":CodexAdapterErrorCategory.APPROVAL_RESPONSE_UNKNOWN}
-        return CodexAdapterError(mapping[error.category])
+        return CodexAdapterError(mapping.get(error.category.value, CodexAdapterErrorCategory.APPROVAL_REQUEST_INVALID))
     # This lazy exact-type import avoids the reverse module-initialization
     # dependency: thread_lifecycle imports this module's categories.
     from .thread_lifecycle import ThreadLifecycleError
