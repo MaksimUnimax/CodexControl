@@ -1,0 +1,33 @@
+# P1.7 approval request/response implementation evidence
+
+Base: `c7e01209b746c7c0bd2e677124c5bff228fad643`; branch: `impl-p1-7-approvals-2026-09-04`.
+
+## Installed schema verification
+
+Read-only verification used `/usr/local/bin/codex --version` and `/usr/local/bin/codex app-server generate-json-schema --out <new temporary directory>`. The observed CLI was `codex-cli 0.144.6`; SHA-256 of the generated `codex_app_server_protocol.schemas.json` was `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`.
+
+The schema's request ID is exactly string or signed integer. The five server-to-client approval methods are `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/permissions/requestApproval`, `applyPatchApproval`, and `execCommandApproval`. Their exact response schemas are respectively `CommandExecutionRequestApprovalResponse`, `FileChangeRequestApprovalResponse`, `PermissionsRequestApprovalResponse`, `ApplyPatchApprovalResponse`, and `ExecCommandApprovalResponse`.
+
+For `PermissionsRequestApprovalResponse`, `permissions` is required and references `GrantedPermissionProfile`; the exact profile fields are `fileSystem` and `network`. `scope` is optional with default `turn` and exact values `turn` and `session`. `strictAutoReview` is optional and nullable. There is no permissions binary decision enum.
+
+The secret-free fixture `tests/fixtures/codex_app_server_0_144_6/approval_protocol.json` records both these installed-schema facts and the semantic authority separately. It does not claim the generated schema itself defines empty permissions as denial.
+
+## ADR-bound permissions semantics
+
+The original `P1_7_DECISION_MAPPING_STOP` correctly found that the installed schema had no binary permissions decision enum. ADR-0014 resolved only that ambiguity using exact-version Codex behavior from tag `rust-v0.144.6`, upstream commit `5d1fbf26c43abc65a203928b2e31561cb039e06d`.
+
+That evidence establishes that an empty `GrantedPermissionProfile` becomes an empty core permission profile and that exact-version review logic classifies empty permissions as Denied. Therefore P1.7 DENY emits the valid installed wire result `{"permissions":{},"scope":"turn"}`. ALLOW emits only a bounded, immutable, validated projection of the current request profile with scope `turn`; it never selects session scope, adds a network grant, adds filesystem access, upgrades access, or invents a path/glob/special permission. Empty, malformed, oversized, operator-error, invalid-decision, and pre-send-cancellation permission paths deny fail closed. `strictAutoReview` is omitted.
+
+## Implementation and checks
+
+The protocol classifier now separates `id + method + params` server requests from client responses, preserves exact string/integer request IDs, has a bounded pending server-request queue (128), permits same IDs in opposite directions, rejects duplicate pending server IDs, and leaves notifications on their separate queue. Each inbound approval ID has one response-attempt owner. A send failure is `APPROVAL_RESPONSE_UNKNOWN`; no resend or replacement DENY is attempted. EOF with an unanswered server request faults terminally.
+
+`CodexApprovalAdapter` is fake-operator-only. Its public `ApprovalRequest` has finite opaque identity fields and no raw parameter payload in its representation. Command/file-change ALLOW/DENY maps to `accept`/`decline`; apply-patch/exec-command maps to `approved`/`denied`.
+
+Focused checks passed:
+
+- `PYTHONPATH=src python -m unittest tests.unit.test_codex_approvals tests.unit.test_codex_protocol tests.unit.test_codex_capabilities tests.unit.test_codex_errors` — 56 tests.
+- `PYTHONPATH=src python -m unittest discover -s tests -p 'test_*.py'` — 166 tests. The existing P1.6 suite emits pending-task shutdown warnings but exits successfully.
+- `python -m compileall -q src` — passed.
+
+Focused approval coverage proves exact permissions DENY; ALLOW with multiple filesystem entries; network-only and filesystem-only mappings; empty request/operator exception/operator cancellation/invalid decision denial; all other approval method allow/deny maps; redaction; opposite-direction same-ID support; duplicate pending server ID rejection; and ambiguous send one-attempt normalization.

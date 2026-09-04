@@ -19,7 +19,7 @@
     "TURN_INTERRUPT": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "client_requests": ["turn/interrupt"]},
     "AGENT_MESSAGE_EVENTS": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "server_notifications": ["item/agentMessage/delta", "item/completed"]},
     "TURN_TERMINAL_EVENTS": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "server_notifications": ["turn/completed"]},
-    "APPROVAL_SERVER_REQUESTS": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "server_requests": ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "applyPatchApproval", "execCommandApproval"]},
-    "APPROVAL_RESPONSE_SCHEMA": {"installed_schema_support": "PRESENT", "adapter_implementation": "NOT_IMPLEMENTED", "approval_response_schemas": ["CommandExecutionRequestApprovalResponse", "FileChangeRequestApprovalResponse", "PermissionsRequestApprovalResponse", "ApplyPatchApprovalResponse", "ExecCommandApprovalResponse"]}
+    "APPROVAL_SERVER_REQUESTS": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "server_requests": ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "applyPatchApproval", "execCommandApproval"]},
+    "APPROVAL_RESPONSE_SCHEMA": {"installed_schema_support": "PRESENT", "adapter_implementation": "IMPLEMENTED", "approval_response_schemas": ["CommandExecutionRequestApprovalResponse", "FileChangeRequestApprovalResponse", "PermissionsRequestApprovalResponse", "ApplyPatchApprovalResponse", "ExecCommandApprovalResponse"]}
   }
 }

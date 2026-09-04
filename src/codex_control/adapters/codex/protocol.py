@@ -38,6 +38,13 @@ class ProtocolRemoteError(ProtocolError):
         super().__init__("remote_error")
 
 
+class ProtocolApprovalResponseUnknown(ProtocolError):
+    """A server-request response was attempted but its delivery is unknown."""
+
+    def __init__(self) -> None:
+        super().__init__("approval_response_unknown")
+
+
 class CodexProtocolClient:
     """P1.1 client; it owns protocol state but never starts a process."""
 
@@ -48,6 +55,11 @@ class CodexProtocolClient:
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._completed_ids: set[int] = set()
+        # Server request IDs are a separate direction: an app-server request
+        # may legitimately use the same ID as an outstanding client request.
+        self._pending_server_ids: set[str | int] = set()
+        self._responded_server_ids: set[str | int] = set()
+        self._server_requests: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=128)
         self._notifications: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._reader_task: asyncio.Task[None] | None = None
         self._terminal = asyncio.Event()
@@ -90,6 +102,26 @@ class CodexProtocolClient:
     async def next_notification(self) -> dict[str, Any]:
         return await self._notifications.get()
 
+    async def next_server_request(self) -> dict[str, Any]:
+        """Return one inbound request, preserving its exact schema-valid ID."""
+        return await self._server_requests.get()
+
+    async def respond_to_server_request(self, request_id: str | int, result: dict[str, Any]) -> None:
+        """Make exactly one response attempt for an inbound server request.
+
+        A failed write is deliberately terminal.  The caller must not retry or
+        substitute another decision because the peer may have received it.
+        """
+        if request_id not in self._pending_server_ids or request_id in self._responded_server_ids:
+            raise ProtocolFault("server_response_not_owned")
+        self._responded_server_ids.add(request_id)
+        self._pending_server_ids.remove(request_id)
+        try:
+            await self._transport.send({"id": request_id, "result": result})
+        except Exception:
+            self._fault("approval_response_unknown")
+            raise ProtocolApprovalResponseUnknown() from None
+
     async def wait_terminal(self) -> ProtocolState:
         """Wait for a closed or faulted client without exposing wire content."""
         await self._terminal.wait()
@@ -130,8 +162,8 @@ class CodexProtocolClient:
             while self._state not in (ProtocolState.CLOSED, ProtocolState.FAULTED):
                 line = await self._transport.receive()
                 if line is None:
-                    if self._pending:
-                        self._fault("eof_pending")
+                    if self._pending or self._pending_server_ids:
+                        self._fault("eof_pending_server_request" if self._pending_server_ids else "eof_pending")
                     elif self._state not in (ProtocolState.CLOSED, ProtocolState.FAULTED):
                         self._state = ProtocolState.CLOSED
                         self._terminal.set()
@@ -151,6 +183,10 @@ class CodexProtocolClient:
         if not isinstance(message, dict):
             self._fault("invalid_envelope")
             return
+        # An id+method envelope is an inbound server request, not a response.
+        if "id" in message and "method" in message:
+            self._handle_server_request(message)
+            return
         if "id" in message:
             self._handle_response(message)
             return
@@ -158,6 +194,30 @@ class CodexProtocolClient:
             self._notifications.put_nowait(message)
             return
         self._fault("invalid_envelope")
+
+    def _handle_server_request(self, message: dict[str, Any]) -> None:
+        request_id = message.get("id")
+        method = message.get("method")
+        if (not isinstance(method, str) or not method or
+                not self._valid_request_id(request_id) or "params" not in message):
+            self._fault("invalid_server_request")
+            return
+        if request_id in self._pending_server_ids or request_id in self._responded_server_ids:
+            self._fault("duplicate_server_request_id")
+            return
+        if len(self._pending_server_ids) >= 128:
+            self._fault("server_request_limit")
+            return
+        self._pending_server_ids.add(request_id)
+        try:
+            self._server_requests.put_nowait(message)
+        except asyncio.QueueFull:
+            self._fault("server_request_limit")
+
+    @staticmethod
+    def _valid_request_id(value: Any) -> bool:
+        return ((isinstance(value, int) and not isinstance(value, bool)) or
+                (isinstance(value, str) and len(value) <= 512))
 
     def _handle_response(self, message: dict[str, Any]) -> None:
         response_id = message.get("id")

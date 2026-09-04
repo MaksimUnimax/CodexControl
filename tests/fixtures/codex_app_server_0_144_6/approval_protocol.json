@@ -1,0 +1,8 @@
+{
+  "codex_version": "codex-cli 0.144.6",
+  "schema_sha256": "40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466",
+  "server_requests": ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "applyPatchApproval", "execCommandApproval"],
+  "responses": {"command": "CommandExecutionRequestApprovalResponse", "file_change": "FileChangeRequestApprovalResponse", "permissions": "PermissionsRequestApprovalResponse", "apply_patch": "ApplyPatchApprovalResponse", "exec_command": "ExecCommandApprovalResponse"},
+  "permissions_schema_facts": {"required": ["permissions"], "granted_profile_fields": ["fileSystem", "network"], "scope_values": ["turn", "session"], "strictAutoReview": "optional_nullable", "decision_enum": false},
+  "permissions_semantic_authority": {"permissions_deny_semantics_source": "ADR-0014 + exact Codex rust-v0.144.6 behavior", "permissions_deny_shape": {"permissions": {}, "scope": "turn"}, "permissions_allow_policy": "exact request-derived grant only", "session_scope_allowed_by_product": false}
+}

@@ -13,6 +13,7 @@ class CodexAdapterErrorCategory(str, Enum):
     CONFIGURATION="configuration"; UNSUPPORTED_CODEX_VERSION="unsupported_codex_version"; VERSION_PROBE_FAILURE="version_probe_failure"; CAPABILITY_MANIFEST_INVALID="capability_manifest_invalid"; REQUIRED_CAPABILITY_MISSING="required_capability_missing"; RUNTIME_UNAVAILABLE="runtime_unavailable"; PROFILE_STOPPING="profile_stopping"; MANAGER_SHUTTING_DOWN="manager_shutting_down"; UNRESOLVED_PROCESS="unresolved_process"; RUNTIME_SHUTDOWN_FAILURE="runtime_shutdown_failure"; PROTOCOL_FAULT="protocol_fault"; REMOTE_APP_SERVER_ERROR="remote_app_server_error"; TRANSPORT_FAULT="transport_fault"; MODEL_CATALOG_INVALID="model_catalog_invalid"; MODEL_NOT_AVAILABLE="model_not_available"; REASONING_EFFORT_UNSUPPORTED="reasoning_effort_unsupported"; TIMEOUT="timeout"; INTERNAL="internal"
     THREAD_REQUEST_INVALID="thread_request_invalid"; THREAD_PRECONDITION_CHANGED="thread_precondition_changed"; THREAD_OPERATION_BUSY="thread_operation_busy"; THREAD_START_REJECTED="thread_start_rejected"; THREAD_START_UNKNOWN="thread_start_unknown"; THREAD_RESUME_REJECTED="thread_resume_rejected"; THREAD_RESUME_UNKNOWN="thread_resume_unknown"
     TURN_REQUEST_INVALID="turn_request_invalid"; TURN_PRECONDITION_CHANGED="turn_precondition_changed"; TURN_OPERATION_BUSY="turn_operation_busy"; TURN_START_REJECTED="turn_start_rejected"; TURN_START_UNKNOWN="turn_start_unknown"; TURN_STREAM_UNKNOWN="turn_stream_unknown"; TURN_TERMINAL_FAILED="turn_terminal_failed"
+    APPROVAL_REQUEST_INVALID="approval_request_invalid"; APPROVAL_RESPONSE_UNKNOWN="approval_response_unknown"
 @dataclass(frozen=True)
 class CodexAdapterError(Exception):
     category: CodexAdapterErrorCategory; profile_id: str | None = None; remote_code: int | None = None
@@ -21,6 +22,8 @@ class CodexAdapterError(Exception):
 
 def normalize_error(error: BaseException) -> CodexAdapterError:
     if isinstance(error, CodexAdapterError): return error
+    from .approvals import ApprovalResponseUnknown
+    if isinstance(error, ApprovalResponseUnknown): return CodexAdapterError(CodexAdapterErrorCategory.APPROVAL_RESPONSE_UNKNOWN)
     # This lazy exact-type import avoids the reverse module-initialization
     # dependency: thread_lifecycle imports this module's categories.
     from .thread_lifecycle import ThreadLifecycleError
