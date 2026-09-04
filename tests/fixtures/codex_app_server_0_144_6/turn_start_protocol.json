@@ -1,0 +1,16 @@
+{
+  "codex_version": "0.144.6",
+  "schema_sha256": "40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466",
+  "turn_start_method": "turn/start",
+  "turn_start_parameter_fields": ["personality", "approvalPolicy", "approvalsReviewer", "clientUserMessageId", "serviceTier", "cwd", "effort", "threadId", "input", "model", "summary", "outputSchema", "sandboxPolicy"],
+  "turn_start_required_fields": ["input", "threadId"],
+  "thread_id_request_field": "threadId",
+  "plain_text_input_source_shape": {"type": "text", "text": "string"},
+  "model_wire_field": "model",
+  "reasoning_effort_field": "effort",
+  "cwd_field": "cwd",
+  "approval_field": "approvalPolicy:on-request",
+  "sandbox_field": "sandboxPolicy:{type:workspaceWrite}",
+  "config_field": "absent",
+  "turn_id_result_path": "turn.id"
+}

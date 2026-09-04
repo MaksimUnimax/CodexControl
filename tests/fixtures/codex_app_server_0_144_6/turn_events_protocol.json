@@ -1,0 +1,17 @@
+{
+  "codex_version": "0.144.6",
+  "schema_sha256": "40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466",
+  "agent_message_delta_method": "item/agentMessage/delta",
+  "agent_message_delta_identity_paths": ["threadId", "turnId", "itemId"],
+  "agent_message_delta_text_path": "delta",
+  "item_completed_method": "item/completed",
+  "completed_item_identity_paths": ["threadId", "turnId", "item.id"],
+  "agent_message_discriminator": "item.type=agentMessage",
+  "agent_message_completed_text_path": "item.text",
+  "turn_terminal_method": "turn/completed",
+  "terminal_identity_paths": ["threadId", "turn.id"],
+  "terminal_status_path": "turn.status",
+  "terminal_status_values": ["completed", "interrupted", "failed", "inProgress"],
+  "success_status_set": ["completed"],
+  "failure_status_set": ["interrupted", "failed"]
+}

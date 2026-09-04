@@ -7,6 +7,7 @@ from codex_control.adapters.codex.version_probe import VersionProbeError
 from codex_control.adapters.codex.capabilities import CapabilityManifestError
 from codex_control.adapters.codex.model_catalog import ModelCatalogError
 from codex_control.adapters.codex.thread_lifecycle import ThreadLifecycleError
+from codex_control.adapters.codex.turn_lifecycle import TurnLifecycleError
 
 class ErrorTests(unittest.TestCase):
     def test_protocol_and_remote_are_safe(self):
@@ -83,3 +84,7 @@ class ErrorTests(unittest.TestCase):
         rendered = str(unsafe) + repr(unsafe) + str(normalized) + repr(normalized)
         self.assertEqual(normalized.category, CodexAdapterErrorCategory.THREAD_REQUEST_INVALID)
         self.assertNotIn("PRIVATE /root/secret", rendered)
+
+    def test_turn_lifecycle_errors_normalize_exactly(self):
+        for category in (CodexAdapterErrorCategory.TURN_REQUEST_INVALID, CodexAdapterErrorCategory.TURN_PRECONDITION_CHANGED, CodexAdapterErrorCategory.TURN_OPERATION_BUSY, CodexAdapterErrorCategory.TURN_START_REJECTED, CodexAdapterErrorCategory.TURN_START_UNKNOWN, CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN, CodexAdapterErrorCategory.TURN_TERMINAL_FAILED):
+            self.assertEqual(normalize_error(TurnLifecycleError(category)).category, category)
