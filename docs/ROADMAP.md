@@ -10,13 +10,13 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P0.5 Codex executor authority and documentation structure.
 
 ## P1 — Codex app-server adapter (no Telegram/production)
-- [NEXT] P1.1 exact 0.144.6 stdio protocol fixtures/types + initialize handshake.
-- [PLANNED] P1.2 child supervisor + per-profile single-flight runtime manager.
+- [DONE] P1.1 exact 0.144.6 stdio protocol fixtures/types + initialize handshake. Accepted implementation: `7f013ff2950bc185d6f0991c11960311961e53a7`.
+- [NEXT] P1.2 child supervisor + per-profile single-flight runtime manager.
 - [PLANNED] P1.3 capability probe + normalized errors.
 - [PLANNED] P1.4 authenticated model/list normalization/cache.
 - [PLANNED] P1.5 thread start/resume.
 - [PLANNED] P1.6 turn start + ordered user-visible agent-message/terminal handling.
-- [PLANNED] P1.7 approval request/response port using fake operator.
+- [PLANNED] P1.7 bidirectional server-request envelope + approval request/response port using fake operator.
 - [PLANNED] P1.8 interrupt.
 - [PLANNED] P1.9 thread/delete + ambiguity handling.
 - [PLANNED] P1.10 T0/T1/T2 acceptance; no real production conversation.
