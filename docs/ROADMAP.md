@@ -11,8 +11,8 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 
 ## P1 — Codex app-server adapter (no Telegram/production)
 - [DONE] P1.1 exact 0.144.6 stdio protocol fixtures/types + initialize handshake. Accepted implementation: `7f013ff2950bc185d6f0991c11960311961e53a7`.
-- [NEXT] P1.2 child supervisor + per-profile single-flight runtime manager.
-- [PLANNED] P1.3 capability probe + normalized errors.
+- [DONE] P1.2 child supervisor + per-profile single-flight runtime manager. Accepted implementation head: `f3acf2d4cf8c793d0c576ca3cd576eb3d0513ab9` after architect rejection/repair of earlier candidates `6ee87a6fc55957ed035d42990777b409049f3a46` and `cf753ecb38f2c5aa9d400bd69524f097e505d0e0`.
+- [NEXT] P1.3 installed-capability manifest/probe + normalized adapter/runtime error taxonomy.
 - [PLANNED] P1.4 authenticated model/list normalization/cache.
 - [PLANNED] P1.5 thread start/resume.
 - [PLANNED] P1.6 turn start + ordered user-visible agent-message/terminal handling.
