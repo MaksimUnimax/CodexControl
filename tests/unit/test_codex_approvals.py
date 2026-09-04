@@ -81,3 +81,51 @@ class Tests(unittest.IsolatedAsyncioTestCase):
   self.assertEqual(set(facts["permissions_nested_schema"]["entry"]["access"]),{"read","write","deny"})
   self.assertEqual(set(facts["parsed_command_schema"]["variants"]),{"read","list_files","search","unknown"})
   self.assertEqual(set(facts["legacy_file_change_schema"]["variants"]),{"add","delete","update"})
+
+ def test_approval_fixture_binds_every_method_and_adr_separation(self):
+  facts=json.loads((Path(__file__).parents[1]/"fixtures"/"codex_app_server_0_144_6"/"approval_protocol.json").read_text())
+  self.assertEqual(facts["schema_sha256"],"40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466")
+  expected={COMMAND:("CommandExecutionRequestApprovalParams","CommandExecutionRequestApprovalResponse","accept","decline"),FILE_CHANGE:("FileChangeRequestApprovalParams","FileChangeRequestApprovalResponse","accept","decline"),PERMISSIONS:("PermissionsRequestApprovalParams","PermissionsRequestApprovalResponse","validated request-derived grant + scope turn",{"permissions":{},"scope":"turn"}),APPLY_PATCH:("ApplyPatchApprovalParams","ApplyPatchApprovalResponse","approved","denied"),EXEC_COMMAND:("ExecCommandApprovalParams","ExecCommandApprovalResponse","approved","denied")}
+  self.assertEqual(set(facts["method_schemas"]),set(expected))
+  for method,(request,response,allow,deny) in expected.items():
+   item=facts["method_schemas"][method];self.assertEqual(item["request"],request);self.assertEqual(item["response"],response);self.assertTrue(item["properties"]);self.assertTrue(item["required"]);self.assertTrue(item["identity"]);self.assertTrue(item["context"]);self.assertTrue(item["response_required"]);self.assertEqual(item["allow"],allow);self.assertEqual(item["deny"],deny);self.assertTrue(item["session_allow_present"])
+   if method!=PERMISSIONS:self.assertTrue(item["decision"])
+  self.assertFalse(facts["permissions_schema_facts"]["decision_enum"]);self.assertEqual(facts["permissions_semantic_authority"]["permissions_deny_shape"],{"permissions":{},"scope":"turn"});self.assertFalse(facts["permissions_semantic_authority"]["session_scope_allowed_by_product"])
+
+ async def test_handle_next_cancel_before_ownership_cleans_waiters_and_preserves_request(self):
+  entered=asyncio.Event(); original=self.c.next_server_request
+  async def observed_get():
+   entered.set();return await original()
+  self.c.next_server_request=observed_get
+  bridge=self.bridge(Operator())
+  old=asyncio.create_task(bridge.handle_next());await entered.wait()
+  old.cancel()
+  with self.assertRaises(asyncio.CancelledError):await old
+  self.assertFalse(any(not task.done() for task in self.c._server_requests._getters))
+  self.t.deliver({"id":"future","method":COMMAND,"params":{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"}})
+  fresh=asyncio.create_task(bridge.handle_next())
+  result=await fresh
+  self.assertEqual(result.wire_request_id,"future");self.assertEqual(sum(x.get("id")=="future" for x in self.t.sent),1)
+
+ async def test_foreign_direct_request_is_rejected_before_projection(self):
+  other_t=Transport();other=CodexProtocolClient(other_t,client_version="test")
+  init=asyncio.create_task(other.initialize());await asyncio.sleep(0);other_t.deliver({"id":1,"result":{"userAgent":"x","codexHome":"/safe","platformFamily":"unix","platformOs":"linux"}});await init
+  other_t.deliver({"id":"foreign","method":COMMAND,"params":{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"}});await asyncio.sleep(0)
+  foreign=await other.next_server_request();op=Operator(ApprovalDecision.ALLOW)
+  with self.assertRaises(ApprovalError) as caught:await self.bridge(op).handle_request(foreign)
+  self.assertEqual(caught.exception.category,ApprovalErrorCategory.APPROVAL_REQUEST_INVALID);self.assertFalse(op.requests);self.assertFalse(any(x.get("id")=="foreign" for x in self.t.sent))
+  await other.close()
+
+ async def test_post_send_repeated_cancellation_keeps_single_owned_response(self):
+  for n,(decision,expected) in enumerate(((ApprovalDecision.ALLOW,"accept"),(ApprovalDecision.DENY,"decline"))):
+   started=asyncio.Event();release=asyncio.Event();self.t.block=release
+   old_send=self.t.send
+   async def gated(message):
+    self.t.sent.append(message)
+    if message.get("id")=="post":started.set();await release.wait()
+   self.t.send=gated
+   task=asyncio.create_task(self.bridge(Operator(decision)).handle_request(await self.inbound(COMMAND,{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"},"post")))
+   await started.wait();task.cancel();task.cancel();self.assertFalse(task.done());release.set()
+   result=await task;self.assertEqual(result.status,ApprovalHandlingStatus.ALLOWED if decision is ApprovalDecision.ALLOW else ApprovalHandlingStatus.DENIED)
+   self.assertEqual(self.t.sent[-1]["result"],{"decision":expected});self.assertEqual(sum(x.get("id")=="post" for x in self.t.sent),n+1)
+   self.t.send=old_send;self.t.block=None

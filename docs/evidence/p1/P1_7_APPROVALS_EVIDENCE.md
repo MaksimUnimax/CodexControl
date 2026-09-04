@@ -75,3 +75,29 @@ legacy exec-command context contains bounded argv. Event-gated terminal send,
 envelope, pre-READY, no-op permissions, parsed-command, patch redaction, argv,
 and context-bound tests were added. This evidence does not claim architect
 acceptance.
+## Architect fourth repair pass
+
+Candidate requiring repair: `907fcbb15196041c7ff89cc3458a0a6fdd4efb56`.
+
+This repair closes the public `handle_next` pre-ownership cancellation helper
+cleanup path and makes direct request handling verify exact bound-client
+ownership before operator projection.  It also records deterministic focused
+proofs for pre-ownership cancellation preserving a future request, foreign
+request rejection, repeated post-send cancellation ownership, reconstructed
+request rejection, EOF with a pending server request, and fixture binding.
+
+The bridge retains direct handling only as a testable bounded-client API:
+foreign, stale, and reconstructed requests fail locally before normalization or
+operator projection.  A pre-send cancellation flag is carried through operator
+and terminal cleanup; it is rechecked immediately before creating the exact
+response task and forces DENY.
+
+The protocol fixture asserts installed version/schema, envelopes, ID authority,
+five methods, 64-request bound and directional namespaces.  The approval
+fixture asserts all five request/response schema records, decision selections,
+session-alternative presence, nested schema facts, and ADR-0014 behavioral
+separation.  Existing tests retain all-five normalization/malformed-deny,
+redaction, context-bound, permission, response ambiguity and capability
+coverage.  Final exact test counts are recorded by the executor report after
+the required regression commands; this evidence does not claim architect
+acceptance.

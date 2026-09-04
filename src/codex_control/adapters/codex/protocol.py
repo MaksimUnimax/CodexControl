@@ -64,6 +64,14 @@ class CodexProtocolClient:
         return await self._send_request(method,params)
     async def next_notification(self)->dict[str,Any]: return await self._notifications.get()
     async def next_server_request(self)->InboundServerRequest: return await self._server_requests.get()
+    def owns_server_request(self, request: InboundServerRequest) -> bool:
+        """Return whether this exact live request object belongs to this client.
+
+        This is deliberately identity based: a reconstructed object (or an
+        object from another runtime) is never an authority to project an
+        approval or emit a response.
+        """
+        return isinstance(request, InboundServerRequest) and self._pending_server.get(request.request_id) is request
     async def respond_server_request(self,request:InboundServerRequest,result:dict[str,Any])->None:
         if not isinstance(request,InboundServerRequest) or self._pending_server.get(request.request_id) is not request: raise ProtocolFault("server_response_not_owned")
         if self._state is not ProtocolState.READY: raise ProtocolApprovalResponseUnknown()

@@ -277,6 +277,29 @@ class CodexProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(facts["jsonrpc_field_on_wire"])
         self.assertEqual(facts["initialized_notification"], {"method": "initialized"})
 
+    def test_server_request_fixture_is_bound_to_protocol_contract(self):
+        fixture = Path(__file__).parents[1] / "fixtures" / "codex_app_server_0_144_6" / "server_request_protocol.json"
+        facts = json.loads(fixture.read_text())
+        self.assertEqual(facts["codex_version"], "codex-cli 0.144.6")
+        self.assertEqual(facts["schema_sha256"], "40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466")
+        self.assertEqual(facts["request_envelope"]["required"], ["id", "method", "params"])
+        self.assertEqual(facts["response_envelope"]["required"], ["id", "result"])
+        self.assertTrue(facts["request_envelope"]["jsonrpc_absent"]); self.assertTrue(facts["response_envelope"]["jsonrpc_absent"])
+        self.assertEqual(facts["request_id"], {"types":["string","integer"],"integer_format":"int64","string_architect_bound":256})
+        self.assertEqual(set(facts["accepted_methods"]), set(__import__("codex_control.adapters.codex.protocol", fromlist=["APPROVAL_SERVER_REQUEST_METHODS"]).APPROVAL_SERVER_REQUEST_METHODS))
+        self.assertEqual(facts["max_pending_server_requests"], MAX_PENDING_SERVER_REQUESTS); self.assertTrue(facts["directional_id_namespaces"])
+
+    async def test_reconstructed_unknown_response_and_eof_pending_server_request(self):
+        await self._ready()
+        self.transport.deliver({"id": "owned", "method": "item/commandExecution/requestApproval", "params": {}}); await asyncio.sleep(0)
+        owned = await self.client.next_server_request()
+        rebuilt = InboundServerRequest(owned.local_sequence, owned.request_id, owned.method, owned._params)
+        with self.assertRaises(ProtocolFault): await self.client.respond_server_request(rebuilt, {"decision":"decline"})
+        with self.assertRaises(ProtocolFault): await self.client.respond_server_request(InboundServerRequest(99,"unknown",owned.method,owned._params), {"decision":"decline"})
+        self.assertFalse(any(x.get("id") in ("owned", "unknown") for x in self.transport.sent))
+        self.transport.eof(); await asyncio.sleep(0)
+        self.assertIs(self.client.state, ProtocolState.FAULTED)
+
 
 if __name__ == "__main__":
     unittest.main()

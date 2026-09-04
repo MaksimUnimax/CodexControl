@@ -120,6 +120,16 @@ async def _join(task:asyncio.Task[Any])->None:
         except Exception:break
     try:task.result()
     except (asyncio.CancelledError,Exception):pass
+async def _cancel_and_join_observing(task:asyncio.Task[Any], cancelled:list[bool])->None:
+    """Join a helper while retaining public cancellation as a fact."""
+    task.cancel()
+    while not task.done():
+        try: await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if asyncio.current_task().cancelling(): cancelled[0]=True
+        except Exception: break
+    try: task.result()
+    except (asyncio.CancelledError,Exception): pass
 
 class CodexApprovalBridge:
     def __init__(self,*,profile_id:str,client:CodexProtocolClient,operator:AsyncApprovalOperator)->None:
@@ -132,31 +142,67 @@ class CodexApprovalBridge:
     async def handle_next(self)->ApprovalHandlingResult:
         async with self._lock:
             get=asyncio.create_task(self.client.next_server_request());term=asyncio.create_task(self.client.wait_terminal())
-            done,_=await asyncio.wait((get,term),return_when=asyncio.FIRST_COMPLETED)
+            try:
+                done,_=await asyncio.wait((get,term),return_when=asyncio.FIRST_COMPLETED)
+            except asyncio.CancelledError:
+                # A cancellation that races a completed dequeue transfers
+                # ownership; otherwise neither helper may outlive us.
+                if get.done() and not get.cancelled():
+                    try: inbound=get.result()
+                    except Exception:
+                        term.cancel(); await _join(term); raise
+                    seq,kind=self._metadata(inbound)
+                    term.cancel();await _join(term)
+                    return await self._handle(inbound,seq,kind,[True])
+                get.cancel();term.cancel();await _join(get);await _join(term)
+                raise
             if get in done:
                 inbound=get.result();seq,kind=self._metadata(inbound)
-                if term in done:return ApprovalHandlingResult(ApprovalHandlingStatus.RESPONSE_UNKNOWN,self.profile_id,seq,inbound.request_id,kind,ApprovalErrorCategory.APPROVAL_PROTOCOL_TERMINAL)
-                term.cancel();await _join(term);return await self._handle(inbound,seq,kind)
-            get.cancel();await _join(get);raise ApprovalError(ApprovalErrorCategory.APPROVAL_PROTOCOL_TERMINAL)
+                if term in done:
+                    term.cancel();await _join(term)
+                    return ApprovalHandlingResult(ApprovalHandlingStatus.RESPONSE_UNKNOWN,self.profile_id,seq,inbound.request_id,kind,ApprovalErrorCategory.APPROVAL_PROTOCOL_TERMINAL)
+                cancelled=[False]
+                await _cancel_and_join_observing(term,cancelled)
+                return await self._handle(inbound,seq,kind,cancelled)
+            get.cancel();term.cancel();await _join(get);await _join(term);raise ApprovalError(ApprovalErrorCategory.APPROVAL_PROTOCOL_TERMINAL)
     async def handle_request(self,inbound:InboundServerRequest)->ApprovalHandlingResult:
         async with self._lock:
+            if not self.client.owns_server_request(inbound):
+                raise ApprovalError(ApprovalErrorCategory.APPROVAL_REQUEST_INVALID)
             seq,kind=self._metadata(inbound);return await self._handle(inbound,seq,kind)
-    async def _handle(self,inbound:InboundServerRequest,seq:int,kind:ApprovalKind)->ApprovalHandlingResult:
+    async def _handle(self,inbound:InboundServerRequest,seq:int,kind:ApprovalKind,cancelled:list[bool]|None=None)->ApprovalHandlingResult:
+        # This mutable flag is intentionally carried through every pre-send
+        # await.  Once ownership exists, public cancellation is fail-closed.
+        if cancelled is None: cancelled=[False]
         try:request,grant,effective=self._normalize(inbound,seq,kind)
-        except ValueError:return await self._send(inbound,seq,kind,ApprovalDecision.DENY,None,ApprovalErrorCategory.APPROVAL_REQUEST_INVALID)
-        if kind is ApprovalKind.PERMISSIONS and not effective:return await self._send(inbound,seq,kind,ApprovalDecision.DENY,None,ApprovalErrorCategory.APPROVAL_REQUEST_INVALID)
+        except ValueError:return await self._send(inbound,seq,kind,ApprovalDecision.DENY,None,ApprovalErrorCategory.APPROVAL_REQUEST_INVALID,cancelled)
+        if kind is ApprovalKind.PERMISSIONS and not effective:return await self._send(inbound,seq,kind,ApprovalDecision.DENY,None,ApprovalErrorCategory.APPROVAL_REQUEST_INVALID,cancelled)
         op=asyncio.create_task(self._operator.decide(request));terminal=asyncio.create_task(self.client.wait_terminal());decision=ApprovalDecision.DENY;done=set()
         try:
             while True:
                 try:done,_=await asyncio.wait((op,terminal),return_when=asyncio.FIRST_COMPLETED);break
-                except asyncio.CancelledError:op.cancel();await _join(op);break
+                except asyncio.CancelledError:
+                    cancelled[0]=True;op.cancel();await _join(op);break
             if terminal in done:
                 op.cancel();await _join(op);return ApprovalHandlingResult(ApprovalHandlingStatus.RESPONSE_UNKNOWN,self.profile_id,seq,inbound.request_id,kind,ApprovalErrorCategory.APPROVAL_PROTOCOL_TERMINAL)
             try:
                 if op.result() is ApprovalDecision.ALLOW:decision=ApprovalDecision.ALLOW
             except (asyncio.CancelledError,Exception):pass
-        finally:terminal.cancel();await _join(terminal)
-        return await self._send(inbound,seq,kind,decision,grant,None)
+        finally:
+            terminal.cancel()
+            # _join intentionally consumes repeated public cancellation, but
+            # it must still change the decision before the wire task exists.
+            while not terminal.done():
+                try: await asyncio.shield(terminal)
+                except asyncio.CancelledError:
+                    # A cancelled terminal helper also raises here.  Only the
+                    # public task's cancellation state is a fail-closed input.
+                    if asyncio.current_task().cancelling(): cancelled[0]=True
+                except Exception: break
+            try: terminal.result()
+            except (asyncio.CancelledError,Exception): pass
+        if cancelled[0]: decision=ApprovalDecision.DENY
+        return await self._send(inbound,seq,kind,decision,grant,None,cancelled)
     def _normalize(self,inbound:InboundServerRequest,seq:int,kind:ApprovalKind)->tuple[ApprovalRequest,dict[str,Any]|None,bool]:
         p=inbound._params_copy()
         if not isinstance(p,dict):raise ValueError
@@ -205,7 +251,8 @@ class CodexApprovalBridge:
         elif kind=="search":
             for key in ("query","path"):
                 if key in v and v[key] is not None:_schema_string(v[key])
-    async def _send(self,inbound:InboundServerRequest,seq:int,kind:ApprovalKind,decision:ApprovalDecision,grant:dict[str,Any]|None,error:ApprovalErrorCategory|None)->ApprovalHandlingResult:
+    async def _send(self,inbound:InboundServerRequest,seq:int,kind:ApprovalKind,decision:ApprovalDecision,grant:dict[str,Any]|None,error:ApprovalErrorCategory|None,cancelled:list[bool]|None=None)->ApprovalHandlingResult:
+        if cancelled is not None and cancelled[0]: decision=ApprovalDecision.DENY
         result={"permissions":grant if decision is ApprovalDecision.ALLOW and grant is not None else {},"scope":"turn"} if kind is ApprovalKind.PERMISSIONS else {"decision":("accept" if decision is ApprovalDecision.ALLOW else "decline") if kind in (ApprovalKind.COMMAND_EXECUTION,ApprovalKind.FILE_CHANGE) else ("approved" if decision is ApprovalDecision.ALLOW else "denied")}
         task=asyncio.create_task(self.client.respond_server_request(inbound,result))
         while True:
