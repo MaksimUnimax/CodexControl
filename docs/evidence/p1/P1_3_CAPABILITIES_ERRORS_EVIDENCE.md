@@ -40,3 +40,13 @@
 - A temporary `pip install --no-deps --target` isolated package-resource check loaded the JSON manifest successfully.
 
 No Codex business RPC was sent, no production `CODEX_HOME` was used, no production service changed, and no architecture document changed.
+
+## Architect repair pass
+
+- Rejected candidate: `692188aca05fd270399ba3625f4bac5f18a58613`.
+- Regenerated installed schema in a new `/tmp/codex-p1-3-repair.*` directory. SHA-256: `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466` (matches the established authority).
+- The version-specific loader now structurally parses then validates embedded `codex_cli_version == 0.144.6` and the exact authority SHA. Focused tests mutate valid-looking input to a foreign version and foreign valid SHA and prove authority-layer rejection.
+- Probe cleanup retains exact unresolved child ownership after bounded terminate/kill/reap failure, starts one passive exact-exit watcher, blocks a later probe on that instance, and clears ownership after observed late exit. Concurrent active probes fail as `version_probe_busy`; tests prove no second factory spawn and no automatic retry/signalling.
+- `CapabilityManifestError("unsupported_codex_version")` now normalizes to `UNSUPPORTED_CODEX_VERSION`; manifest version/SHA mismatches normalize to `CAPABILITY_MANIFEST_INVALID`. Cleanup-unresolved and busy remain safe version-probe diagnostics with no stderr/environment exposure or retry decision.
+- Exact installed agent-message lifecycle notifications found: `item/agentMessage/delta`, `item/completed`. The manifest logical `AGENT_MESSAGE_EVENTS` now includes both. Exact installed terminal-turn notification found: `turn/completed` only. Confirmed approval server requests: `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/permissions/requestApproval`, `applyPatchApproval`, `execCommandApproval`.
+- Verification: `PYTHONPATH=src python3 -m unittest tests.unit.test_codex_capabilities -v` (14 passed); `PYTHONPATH=src python3 -m unittest tests.unit.test_codex_errors -v` (10 passed); `PYTHONPATH=src python3 -m unittest tests.unit.test_codex_version_probe -v` (12 passed); runtime (27 passed); protocol (16 passed); full discovery (83 passed); compileall and import passed. Package-resource loading outside repository cwd is covered directly by the capability suite.

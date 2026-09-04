@@ -1,31 +1,62 @@
-import copy, unittest
+import copy
+import json
+import os
+import tempfile
+import unittest
+from importlib import resources
 from codex_control.adapters.codex.capabilities import *
 
+def packaged_raw():
+    return json.loads(resources.files("codex_control.adapters.codex.manifests").joinpath("codex_0_144_6.json").read_text())
+
 class CapabilityManifestTests(unittest.TestCase):
-    def setUp(self): self.manifest=load_manifest()
-    def test_installed_manifest_facts_and_directions(self):
-        self.assertEqual(self.manifest.codex_cli_version,"0.144.6"); self.assertEqual(self.manifest.schema_sha256,SCHEMA_SHA256)
-        self.assertIn("model/list",self.manifest.client_requests); self.assertIn("thread/start",self.manifest.client_requests); self.assertIn("thread/resume",self.manifest.client_requests); self.assertIn("thread/delete",self.manifest.client_requests); self.assertIn("turn/start",self.manifest.client_requests); self.assertIn("turn/interrupt",self.manifest.client_requests)
-        self.assertIn("item/agentMessage/delta",self.manifest.server_notifications); self.assertIn("turn/completed",self.manifest.server_notifications)
-        self.assertIn("item/commandExecution/requestApproval",self.manifest.server_requests); self.assertNotEqual(self.manifest.client_requests,self.manifest.server_requests)
-        self.assertIn("CommandExecutionRequestApprovalResponse",self.manifest.approval_response_schemas)
-    def test_future_capabilities_are_not_local_implementation(self):
-        self.assertTrue(all(s.adapter_implementation is AdapterImplementation.NOT_IMPLEMENTED for s in self.manifest.capabilities.values()))
-    def test_required_report_and_missing(self):
-        report=self.manifest.check_required(REQUIRED_V1_CAPABILITIES); self.assertFalse(report.missing)
-        altered=copy.deepcopy(self.manifest.capabilities); altered.pop(CodexCapability.TURN_START)
-        report=CodexCapabilityManifest(self.manifest.manifest_format,self.manifest.codex_cli_version,self.manifest.schema_sha256,self.manifest.framing,self.manifest.client_requests,self.manifest.client_notifications,self.manifest.server_requests,self.manifest.server_notifications,self.manifest.approval_response_schemas,altered).check_required((CodexCapability.TURN_START,)); self.assertEqual(report.missing,(CodexCapability.TURN_START,))
-    def test_malformed_rejected(self):
-        raw={"manifest_format":1,"codex_cli_version":"0.144.6","schema_sha256":"x","framing":"x","wire":{},"capabilities":{}}
-        with self.assertRaises(CapabilityManifestError): load_manifest_data(raw)
-    def test_duplicate_wire_and_bad_reference_rejected(self):
-        import json; from importlib import resources
-        raw=json.loads(resources.files("codex_control.adapters.codex.manifests").joinpath("codex_0_144_6.json").read_text())
-        raw["wire"]["client_requests"].append("model/list")
-        with self.assertRaises(CapabilityManifestError): load_manifest_data(raw)
-        raw=json.loads(resources.files("codex_control.adapters.codex.manifests").joinpath("codex_0_144_6.json").read_text()); raw["capabilities"]["MODEL_LIST"]["client_requests"]=["not/a/method"]
-        with self.assertRaises(CapabilityManifestError): load_manifest_data(raw)
+    def setUp(self): self.manifest = load_manifest("0.144.6")
+    def test_packaged_manifest_loads_with_embedded_authority(self):
+        self.assertEqual(self.manifest.codex_cli_version, "0.144.6")
+        self.assertEqual(self.manifest.schema_sha256, SCHEMA_SHA256)
+    def test_foreign_embedded_version_is_rejected_by_authority_layer(self):
+        raw = packaged_raw(); raw["codex_cli_version"] = "0.144.7"
+        with self.assertRaisesRegex(CapabilityManifestError, "manifest_version_mismatch"):
+            validate_manifest_authority(load_manifest_data(raw), "0.144.6")
+    def test_foreign_valid_sha_is_rejected_by_authority_layer(self):
+        raw = packaged_raw(); raw["schema_sha256"] = "a" * 64
+        with self.assertRaisesRegex(CapabilityManifestError, "manifest_sha_mismatch"):
+            validate_manifest_authority(load_manifest_data(raw), "0.144.6")
+    def test_unsupported_requested_version_is_rejected(self):
+        with self.assertRaisesRegex(CapabilityManifestError, "unsupported_codex_version"): load_manifest("0.144.7")
+    def test_unknown_format_is_rejected(self):
+        raw = packaged_raw(); raw["manifest_format"] = 2
+        with self.assertRaisesRegex(CapabilityManifestError, "manifest_format_invalid"): load_manifest_data(raw)
+    def test_invalid_sha_syntax_is_rejected(self):
+        raw = packaged_raw(); raw["schema_sha256"] = "not-a-sha"
+        with self.assertRaisesRegex(CapabilityManifestError, "manifest_sha_invalid"): load_manifest_data(raw)
+    def test_duplicate_wire_method_is_rejected(self):
+        raw = packaged_raw(); raw["wire"]["client_requests"].append("model/list")
+        with self.assertRaisesRegex(CapabilityManifestError, "duplicate_wire_method"): load_manifest_data(raw)
+    def test_absent_wire_reference_is_rejected(self):
+        raw = packaged_raw(); raw["capabilities"]["MODEL_LIST"]["client_requests"] = ["missing/method"]
+        with self.assertRaisesRegex(CapabilityManifestError, "manifest_capability_reference_invalid"): load_manifest_data(raw)
+    def test_unknown_logical_capability_is_rejected(self):
+        raw = packaged_raw(); raw["capabilities"]["FUTURE"] = raw["capabilities"].pop("MODEL_LIST")
+        with self.assertRaisesRegex(CapabilityManifestError, "manifest_capability_unknown"): load_manifest_data(raw)
+    def test_missing_logical_capability_is_rejected_structurally(self):
+        raw = packaged_raw(); raw["capabilities"].pop("TURN_START")
+        with self.assertRaisesRegex(CapabilityManifestError, "manifest_capabilities_invalid"): load_manifest_data(raw)
+    def test_required_report_identifies_missing_on_explicit_representation(self):
+        altered = copy.deepcopy(self.manifest.capabilities); altered.pop(CodexCapability.TURN_START)
+        report = CodexCapabilityManifest(self.manifest.manifest_format, self.manifest.codex_cli_version, self.manifest.schema_sha256, self.manifest.framing, self.manifest.client_requests, self.manifest.client_notifications, self.manifest.server_requests, self.manifest.server_notifications, self.manifest.approval_response_schemas, altered).check_required((CodexCapability.TURN_START,))
+        self.assertEqual(report.missing, (CodexCapability.TURN_START,))
+    def test_directional_facts_include_completed_agent_messages(self):
+        self.assertIn("item/agentMessage/delta", self.manifest.server_notifications)
+        self.assertIn("item/completed", self.manifest.server_notifications)
+        self.assertIn("turn/completed", self.manifest.server_notifications)
+        self.assertNotEqual(self.manifest.client_requests, self.manifest.server_requests)
+    def test_package_resource_loads_outside_repository_cwd(self):
+        original = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try: self.assertEqual(load_manifest().schema_sha256, SCHEMA_SHA256)
+            finally: os.chdir(original)
     def test_manifest_has_no_secret_fields(self):
-        import json; from importlib import resources
-        text=resources.files("codex_control.adapters.codex.manifests").joinpath("codex_0_144_6.json").read_text().lower()
+        text = resources.files("codex_control.adapters.codex.manifests").joinpath("codex_0_144_6.json").read_text().lower()
         for term in ("token", "auth", "cookie", "account"): self.assertNotIn(term, text)

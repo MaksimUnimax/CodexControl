@@ -25,7 +25,9 @@ def normalize_error(error: BaseException) -> CodexAdapterError:
         mapping={"executable_invalid":CodexAdapterErrorCategory.CONFIGURATION,"profile_stopping":CodexAdapterErrorCategory.PROFILE_STOPPING,"manager_shutting_down":CodexAdapterErrorCategory.MANAGER_SHUTTING_DOWN,"unresolved_process":CodexAdapterErrorCategory.UNRESOLVED_PROCESS,"kill_reap_timeout":CodexAdapterErrorCategory.RUNTIME_SHUTDOWN_FAILURE}
         return CodexAdapterError(mapping.get(error.category,CodexAdapterErrorCategory.RUNTIME_UNAVAILABLE), profile_id=error.profile_id)
     if isinstance(error, CapabilityManifestError):
-        category=CodexAdapterErrorCategory.REQUIRED_CAPABILITY_MISSING if error.category in {"required_capability_missing","unsupported_codex_version"} else CodexAdapterErrorCategory.CAPABILITY_MANIFEST_INVALID
+        if error.category == "unsupported_codex_version": category=CodexAdapterErrorCategory.UNSUPPORTED_CODEX_VERSION
+        elif error.category == "required_capability_missing": category=CodexAdapterErrorCategory.REQUIRED_CAPABILITY_MISSING
+        else: category=CodexAdapterErrorCategory.CAPABILITY_MANIFEST_INVALID
         return CodexAdapterError(category)
     if isinstance(error, VersionProbeError):
         if error.category == "executable_invalid": category=CodexAdapterErrorCategory.CONFIGURATION

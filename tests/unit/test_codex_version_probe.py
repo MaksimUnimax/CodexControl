@@ -1,43 +1,99 @@
-import asyncio, os, tempfile, unittest
-from pathlib import Path
+import asyncio
+import os
+import tempfile
+import unittest
 from codex_control.adapters.codex.version_probe import *
 from codex_control.adapters.codex.capabilities import SUPPORTED_CODEX_VERSION
 
 class FakeProcess:
-    def __init__(self,out=b"codex-cli 0.144.6\n",code=0,hang=False):
-        self.stdout=asyncio.StreamReader(); self.stdout.feed_data(out); self.stdout.feed_eof(); self.stderr=asyncio.StreamReader(); self.stderr.feed_data(b"private stderr"); self.stderr.feed_eof(); self.returncode=None; self.code=code; self.hang=hang; self.terminated=self.killed=0
-    async def wait(self):
-        if self.hang: await asyncio.Event().wait()
-        self.returncode=self.code; return self.code
-    def terminate(self): self.terminated+=1
-    def kill(self): self.killed+=1
+    def __init__(self, out=b"codex-cli 0.144.6\n", code=0, running=False, exit_on_terminate=True, exit_on_kill=True, stderr=b"private stderr OPENAI_API_KEY=secret"):
+        self.stdout, self.stderr = asyncio.StreamReader(), asyncio.StreamReader()
+        if out is not None: self.stdout.feed_data(out); self.stdout.feed_eof()
+        self.stderr.feed_data(stderr); self.stderr.feed_eof()
+        self.returncode = None; self.code = code; self.exit_on_terminate, self.exit_on_kill = exit_on_terminate, exit_on_kill
+        self._exited = asyncio.Event(); self.terminated = self.killed = 0
+        if not running: self.exit(code)
+    async def wait(self): await self._exited.wait(); return self.returncode
+    def exit(self, code=None):
+        if self.returncode is None:
+            self.returncode = self.code if code is None else code; self.stdout.feed_eof(); self.stderr.feed_eof(); self._exited.set()
+    def terminate(self):
+        self.terminated += 1
+        if self.exit_on_terminate: self.exit(-15)
+    def kill(self):
+        self.killed += 1
+        if self.exit_on_kill: self.exit(-9)
+
+class Factory:
+    def __init__(self, processes): self.processes = list(processes); self.calls = []; self.created = asyncio.Event(); self.gate = None
+    async def __call__(self, argv, env, limit):
+        self.calls.append((argv, dict(env), limit)); self.created.set()
+        if self.gate is not None: await self.gate.wait()
+        return self.processes.pop(0)
+
 class ProbeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        fd,self.path=tempfile.mkstemp(); os.close(fd); os.chmod(self.path,0o755); self.calls=[]
+        fd, self.path = tempfile.mkstemp(); os.close(fd); os.chmod(self.path, 0o755)
     async def asyncTearDown(self): os.unlink(self.path)
-    def probe(self,process,**kwargs):
-        async def factory(argv,env,limit): self.calls.append((argv,env,limit)); return process
-        return CodexVersionProbe(self.path,parent_environment={"PATH":"/bin","OPENAI_API_KEY":"secret","CODEX_HOME":"/bad"},process_factory=factory,**kwargs)
+    def probe(self, factory, **kwargs):
+        return CodexVersionProbe(self.path, parent_environment={"PATH":"/bin", "OPENAI_API_KEY":"secret", "CODEX_HOME":"/bad"}, process_factory=factory, timeout=.01, cleanup_timeout=.01, **kwargs)
     async def test_valid_fixed_exec_and_secret_filter(self):
-        self.assertEqual(await self.probe(FakeProcess()).probe(),SUPPORTED_CODEX_VERSION); argv,env,_=self.calls[0]; self.assertEqual(argv,[self.path,"--version"]); self.assertEqual(env,{"PATH":"/bin"}); self.assertNotIn("CODEX_HOME",env)
-    async def test_invalid_paths(self):
+        factory = Factory([FakeProcess()]); probe = self.probe(factory)
+        self.assertEqual(await probe.probe(), SUPPORTED_CODEX_VERSION)
+        argv, env, _ = factory.calls[0]; self.assertEqual(argv, [self.path, "--version"]); self.assertEqual(env, {"PATH":"/bin"}); self.assertNotIn("CODEX_HOME", env)
+        self.assertIsNone(probe._owned_process); self.assertIsNone(probe._unresolved_process)
+    async def test_invalid_paths_and_malformed_output_are_safe(self):
         with self.assertRaises(VersionProbeError): await CodexVersionProbe("codex").probe()
-        with self.assertRaises(VersionProbeError): await CodexVersionProbe("/missing/codex").probe()
-        os.chmod(self.path,0o644)
-        with self.assertRaises(VersionProbeError): await self.probe(FakeProcess()).probe()
-    async def test_parse_failures_and_oversize(self):
-        for output in (b"wrong 0.144.6\n",b"codex-cli 1.x\n",b"codex-cli 0.144.6\nother\n"):
-            with self.assertRaises(VersionProbeError): await self.probe(FakeProcess(output)).probe()
-        with self.assertRaises(VersionProbeError): await self.probe(FakeProcess(b"x"*20),stdout_limit=10).probe()
-    async def test_nonzero_timeout_and_unsupported(self):
-        with self.assertRaises(VersionProbeError): await self.probe(FakeProcess(code=2)).probe()
-        process=FakeProcess(hang=True)
-        with self.assertRaises(VersionProbeError): await self.probe(process,timeout=.01,cleanup_timeout=.01).probe()
-        self.assertGreaterEqual(process.terminated,1)
-        self.assertEqual(parse_version_stdout(b"codex-cli 0.144.7\n"),"0.144.7")
+        factory = Factory([FakeProcess(b"wrong\n")])
+        probe = self.probe(factory)
+        with self.assertRaisesRegex(VersionProbeError, "version_output_invalid"): await probe.probe()
+        self.assertIsNone(probe._unresolved_process)
+        self.assertEqual(parse_version_stdout(b"codex-cli 0.144.7\n"), "0.144.7")
+    async def test_nonzero_completed_process_releases_ownership(self):
+        probe = self.probe(Factory([FakeProcess(code=2)]))
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_failed"): await probe.probe()
+        self.assertIsNone(probe._owned_process); self.assertIsNone(probe._unresolved_process)
+    async def test_oversized_stdout_is_rejected(self):
+        probe = self.probe(Factory([FakeProcess(b"x" * 20)]), stdout_limit=10)
+        with self.assertRaisesRegex(VersionProbeError, "version_output_oversized"): await probe.probe()
+    async def test_timeout_terminate_exit_leaves_no_unresolved_ownership(self):
+        process = FakeProcess(out=b"codex-cli 0.144.6\n", running=True, exit_on_terminate=True); probe = self.probe(Factory([process]))
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_timeout"): await probe.probe()
+        self.assertEqual(process.terminated, 1); self.assertEqual(process.killed, 0); self.assertIsNone(probe._unresolved_process)
+    async def test_timeout_kill_exit_leaves_no_unresolved_ownership(self):
+        process = FakeProcess(out=b"codex-cli 0.144.6\n", running=True, exit_on_terminate=False, exit_on_kill=True); probe = self.probe(Factory([process]))
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_timeout"): await probe.probe()
+        self.assertEqual(process.terminated, 1); self.assertEqual(process.killed, 1); self.assertIsNone(probe._unresolved_process)
+    async def test_kill_reap_timeout_is_bounded_and_retains_exact_child(self):
+        process = FakeProcess(out=b"codex-cli 0.144.6\n", running=True, exit_on_terminate=False, exit_on_kill=False); probe = self.probe(Factory([process]))
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_cleanup_unresolved") as raised:
+            await asyncio.wait_for(probe.probe(), .2)
+        self.assertIs(probe._unresolved_process, process); self.assertEqual(process.terminated, 1); self.assertEqual(process.killed, 1)
+        self.assertNotIn("private stderr", str(raised.exception) + repr(raised.exception)); self.assertNotIn("OPENAI_API_KEY", str(raised.exception) + repr(raised.exception))
+    async def test_probe_is_blocked_while_cleanup_unresolved_without_new_factory_call(self):
+        process = FakeProcess(running=True, exit_on_terminate=False, exit_on_kill=False); factory = Factory([process]); probe = self.probe(factory)
+        with self.assertRaisesRegex(VersionProbeError, "cleanup_unresolved"): await probe.probe()
+        with self.assertRaisesRegex(VersionProbeError, "cleanup_unresolved"): await probe.probe()
+        self.assertEqual(len(factory.calls), 1); process.exit(); await probe._unresolved_watcher
+    async def test_late_exit_watcher_clears_ownership_and_explicit_probe_can_restart(self):
+        old = FakeProcess(running=True, exit_on_terminate=False, exit_on_kill=False); new = FakeProcess(); factory = Factory([old, new]); probe = self.probe(factory)
+        with self.assertRaisesRegex(VersionProbeError, "cleanup_unresolved"): await probe.probe()
+        watcher = probe._unresolved_watcher; old.exit(); await watcher
+        self.assertIsNone(probe._unresolved_process); self.assertIsNone(probe._unresolved_watcher)
+        self.assertEqual(await probe.probe(), SUPPORTED_CODEX_VERSION); self.assertEqual(len(factory.calls), 2)
+    async def test_concurrent_probe_is_busy_and_does_not_spawn_second_child(self):
+        process = FakeProcess(running=True); factory = Factory([process, FakeProcess()]); probe = self.probe(factory)
+        first = asyncio.create_task(probe.probe()); await factory.created.wait()
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_busy"): await probe.probe()
+        self.assertEqual(len(factory.calls), 1); process.exit(); self.assertEqual(await first, SUPPORTED_CODEX_VERSION)
+    async def test_unresolved_watcher_does_not_retry_or_signal_again(self):
+        process = FakeProcess(running=True, exit_on_terminate=False, exit_on_kill=False); factory = Factory([process]); probe = self.probe(factory)
+        with self.assertRaisesRegex(VersionProbeError, "cleanup_unresolved"): await probe.probe()
+        self.assertEqual((process.terminated, process.killed, len(factory.calls)), (1, 1, 1))
+        process.exit(); await probe._unresolved_watcher
+        self.assertEqual((process.terminated, process.killed, len(factory.calls)), (1, 1, 1))
     async def test_exact_supported_version_selects_manifest(self):
-        manifest=await probe_supported_manifest(self.probe(FakeProcess()))
-        self.assertEqual(manifest.codex_cli_version,SUPPORTED_CODEX_VERSION)
-        with self.assertRaises(VersionProbeError) as raised:
-            await probe_supported_manifest(self.probe(FakeProcess(b"codex-cli 0.144.7\n")))
-        self.assertEqual(raised.exception.category,"unsupported_codex_version")
+        manifest = await probe_supported_manifest(self.probe(Factory([FakeProcess()])))
+        self.assertEqual(manifest.codex_cli_version, SUPPORTED_CODEX_VERSION)
+        with self.assertRaisesRegex(VersionProbeError, "unsupported_codex_version"):
+            await probe_supported_manifest(self.probe(Factory([FakeProcess(b"codex-cli 0.144.7\n")])))

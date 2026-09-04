@@ -104,9 +104,20 @@ def load_manifest_data(data: Any) -> CodexCapabilityManifest:
     return CodexCapabilityManifest(MANIFEST_FORMAT, version, sha.lower(), framing, **groups, approval_response_schemas=approval_response_schemas, capabilities=statuses)
 
 
+def validate_manifest_authority(manifest: CodexCapabilityManifest, requested_version: str) -> CodexCapabilityManifest:
+    """Bind parsed data to the fixed authority for its version-labelled resource."""
+    if requested_version != SUPPORTED_CODEX_VERSION:
+        raise CapabilityManifestError("unsupported_codex_version")
+    if manifest.codex_cli_version != SUPPORTED_CODEX_VERSION:
+        raise CapabilityManifestError("manifest_version_mismatch")
+    if manifest.schema_sha256 != SCHEMA_SHA256:
+        raise CapabilityManifestError("manifest_sha_mismatch")
+    return manifest
+
+
 def load_manifest(version: str = SUPPORTED_CODEX_VERSION) -> CodexCapabilityManifest:
     if version != SUPPORTED_CODEX_VERSION: raise CapabilityManifestError("unsupported_codex_version")
     try: raw = resources.files("codex_control.adapters.codex.manifests").joinpath("codex_0_144_6.json").read_text(encoding="utf-8")
     except (FileNotFoundError, ModuleNotFoundError): raise CapabilityManifestError("manifest_resource_unavailable") from None
-    try: return load_manifest_data(json.loads(raw))
+    try: return validate_manifest_authority(load_manifest_data(json.loads(raw)), version)
     except json.JSONDecodeError: raise CapabilityManifestError("manifest_json_invalid") from None
