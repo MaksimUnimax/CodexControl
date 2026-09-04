@@ -31,6 +31,28 @@ class Factory:
         if self.gate is not None: await self.gate.wait()
         return self.processes.pop(0)
 
+class CooperativeHungFactory:
+    def __init__(self): self.calls = []; self.entered = asyncio.Event()
+    async def __call__(self, argv, env, limit):
+        self.calls.append((argv, dict(env), limit)); self.entered.set()
+        await asyncio.Event().wait()
+
+class CancellationResistantFactory:
+    def __init__(self, late_process=None, late_error=False, late_cancel=False, next_process=None):
+        self.calls = []; self.entered = asyncio.Event(); self.cancelled = asyncio.Event(); self.release = asyncio.Event()
+        self.late_process, self.late_error, self.late_cancel, self.next_process = late_process, late_error, late_cancel, next_process
+    async def __call__(self, argv, env, limit):
+        self.calls.append((argv, dict(env), limit))
+        if len(self.calls) > 1: return self.next_process
+        self.entered.set()
+        try: await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            await self.release.wait()
+        if self.late_error: raise RuntimeError("private factory failure OPENAI_API_KEY=secret")
+        if self.late_cancel: raise asyncio.CancelledError
+        return self.late_process
+
 class ProbeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         fd, self.path = tempfile.mkstemp(); os.close(fd); os.chmod(self.path, 0o755)
@@ -119,6 +141,53 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((process.terminated, process.killed, len(factory.calls)), (1, 1, 1))
         process.exit(); await probe._unresolved_watcher
         self.assertEqual((process.terminated, process.killed, len(factory.calls)), (1, 1, 1))
+    async def test_spawn_timeout_cooperative_factory_creates_no_fake_process(self):
+        factory = CooperativeHungFactory(); probe = self.probe(factory, spawn_timeout=.01)
+        result = asyncio.create_task(probe.probe()); await factory.entered.wait()
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_spawn_timeout") as raised:
+            await asyncio.wait_for(result, .2)
+        self.assertEqual(len(factory.calls), 1); self.assertIsNone(probe._owned_process); self.assertIsNone(probe._unresolved_process)
+        self.assertIsNone(probe._unresolved_spawn_task); self.assertNotIn("OPENAI_API_KEY", str(raised.exception) + repr(raised.exception))
+    async def test_unresolved_spawn_blocks_second_probe_without_second_factory_call(self):
+        factory = CancellationResistantFactory(late_error=True); probe = self.probe(factory, spawn_timeout=.01)
+        first = asyncio.create_task(probe.probe()); await factory.entered.wait(); await factory.cancelled.wait()
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_spawn_timeout"): await asyncio.wait_for(first, .2)
+        self.assertIsNotNone(probe._unresolved_spawn_task)
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_spawn_unresolved"): await probe.probe()
+        self.assertEqual(len(factory.calls), 1)
+        factory.release.set(); await probe._unresolved_spawn_watcher
+    async def test_late_spawn_error_clears_ownership_and_allows_explicit_probe(self):
+        factory = CancellationResistantFactory(late_error=True, next_process=FakeProcess()); probe = self.probe(factory, spawn_timeout=.01)
+        first = asyncio.create_task(probe.probe()); await factory.entered.wait(); await factory.cancelled.wait()
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_spawn_timeout"): await first
+        watcher = probe._unresolved_spawn_watcher; factory.release.set(); await watcher
+        self.assertIsNone(probe._unresolved_spawn_task); self.assertIsNone(probe._owned_process); self.assertIsNone(probe._unresolved_process)
+        self.assertEqual(await probe.probe(), SUPPORTED_CODEX_VERSION); self.assertEqual(len(factory.calls), 2)
+    async def test_late_spawn_cancellation_clears_ownership(self):
+        factory = CancellationResistantFactory(late_cancel=True); probe = self.probe(factory, spawn_timeout=.01)
+        first = asyncio.create_task(probe.probe()); await factory.entered.wait(); await factory.cancelled.wait()
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_spawn_timeout"): await first
+        watcher = probe._unresolved_spawn_watcher; factory.release.set(); await watcher
+        self.assertIsNone(probe._unresolved_spawn_task); self.assertIsNone(probe._owned_process); self.assertIsNone(probe._unresolved_process)
+    async def test_late_spawned_process_is_owned_cleaned_and_not_retried(self):
+        process = FakeProcess(running=True, exit_on_terminate=False, exit_on_kill=True)
+        factory = CancellationResistantFactory(late_process=process); probe = self.probe(factory, spawn_timeout=.01)
+        first = asyncio.create_task(probe.probe()); await factory.entered.wait(); await factory.cancelled.wait()
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_spawn_timeout"): await first
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_spawn_unresolved"): await probe.probe()
+        factory.release.set(); watcher = probe._unresolved_spawn_watcher; await watcher
+        self.assertEqual((process.terminated, process.killed), (1, 1)); self.assertIsNone(probe._owned_process); self.assertIsNone(probe._unresolved_process)
+        self.assertIsNone(probe._unresolved_spawn_task); self.assertEqual(len(factory.calls), 1)
+    async def test_late_spawned_cleanup_unresolved_transitions_to_process_ownership(self):
+        process = FakeProcess(running=True, exit_on_terminate=False, exit_on_kill=False)
+        factory = CancellationResistantFactory(late_process=process); probe = self.probe(factory, spawn_timeout=.01)
+        first = asyncio.create_task(probe.probe()); await factory.entered.wait(); await factory.cancelled.wait()
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_spawn_timeout"): await first
+        factory.release.set(); await probe._unresolved_spawn_watcher
+        self.assertIs(probe._unresolved_process, process); self.assertIsNone(probe._unresolved_spawn_task)
+        with self.assertRaisesRegex(VersionProbeError, "version_probe_cleanup_unresolved"): await probe.probe()
+        self.assertEqual(len(factory.calls), 1); process.exit(); await probe._unresolved_watcher
+        self.assertIsNone(probe._unresolved_process)
     async def test_exact_supported_version_selects_manifest(self):
         manifest = await probe_supported_manifest(self.probe(Factory([FakeProcess()])))
         self.assertEqual(manifest.codex_cli_version, SUPPORTED_CODEX_VERSION)

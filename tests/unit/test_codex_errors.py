@@ -24,6 +24,11 @@ class ErrorTests(unittest.TestCase):
     def test_probe_ownership_categories_are_safe_diagnostics(self):
         self.assertEqual(normalize_error(VersionProbeError("version_probe_cleanup_unresolved")).category, CodexAdapterErrorCategory.VERSION_PROBE_FAILURE)
         self.assertEqual(normalize_error(VersionProbeError("version_probe_busy")).category, CodexAdapterErrorCategory.VERSION_PROBE_FAILURE)
+        self.assertEqual(normalize_error(VersionProbeError("version_probe_spawn_unresolved")).category, CodexAdapterErrorCategory.VERSION_PROBE_FAILURE)
+    def test_spawn_timeout_normalizes_to_timeout_without_retry_fields(self):
+        error = normalize_error(VersionProbeError("version_probe_spawn_timeout"))
+        self.assertEqual(error.category, CodexAdapterErrorCategory.TIMEOUT)
+        self.assertFalse(hasattr(error, "retryable")); self.assertFalse(hasattr(error, "safe_to_retry"))
     def test_cleanup_error_redacts_stderr_and_environment(self):
         error = normalize_error(VersionProbeError("version_probe_cleanup_unresolved"))
         rendered = str(error) + repr(error)

@@ -41,6 +41,15 @@
 
 No Codex business RPC was sent, no production `CODEX_HOME` was used, no production service changed, and no architecture document changed.
 
+## Architect third repair pass
+
+- Third candidate requiring bounded-spawn repair: `be3605a585ac321deff377c645920840031cf6df`.
+- Added `DEFAULT_VERSION_SPAWN_TIMEOUT_SECONDS = 3.0` and the validated `spawn_timeout` constructor parameter. Factory acquisition is separately bounded; a timeout reports the secret-free `version_probe_spawn_timeout` category.
+- A cancellation-cooperative factory that returns no process leaves no owned or unresolved process state. A factory still unresolved after cancellation is retained as the sole unresolved spawn task, with a passive watcher; explicit later probes fail `version_probe_spawn_unresolved` and cannot start another factory call.
+- The passive watcher clears ownership when the late factory cancels or errors. If it returns a process, it assumes ownership of that exact process and applies the existing bounded terminate, wait, kill, final-wait cleanup ladder. A late cleanup failure transitions to the existing exact unresolved-process ownership/watcher path and blocks probes as `version_probe_cleanup_unresolved`.
+- The one-instance invariant is tested: while a spawn task is unresolved, factory call count remains one; no automatic retry occurs.
+- Added tests: `test_spawn_timeout_cooperative_factory_creates_no_fake_process`, `test_unresolved_spawn_blocks_second_probe_without_second_factory_call`, `test_late_spawn_error_clears_ownership_and_allows_explicit_probe`, `test_late_spawn_cancellation_clears_ownership`, `test_late_spawned_process_is_owned_cleaned_and_not_retried`, `test_late_spawned_cleanup_unresolved_transitions_to_process_ownership`, and `test_spawn_timeout_normalizes_to_timeout_without_retry_fields`. Focused version-probe tests: 22 passed; focused error tests: 11 passed.
+
 ## Architect repair pass
 
 - Rejected candidate: `692188aca05fd270399ba3625f4bac5f18a58613`.

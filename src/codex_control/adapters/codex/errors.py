@@ -32,7 +32,7 @@ def normalize_error(error: BaseException) -> CodexAdapterError:
     if isinstance(error, VersionProbeError):
         if error.category == "executable_invalid": category=CodexAdapterErrorCategory.CONFIGURATION
         elif error.category == "unsupported_codex_version": category=CodexAdapterErrorCategory.UNSUPPORTED_CODEX_VERSION
-        elif error.category == "version_probe_timeout": category=CodexAdapterErrorCategory.TIMEOUT
+        elif error.category in ("version_probe_timeout", "version_probe_spawn_timeout"): category=CodexAdapterErrorCategory.TIMEOUT
         else: category=CodexAdapterErrorCategory.VERSION_PROBE_FAILURE
         return CodexAdapterError(category)
     return CodexAdapterError(CodexAdapterErrorCategory.INTERNAL)

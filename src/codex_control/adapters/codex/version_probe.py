@@ -8,6 +8,7 @@ from typing import Mapping, Protocol
 
 DEFAULT_VERSION_STDOUT_LIMIT_BYTES = 4096
 DEFAULT_VERSION_TIMEOUT_SECONDS = 3.0
+DEFAULT_VERSION_SPAWN_TIMEOUT_SECONDS = 3.0
 DEFAULT_VERSION_CLEANUP_TIMEOUT_SECONDS = 1.0
 VERSION_ENV_ALLOWLIST = ("HOME", "PATH", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR")
 
@@ -42,11 +43,12 @@ def parse_version_stdout(output: bytes) -> str:
 
 class CodexVersionProbe:
     """Own at most one probe child; unresolved cleanup blocks later probes."""
-    def __init__(self, executable: str = "/usr/local/bin/codex", *, parent_environment: Mapping[str, str] | None = None, process_factory=create_version_process, stdout_limit: int = DEFAULT_VERSION_STDOUT_LIMIT_BYTES, timeout: float = DEFAULT_VERSION_TIMEOUT_SECONDS, cleanup_timeout: float = DEFAULT_VERSION_CLEANUP_TIMEOUT_SECONDS) -> None:
+    def __init__(self, executable: str = "/usr/local/bin/codex", *, parent_environment: Mapping[str, str] | None = None, process_factory=create_version_process, stdout_limit: int = DEFAULT_VERSION_STDOUT_LIMIT_BYTES, timeout: float = DEFAULT_VERSION_TIMEOUT_SECONDS, spawn_timeout: float = DEFAULT_VERSION_SPAWN_TIMEOUT_SECONDS, cleanup_timeout: float = DEFAULT_VERSION_CLEANUP_TIMEOUT_SECONDS) -> None:
         self.executable, self.parent_environment, self.process_factory = executable, dict(os.environ if parent_environment is None else parent_environment), process_factory
-        self.stdout_limit, self.timeout, self.cleanup_timeout = stdout_limit, timeout, cleanup_timeout
+        self.stdout_limit, self.timeout, self.spawn_timeout, self.cleanup_timeout = stdout_limit, timeout, spawn_timeout, cleanup_timeout
         self._ownership_lock = asyncio.Lock(); self._probe_active = False; self._owned_process: VersionProcess | None = None
         self._unresolved_process: VersionProcess | None = None; self._unresolved_watcher: asyncio.Task[None] | None = None
+        self._unresolved_spawn_task: asyncio.Task[VersionProcess] | None = None; self._unresolved_spawn_watcher: asyncio.Task[None] | None = None
 
     async def probe(self) -> str:
         await self._reserve_probe()
@@ -54,9 +56,8 @@ class CodexVersionProbe:
         try:
             executable = Path(self.executable)
             if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK): raise VersionProbeError("executable_invalid")
-            if self.stdout_limit <= 0 or self.timeout <= 0 or self.cleanup_timeout <= 0: raise VersionProbeError("probe_configuration_invalid")
-            try: process = await self.process_factory([str(executable), "--version"], version_environment(self.parent_environment), self.stdout_limit)
-            except Exception: raise VersionProbeError("version_probe_failed") from None
+            if self.stdout_limit <= 0 or self.timeout <= 0 or self.spawn_timeout <= 0 or self.cleanup_timeout <= 0: raise VersionProbeError("probe_configuration_invalid")
+            process = await self._spawn_or_timeout([str(executable), "--version"], version_environment(self.parent_environment))
             await self._record_owned(process); wait_task = asyncio.create_task(process.wait())
             if process.stdout is None or process.stderr is None:
                 handed_to_watcher = await self._cleanup_or_retain(process, wait_task, None)
@@ -87,8 +88,68 @@ class CodexVersionProbe:
     async def _reserve_probe(self) -> None:
         async with self._ownership_lock:
             if self._unresolved_process is not None: raise VersionProbeError("version_probe_cleanup_unresolved")
+            if self._unresolved_spawn_task is not None: raise VersionProbeError("version_probe_spawn_unresolved")
+            if self._owned_process is not None: raise VersionProbeError("version_probe_cleanup_unresolved")
             if self._probe_active: raise VersionProbeError("version_probe_busy")
             self._probe_active = True
+
+    async def _spawn_or_timeout(self, argv: list[str], environment: Mapping[str, str]) -> VersionProcess:
+        task = asyncio.create_task(self.process_factory(argv, environment, self.stdout_limit))
+        try:
+            done, _ = await asyncio.wait((task,), timeout=self.spawn_timeout)
+        except asyncio.CancelledError:
+            await self._cancel_or_retain_spawn(task)
+            raise
+        if done:
+            try: return task.result()
+            except (asyncio.CancelledError, Exception): raise VersionProbeError("version_probe_failed") from None
+        task.cancel()
+        # Give a cooperative factory one loop turn to acknowledge cancellation.
+        await asyncio.sleep(0)
+        if task.done():
+            try: process = task.result()
+            except (asyncio.CancelledError, Exception): raise VersionProbeError("version_probe_spawn_timeout") from None
+            await self._cleanup_late_spawned_process(process)
+        await self._retain_unresolved_spawn(task)
+        raise VersionProbeError("version_probe_spawn_timeout")
+
+    async def _cancel_or_retain_spawn(self, task: asyncio.Task[VersionProcess]) -> None:
+        if not task.done(): task.cancel(); await asyncio.sleep(0)
+        if task.done():
+            try: process = task.result()
+            except (asyncio.CancelledError, Exception): return
+            await self._cleanup_late_spawned_process(process)
+        else: await self._retain_unresolved_spawn(task)
+
+    async def _retain_unresolved_spawn(self, task: asyncio.Task[VersionProcess]) -> None:
+        async with self._ownership_lock:
+            if task.done(): return
+            self._unresolved_spawn_task = task
+            self._unresolved_spawn_watcher = asyncio.create_task(self._watch_unresolved_spawn(task))
+
+    async def _cleanup_late_spawned_process(self, process: VersionProcess) -> None:
+        await self._record_owned(process)
+        wait_task = asyncio.create_task(process.wait())
+        stderr_task = asyncio.create_task(self._discard(process.stderr)) if process.stderr is not None else None
+        handed_to_watcher = await self._cleanup_or_retain(process, wait_task, stderr_task)
+        if not handed_to_watcher and stderr_task is not None: await self._stop_stderr_drain(stderr_task)
+        if process.returncode is not None: await self._clear_owned(process)
+        if handed_to_watcher: raise VersionProbeError("version_probe_cleanup_unresolved")
+
+    async def _watch_unresolved_spawn(self, task: asyncio.Task[VersionProcess]) -> None:
+        try:
+            try: process = await asyncio.shield(task)
+            except (asyncio.CancelledError, Exception): return
+            async with self._ownership_lock:
+                if self._unresolved_spawn_task is not task: return
+                self._unresolved_spawn_task = None; self._owned_process = process
+            await self._cleanup_late_spawned_process(process)
+        except VersionProbeError:
+            pass
+        finally:
+            async with self._ownership_lock:
+                if self._unresolved_spawn_task is task: self._unresolved_spawn_task = None
+                if self._unresolved_spawn_watcher is asyncio.current_task(): self._unresolved_spawn_watcher = None
 
     async def _release_probe(self) -> None:
         async with self._ownership_lock: self._probe_active = False
