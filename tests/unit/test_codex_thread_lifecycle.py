@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 import unittest
 
-from codex_control.adapters.codex.errors import CodexAdapterErrorCategory
+from codex_control.adapters.codex.errors import CodexAdapterError, CodexAdapterErrorCategory
 from codex_control.adapters.codex.model_catalog import CodexModelCatalog, CodexModelDescriptor
 from codex_control.adapters.codex.protocol import ProtocolFault, ProtocolRemoteError
 from codex_control.adapters.codex.thread_lifecycle import (
@@ -48,6 +48,16 @@ class Manager:
     async def acquire(self, profile_id):
         self.calls.append(profile_id)
         return self.runtimes[profile_id]
+
+
+class SequencedManager:
+    def __init__(self, *runtimes):
+        self.runtimes = list(runtimes)
+        self.calls = []
+
+    async def acquire(self, profile_id):
+        self.calls.append(profile_id)
+        return self.runtimes.pop(0)
 
 
 class Catalog:
@@ -241,3 +251,151 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                     TrustedWorkingDirectory(value)
         with self.assertRaisesRegex(ThreadLifecycleError, "thread_request_invalid"):
             ThreadBinding("p", "x" * (MAX_THREAD_ID_CHARS + 1))
+
+    async def test_start_captures_one_runtime_and_generation_change_never_rebases(self):
+        first_client, later_client = Client([{"thread": {"id": "first"}}]), Client([{"thread": {"id": "later"}}])
+        manager = SequencedManager(Runtime("p", 10, first_client), Runtime("p", 11, later_client))
+        adapter = CodexThreadLifecycleAdapter(manager, Catalog({"p": catalog("p", 11)}))
+        with self.assertRaisesRegex(ThreadLifecycleError, "thread_precondition_changed"):
+            await adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd)
+        self.assertEqual(manager.calls, ["p"])
+        self.assertEqual(first_client.calls, [])
+        self.assertEqual(later_client.calls, [])
+
+    async def test_start_dispatches_on_the_exact_captured_runtime(self):
+        captured, hypothetical = Client([{"thread": {"id": "captured"}}]), Client([{"thread": {"id": "later"}}])
+        manager = SequencedManager(Runtime("p", 10, captured), Runtime("p", 11, hypothetical))
+        adapter = CodexThreadLifecycleAdapter(manager, Catalog({"p": catalog("p", 10)}))
+        result = await adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd)
+        self.assertEqual(result.binding, ThreadBinding("p", "captured"))
+        self.assertEqual(manager.calls, ["p"])
+        self.assertEqual(len(captured.calls), 1)
+        self.assertEqual(hypothetical.calls, [])
+
+    async def test_captured_runtime_profile_mismatch_fails_before_dispatch(self):
+        client = Client([{"thread": {"id": "never"}}])
+        manager = SequencedManager(Runtime("wrong-profile", 1, client))
+        adapter = CodexThreadLifecycleAdapter(manager, Catalog({"p": catalog("p", 1)}))
+        with self.assertRaisesRegex(ThreadLifecycleError, "thread_precondition_changed"):
+            await adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd)
+        self.assertEqual(manager.calls, ["p"])
+        self.assertEqual(client.calls, [])
+
+    async def test_start_success_id_matrix_preserves_opaque_value_and_marks_malformed_unknown(self):
+        opaque = "Thread-AbC  123"
+        client = Client([{"thread": {"id": opaque, "history": "PRIVATE_THREAD_HISTORY_MUST_NOT_LEAK", "turn": "PRIVATE_TURN_CONTENT_MUST_NOT_LEAK"}}])
+        self.manager.runtimes["p"] = Runtime("p", 1, client)
+        result = await self.adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd)
+        self.assertEqual(result.binding, ThreadBinding("p", opaque))
+        rendered = repr(result) + repr(result.binding)
+        self.assertNotIn("PRIVATE_THREAD_HISTORY_MUST_NOT_LEAK", rendered)
+        self.assertNotIn("PRIVATE_TURN_CONTENT_MUST_NOT_LEAK", rendered)
+        errors_rendered = (
+            str(CodexAdapterError(CodexAdapterErrorCategory.THREAD_START_UNKNOWN))
+            + repr(CodexAdapterError(CodexAdapterErrorCategory.THREAD_START_UNKNOWN))
+            + str(ThreadLifecycleError("PRIVATE_THREAD_HISTORY_MUST_NOT_LEAK"))
+            + repr(ThreadLifecycleError("PRIVATE_TURN_CONTENT_MUST_NOT_LEAK"))
+        )
+        self.assertNotIn("PRIVATE_THREAD_HISTORY_MUST_NOT_LEAK", errors_rendered)
+        self.assertNotIn("PRIVATE_TURN_CONTENT_MUST_NOT_LEAK", errors_rendered)
+        malformed = (None, 123, {}, [], "", "x" * (MAX_THREAD_ID_CHARS + 1), "abc\0def")
+        for value in malformed:
+            with self.subTest(value=repr(value)[:20]):
+                client = Client([{} if value is None else {"thread": {"id": value, "history": "PRIVATE_THREAD_HISTORY_MUST_NOT_LEAK"}}])
+                self.manager.runtimes["p"] = Runtime("p", 1, client)
+                result = await self.adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd)
+                self.assertEqual(result.status, ThreadOperationStatus.START_UNKNOWN)
+                self.assertIsNone(result.binding)
+                self.assertEqual(result.error.category, CodexAdapterErrorCategory.THREAD_START_UNKNOWN)
+                self.assertEqual(len(client.calls), 1)
+
+    async def test_resume_success_id_matrix_requires_exact_opaque_value(self):
+        opaque = "Thread-AbC  123"
+        binding = ThreadBinding("p", opaque)
+        cases = ((opaque, ThreadOperationStatus.RESUME_CONFIRMED), ("thread-abc  123", ThreadOperationStatus.RESUME_UNKNOWN),
+                 ("Thread-AbC 123", ThreadOperationStatus.RESUME_UNKNOWN), (None, ThreadOperationStatus.RESUME_UNKNOWN),
+                 (123, ThreadOperationStatus.RESUME_UNKNOWN), ({}, ThreadOperationStatus.RESUME_UNKNOWN), ([], ThreadOperationStatus.RESUME_UNKNOWN),
+                 ("", ThreadOperationStatus.RESUME_UNKNOWN), ("x" * (MAX_THREAD_ID_CHARS + 1), ThreadOperationStatus.RESUME_UNKNOWN), ("abc\0def", ThreadOperationStatus.RESUME_UNKNOWN))
+        for value, expected in cases:
+            with self.subTest(value=repr(value)[:20]):
+                response = {} if value is None else {"thread": {"id": value, "history": "PRIVATE_THREAD_HISTORY_MUST_NOT_LEAK", "turn": "PRIVATE_TURN_CONTENT_MUST_NOT_LEAK"}}
+                client = Client([response])
+                self.manager.runtimes["p"] = Runtime("p", 1, client)
+                result = await self.adapter.resume(binding=binding, working_directory=self.cwd)
+                self.assertEqual(result.status, expected)
+                self.assertEqual(len(client.calls), 1)
+                if expected is ThreadOperationStatus.RESUME_UNKNOWN:
+                    self.assertEqual(result.error.category, CodexAdapterErrorCategory.THREAD_RESUME_UNKNOWN)
+                self.assertNotIn("PRIVATE_THREAD_HISTORY_MUST_NOT_LEAK", repr(result))
+                self.assertNotIn("PRIVATE_TURN_CONTENT_MUST_NOT_LEAK", repr(result))
+
+    async def test_remote_rejection_preserves_numeric_code_only(self):
+        for operation, status, category, method in (("start", ThreadOperationStatus.START_REJECTED, CodexAdapterErrorCategory.THREAD_START_REJECTED, "thread/start"), ("resume", ThreadOperationStatus.RESUME_REJECTED, CodexAdapterErrorCategory.THREAD_RESUME_REJECTED, "thread/resume")):
+            with self.subTest(operation=operation):
+                client = Client([ProtocolRemoteError(9876)])
+                self.manager.runtimes["p"] = Runtime("p", 1, client)
+                result = await (self.adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd) if operation == "start" else self.adapter.resume(binding=ThreadBinding("p", "thread-1"), working_directory=self.cwd))
+                self.assertEqual((result.status, result.error.category, result.error.remote_code), (status, category, 9876))
+                self.assertEqual(client.calls[0][0], method)
+
+    async def test_same_profile_busy_matrix(self):
+        for first_kind, second_kind in (("start", "start"), ("start", "resume"), ("resume", "resume")):
+            with self.subTest(first=first_kind, second=second_kind):
+                gate = asyncio.Event()
+                client = Client([{"thread": {"id": "thread-1"}}], gate)
+                self.manager.runtimes["p"] = Runtime("p", 1, client)
+                first = asyncio.create_task(self.adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd) if first_kind == "start" else self.adapter.resume(binding=ThreadBinding("p", "thread-1"), working_directory=self.cwd))
+                await client.dispatched.wait()
+                with self.assertRaisesRegex(ThreadLifecycleError, "thread_operation_busy"):
+                    await (self.adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd) if second_kind == "start" else self.adapter.resume(binding=ThreadBinding("p", "thread-1"), working_directory=self.cwd))
+                self.assertEqual(len(client.calls), 1)
+                gate.set()
+                await first
+
+    async def test_guard_reusable_after_start_and_resume_terminal_outcomes(self):
+        scenarios = (("start", {"thread": {"id": "first"}}, ThreadOperationStatus.START_CONFIRMED), ("start", ProtocolRemoteError(4), ThreadOperationStatus.START_REJECTED), ("start", {"thread": {"id": ""}}, ThreadOperationStatus.START_UNKNOWN),
+                     ("resume", {"thread": {"id": "thread-1"}}, ThreadOperationStatus.RESUME_CONFIRMED), ("resume", ProtocolRemoteError(5), ThreadOperationStatus.RESUME_REJECTED), ("resume", {"thread": {"id": "different"}}, ThreadOperationStatus.RESUME_UNKNOWN))
+        for kind, first_response, expected in scenarios:
+            with self.subTest(kind=kind, expected=expected):
+                client = Client([first_response, {"thread": {"id": "thread-1"}}])
+                self.manager.runtimes["p"] = Runtime("p", 1, client)
+                first = await (self.adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd) if kind == "start" else self.adapter.resume(binding=ThreadBinding("p", "thread-1"), working_directory=self.cwd))
+                self.assertEqual(first.status, expected)
+                self.assertNotIn("p", self.adapter._inflight)
+                second = await self.adapter.resume(binding=ThreadBinding("p", "thread-1"), working_directory=self.cwd)
+                self.assertEqual(second.status, ThreadOperationStatus.RESUME_CONFIRMED)
+                self.assertEqual(len(client.calls), 2)
+
+    async def test_pre_dispatch_resume_cancellation_sends_no_rpc_and_releases_guard(self):
+        entered, gate = asyncio.Event(), asyncio.Event()
+        class GatedManager(Manager):
+            async def acquire(inner, profile_id):
+                entered.set(); await gate.wait()
+                return await super(GatedManager, inner).acquire(profile_id)
+        manager = GatedManager(self.manager.runtimes)
+        adapter = CodexThreadLifecycleAdapter(manager, self.catalog)
+        caller = asyncio.create_task(adapter.resume(binding=ThreadBinding("p", "thread-1"), working_directory=self.cwd))
+        await entered.wait(); caller.cancel()
+        with self.assertRaises(asyncio.CancelledError): await caller
+        gate.set()
+        self.assertEqual(self.client.calls, [])
+        self.assertNotIn("p", adapter._inflight)
+        self.assertEqual((await adapter.resume(binding=ThreadBinding("p", "thread-1"), working_directory=self.cwd)).status, ThreadOperationStatus.RESUME_CONFIRMED)
+
+    async def test_resume_inner_cancellation_is_unknown(self):
+        class CancelClient(Client):
+            async def request(inner, method, params):
+                inner.calls.append((method, dict(params))); inner.dispatched.set(); raise asyncio.CancelledError()
+        client = CancelClient()
+        self.manager.runtimes["p"] = Runtime("p", 1, client)
+        result = await self.adapter.resume(binding=ThreadBinding("p", "thread-1"), working_directory=self.cwd)
+        self.assertEqual((result.status, result.error.category), (ThreadOperationStatus.RESUME_UNKNOWN, CodexAdapterErrorCategory.THREAD_RESUME_UNKNOWN))
+        self.assertNotIn("p", self.adapter._inflight)
+
+    async def test_stale_cleanup_token_cannot_remove_replacement_reservation(self):
+        old, replacement = object(), object()
+        self.adapter._inflight["p"] = replacement
+        await self.adapter._release_reservation("p", old)
+        self.assertIs(self.adapter._inflight["p"], replacement)
+        await self.adapter._release_reservation("p", replacement)
+        self.assertNotIn("p", self.adapter._inflight)

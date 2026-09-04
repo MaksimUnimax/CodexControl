@@ -6,6 +6,7 @@ from codex_control.adapters.codex.subprocess_transport import SubprocessTranspor
 from codex_control.adapters.codex.version_probe import VersionProbeError
 from codex_control.adapters.codex.capabilities import CapabilityManifestError
 from codex_control.adapters.codex.model_catalog import ModelCatalogError
+from codex_control.adapters.codex.thread_lifecycle import ThreadLifecycleError
 
 class ErrorTests(unittest.TestCase):
     def test_protocol_and_remote_are_safe(self):
@@ -60,3 +61,25 @@ class ErrorTests(unittest.TestCase):
         source = ModelCatalogError(raw_payload)
         self.assertNotIn(raw_payload, str(source) + repr(source))
         self.assertEqual(normalize_error(source).category, CodexAdapterErrorCategory.MODEL_CATALOG_INVALID)
+
+    def test_thread_lifecycle_errors_normalize_exactly_and_redact_unknown_input(self):
+        categories = (
+            CodexAdapterErrorCategory.THREAD_REQUEST_INVALID,
+            CodexAdapterErrorCategory.THREAD_PRECONDITION_CHANGED,
+            CodexAdapterErrorCategory.THREAD_OPERATION_BUSY,
+            CodexAdapterErrorCategory.THREAD_START_REJECTED,
+            CodexAdapterErrorCategory.THREAD_START_UNKNOWN,
+            CodexAdapterErrorCategory.THREAD_RESUME_REJECTED,
+            CodexAdapterErrorCategory.THREAD_RESUME_UNKNOWN,
+        )
+        for category in categories:
+            with self.subTest(category=category):
+                normalized = normalize_error(ThreadLifecycleError(category))
+                self.assertEqual(normalized.category, category)
+                self.assertFalse(hasattr(normalized, "retryable"))
+                self.assertFalse(hasattr(normalized, "safe_to_retry"))
+        unsafe = ThreadLifecycleError("PRIVATE /root/secret")
+        normalized = normalize_error(unsafe)
+        rendered = str(unsafe) + repr(unsafe) + str(normalized) + repr(normalized)
+        self.assertEqual(normalized.category, CodexAdapterErrorCategory.THREAD_REQUEST_INVALID)
+        self.assertNotIn("PRIVATE /root/secret", rendered)

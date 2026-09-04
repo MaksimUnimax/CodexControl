@@ -20,6 +20,10 @@ class CodexAdapterError(Exception):
 
 def normalize_error(error: BaseException) -> CodexAdapterError:
     if isinstance(error, CodexAdapterError): return error
+    # This lazy exact-type import avoids the reverse module-initialization
+    # dependency: thread_lifecycle imports this module's categories.
+    from .thread_lifecycle import ThreadLifecycleError
+    if isinstance(error, ThreadLifecycleError): return CodexAdapterError(error.category)
     if isinstance(error, ProtocolRemoteError): return CodexAdapterError(CodexAdapterErrorCategory.REMOTE_APP_SERVER_ERROR, remote_code=error.code)
     if isinstance(error, ProtocolFault): return CodexAdapterError(CodexAdapterErrorCategory.PROTOCOL_FAULT)
     if isinstance(error, SubprocessTransportError): return CodexAdapterError(CodexAdapterErrorCategory.TRANSPORT_FAULT)

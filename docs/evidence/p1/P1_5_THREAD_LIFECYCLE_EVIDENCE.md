@@ -44,3 +44,36 @@ Tests: `PYTHONPATH=src python3 -m unittest tests.unit.test_codex_thread_lifecycl
 repair report. Tests use fakes only: no business RPC, production CODEX_HOME,
 or production service was used. No architecture-owned file was changed by
 Codex. This evidence does not claim architect acceptance.
+
+## Architect second repair pass
+
+- Repair candidate requiring second repair:
+  `ddcfe1a797b82dcba9ea1a3e4914b432dbd3198e`.
+- `thread/start` captures one runtime before catalog lookup and requires that
+  captured runtime's profile and generation to match the catalog. It does not
+  acquire again, rebase, refresh, loop, or retry; a sequenced-runtime test
+  proves a generation-10 capture plus generation-11 catalog fails before
+  either generation's client receives `thread/start`.
+- `normalize_error(ThreadLifecycleError(...))` maps each finite P1.5 category
+  exactly, with unsafe constructor text fail-closed and redacted.
+- Start tests cover opaque case/whitespace preservation and missing, wrong
+  type, empty, oversized, and NUL-bearing success IDs. Resume tests cover
+  exact opaque identity plus case/whitespace mismatch, missing, wrong type,
+  empty, oversized, and NUL-bearing returned IDs. Each ambiguous envelope has
+  exactly one RPC and no retry.
+- Deterministic event-gated tests cover same-profile start/start,
+  start/resume, and resume/resume BUSY results; guard reuse after confirmed,
+  rejected, unknown, and pre-dispatch-cancelled start/resume operations; and
+  identity-token stale cleanup cannot remove a replacement reservation.
+- Resume pre-dispatch caller cancellation sends zero RPC, releases the guard,
+  and permits a later same-profile operation. Existing post-dispatch caller
+  cancellation, repeated cancellation, and inner-request cancellation tests
+  remain covered for both operations.
+- Successful fixture responses contain private-history/turn sentinels. The
+  binding, operation result, and normalized/local error renderings do not
+  retain those sentinels. Remote rejection tests retain only exact numeric
+  remote code.
+- Direct focused counts: lifecycle `22`, errors `13`; full discovery count:
+  `139` tests. Compileall and package import completed successfully. Tests
+  use fakes only; no real thread RPC, production CODEX_HOME, or production
+  service was used. This evidence does not claim architect acceptance.

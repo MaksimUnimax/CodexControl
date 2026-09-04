@@ -115,9 +115,14 @@ class CodexThreadLifecycleAdapter:
         try:
             return await operation()
         finally:
-            async with lock:
-                if self._inflight.get(profile_id) is token:
-                    self._inflight.pop(profile_id, None)
+            await self._release_reservation(profile_id, token)
+
+    async def _release_reservation(self, profile_id: str, token: object) -> None:
+        """Release only the reservation owned by this completed operation."""
+        lock = self._locks.setdefault(profile_id, asyncio.Lock())
+        async with lock:
+            if self._inflight.get(profile_id) is token:
+                self._inflight.pop(profile_id, None)
 
     async def _request(self, runtime: Any, method: str, params: dict[str, Any], *,
                        rejected: ThreadOperationStatus, unknown: ThreadOperationStatus,
@@ -153,9 +158,11 @@ class CodexThreadLifecycleAdapter:
     async def _start(self, profile_id: str, model_id: str, requested_effort: str | None,
                      cwd: TrustedWorkingDirectory) -> ThreadOperationResult:
         try:
-            await self._manager.acquire(profile_id)
-            catalog = await self._catalog.get_catalog(profile_id)
+            # The runtime is deliberately captured before catalog lookup.  A
+            # catalog describes one runtime generation; reacquiring here could
+            # silently rebase a caller's selection onto a later child.
             runtime = await self._manager.acquire(profile_id)
+            catalog = await self._catalog.get_catalog(profile_id)
             if runtime.profile_id != profile_id or catalog.profile_id != profile_id or runtime.generation != catalog.runtime_generation:
                 raise ThreadLifecycleError(CodexAdapterErrorCategory.THREAD_PRECONDITION_CHANGED)
             descriptor = catalog.resolve_model(model_id)
