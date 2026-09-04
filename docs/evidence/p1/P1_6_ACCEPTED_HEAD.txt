@@ -1,0 +1,2 @@
+P1.6 accepted implementation: de36b3ef3657a464b29ff2d17692fce5fc2b2388
+Architect acceptance head: 7035060d90beec9cd3c8a4895f80522da144ea12
