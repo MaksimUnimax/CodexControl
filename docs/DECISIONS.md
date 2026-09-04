@@ -14,3 +14,4 @@ Architect-owned; individual records under `docs/adr/`.
 - ADR-0010 configuration-driven fleet/server-N.
 - ADR-0011 one live dialogue/one running turn; no delayed prompt queue.
 - ADR-0012 architect-led development; Codex implementation executor only.
+- ADR-0013 P1.5 validates reasoning effort but never guesses an opaque `thread/start.config` key; exact effort becomes a wire input at P1.6 `turn/start`.
