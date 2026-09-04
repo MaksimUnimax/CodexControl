@@ -1,0 +1,18 @@
+[server]
+server_id = "server-80"
+display_name = "SERVER-80"
+
+[[profiles]]
+profile_id = "codex1"
+codex_home = "/root/.codex"
+display_name = "Codex account 1"
+
+[[profiles]]
+profile_id = "codex2"
+codex_home = "/root/.codex_second"
+display_name = "Codex account 2"
+
+[[profiles]]
+profile_id = "codex3"
+codex_home = "/root/.codex_third"
+display_name = "Codex account 3"
