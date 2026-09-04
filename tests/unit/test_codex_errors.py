@@ -87,4 +87,13 @@ class ErrorTests(unittest.TestCase):
 
     def test_turn_lifecycle_errors_normalize_exactly(self):
         for category in (CodexAdapterErrorCategory.TURN_REQUEST_INVALID, CodexAdapterErrorCategory.TURN_PRECONDITION_CHANGED, CodexAdapterErrorCategory.TURN_OPERATION_BUSY, CodexAdapterErrorCategory.TURN_START_REJECTED, CodexAdapterErrorCategory.TURN_START_UNKNOWN, CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN, CodexAdapterErrorCategory.TURN_TERMINAL_FAILED):
-            self.assertEqual(normalize_error(TurnLifecycleError(category)).category, category)
+            normalized = normalize_error(TurnLifecycleError(category))
+            self.assertEqual(normalized.category, category)
+            self.assertFalse(hasattr(normalized, "retryable")); self.assertFalse(hasattr(normalized, "safe_to_retry"))
+        raw = "PRIVATE /root/secret PRIVATE_USER_PROMPT_MUST_NOT_LEAK"
+        unsafe = TurnLifecycleError(raw)
+        normalized = normalize_error(unsafe)
+        self.assertEqual(unsafe.category, CodexAdapterErrorCategory.TURN_REQUEST_INVALID)
+        self.assertEqual(normalized.category, CodexAdapterErrorCategory.TURN_REQUEST_INVALID)
+        self.assertNotIn(raw, str(unsafe) + repr(unsafe) + str(normalized) + repr(normalized))
+        self.assertFalse(hasattr(normalized, "retryable")); self.assertFalse(hasattr(normalized, "safe_to_retry"))

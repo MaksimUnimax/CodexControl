@@ -52,7 +52,7 @@ class RuntimeManagerLike(Protocol):
 
 class CodexTurnLifecycleAdapter:
     def __init__(self,manager:RuntimeManagerLike,catalog:CodexModelCatalogAdapter)->None:
-        self._manager,self._catalog=manager,catalog; self._lock=asyncio.Lock(); self._active:dict[tuple[str,str],object]={}; self._collectors:dict[TurnBinding,asyncio.Task[TurnTerminalResult]]={}
+        self._manager,self._catalog=manager,catalog; self._lock=asyncio.Lock(); self._active:dict[tuple[str,str],object]={}; self._collectors:dict[TurnBinding,asyncio.Task[TurnTerminalResult]]={}; self._completed:dict[tuple[str,str],tuple[TurnBinding,TurnTerminalResult]]={}
     async def start_turn(self,*,thread_binding:ThreadBinding,model_id:str,reasoning_effort:str|None,user_text:str,working_directory:TrustedWorkingDirectory)->TurnStartResult:
         if not isinstance(thread_binding,ThreadBinding) or not isinstance(model_id,str) or not model_id or "\0" in model_id or not isinstance(working_directory,TrustedWorkingDirectory) or not isinstance(user_text,str) or not user_text or "\0" in user_text or len(user_text)>MAX_TURN_INPUT_CHARS: raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_REQUEST_INVALID)
         key=(thread_binding.profile_id,thread_binding.thread_id); token=object()
@@ -70,12 +70,15 @@ class CodexTurnLifecycleAdapter:
             result=await self._request(runtime,params)
             if result.status is not TurnStartStatus.CONFIRMED:return result
             assert result.binding is not None
-            # Keep at most the previous terminal result until this new turn is
-            # confirmed.  Active collectors are never evicted.
-            for old_binding, old_task in tuple(self._collectors.items()):
-                if (old_binding.profile_id,old_binding.thread_id)==key and old_task.done():
-                    self._collectors.pop(old_binding,None)
-            self._collectors[result.binding]=asyncio.create_task(self._collect(runtime,result.binding,token)); keep=True
+            # Confirmation is the sole supersession point.  Publication and
+            # replacement use the same lock, so no task-done observation is
+            # needed to enforce one retained result per profile/thread key.
+            async with self._lock:
+                if self._active.get(key) is not token:
+                    return TurnStartResult(TurnStartStatus.UNKNOWN,error=CodexAdapterError(CodexAdapterErrorCategory.TURN_START_UNKNOWN))
+                self._completed.pop(key,None)
+                self._collectors[result.binding]=asyncio.create_task(self._collect(runtime,result.binding,token))
+                keep=True
             return result
         except asyncio.CancelledError: raise
         except TurnLifecycleError: raise
@@ -103,25 +106,36 @@ class CodexTurnLifecycleAdapter:
         return TurnStartResult(TurnStartStatus.CONFIRMED,TurnBinding(runtime.profile_id,params["threadId"],turn_id))
     async def wait_turn(self,binding:TurnBinding)->TurnTerminalResult:
         if not isinstance(binding,TurnBinding):raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_REQUEST_INVALID)
-        task=self._collectors.get(binding)
-        if task is None:raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_REQUEST_INVALID)
+        key=(binding.profile_id,binding.thread_id)
+        async with self._lock:
+            task=self._collectors.get(binding)
+            completed=self._completed.get(key)
+            if task is None and (completed is None or completed[0] != binding):
+                raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_REQUEST_INVALID)
+            if task is None:
+                return completed[1]
         return await asyncio.shield(task)
     async def _collect(self,runtime:Any,binding:TurnBinding,token:object)->TurnTerminalResult:
-        messages:list[AgentMessageCompleted]=[]; seen:set[str]=set(); count=0; notification=asyncio.create_task(runtime.client.next_notification()); terminal=asyncio.create_task(runtime.client.wait_terminal())
+        messages:list[AgentMessageCompleted]=[]; seen:set[str]=set(); count=0; notification=asyncio.create_task(runtime.client.next_notification()); terminal=asyncio.create_task(runtime.client.wait_terminal()); result=self._unknown(binding,messages)
         try:
             while True:
                 done,_=await asyncio.wait((notification,terminal),return_when=asyncio.FIRST_COMPLETED)
                 if notification in done:
                     try: raw=notification.result()
-                    except Exception:return self._unknown(binding,messages)
+                    except Exception:
+                        result=self._unknown(binding,messages); break
                     notification=asyncio.create_task(runtime.client.next_notification()); count+=1
-                    if count>MAX_TURN_NOTIFICATIONS:return self._unknown(binding,messages)
+                    if count>MAX_TURN_NOTIFICATIONS:
+                        result=self._unknown(binding,messages); break
                     outcome=self._consume(raw,binding,messages,seen)
-                    if outcome is not None:return outcome
+                    if outcome is not None:
+                        result=outcome; break
                     continue
-                return self._unknown(binding,messages)
+                result=self._unknown(binding,messages); break
         finally:
-            notification.cancel(); terminal.cancel(); await asyncio.gather(notification,terminal,return_exceptions=True); await self._release((binding.profile_id,binding.thread_id),token)
+            notification.cancel(); terminal.cancel(); await asyncio.gather(notification,terminal,return_exceptions=True)
+            await self._publish_terminal(binding,token,result)
+        return result
     def _unknown(self,binding:TurnBinding,messages:list[AgentMessageCompleted])->TurnTerminalResult:return TurnTerminalResult(binding,TurnTerminalStatus.UNKNOWN,tuple(messages),CodexAdapterError(CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN))
     def _consume(self,raw:Any,binding:TurnBinding,messages:list[AgentMessageCompleted],seen:set[str])->TurnTerminalResult|None:
         if not isinstance(raw,dict) or not isinstance(raw.get("method"),str):return None
@@ -166,3 +180,14 @@ class CodexTurnLifecycleAdapter:
     async def _release(self,key:tuple[str,str],token:object)->None:
         async with self._lock:
             if self._active.get(key) is token:self._active.pop(key,None)
+    async def _publish_terminal(self,binding:TurnBinding,token:object,result:TurnTerminalResult)->None:
+        """Atomically publish only the terminal state still owned by *token*."""
+        key=(binding.profile_id,binding.thread_id)
+        current=asyncio.current_task()
+        async with self._lock:
+            if self._active.get(key) is not token:
+                return
+            self._active.pop(key,None)
+            if self._collectors.get(binding) is current:
+                self._collectors.pop(binding,None)
+            self._completed[key]=(binding,result)

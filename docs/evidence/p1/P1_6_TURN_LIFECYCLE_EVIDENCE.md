@@ -21,3 +21,13 @@ The owned inner `turn/start` task now returns `TURN_START_UNKNOWN` if it is itse
 Recognized delta, completed-item, and terminal notifications validate their complete routing envelope before mismatch filtering; malformed recognized envelopes fail closed as `TURN_STREAM_UNKNOWN`. The installed schema facts recorded in the fixture are that both completed `item.text` and delta have no `minLength`, so empty strings are accepted subject to the existing content bounds.
 
 Focused coverage exercises pre-dispatch validation and cancellation, captured-runtime/generation checks, exact request and effort selection, start-ID/failure and cancellation matrices, active ownership, completed-message ordering/bounds/duplicates, delta and malformed routing, terminal mappings, protocol terminal, notification bounds, late waiter retention/new-turn eviction, late-event isolation, error normalization, and capability readiness. This is repair evidence only; architect acceptance is not claimed.
+
+## Architect second repair pass
+
+Candidate requiring second repair: `976aa13de2677ee0dbc8c5bce6258c96a0a12feb`.
+
+Active collector tasks and completed terminal results are now separate memory-only registries. Terminal publication holds the adapter lock, verifies the exact active token, removes only that active reservation and exact active collector binding, and stores one immutable `(TurnBinding, TurnTerminalResult)` per profile/thread key. A confirmed replacement turn uses that same lock to evict the prior completed result and register its collector. Stale token publication cannot remove a replacement active token or restore/overwrite its state.
+
+Focused tests prove the 256/257 completed-agent-message boundary and the exact 2,000,000/2,000,001 aggregate-content boundary; the complete recognized delta, item/completed, and terminal routing matrices; exclusion of command, file-change, and reasoning sentinels; exact 16,384/16,385 notification handling; deterministic queued notification plus protocol-terminal handling; a true post-completion late-old-turn sequence; profile-independent clients; and runtime-profile mismatch with one acquire and zero RPC.
+
+The fixture now freezes `TurnStartParams.effort` as optional and nullable, with `$ref` `#/definitions/v2/ReasoningEffort`; that definition is JSON string, has no enum, and `minLength: 1`. Tests also freeze exact maximum input acceptance/preservation, remote numeric rejection code retention, and TurnLifecycleError redaction/no-retry fields. Direct focused, error, capability, regression, full, compile, import, diff, and secret-scan results are recorded by the repair executor. This is factual repair evidence only; architect acceptance is not claimed.
