@@ -20,14 +20,20 @@ That evidence establishes that an empty `GrantedPermissionProfile` becomes an em
 
 ## Implementation and checks
 
-The protocol classifier now separates `id + method + params` server requests from client responses, preserves exact string/integer request IDs, has a bounded pending server-request queue (128), permits same IDs in opposite directions, rejects duplicate pending server IDs, and leaves notifications on their separate queue. Each inbound approval ID has one response-attempt owner. A send failure is `APPROVAL_RESPONSE_UNKNOWN`; no resend or replacement DENY is attempted. EOF with an unanswered server request faults terminally.
+## Architect first repair pass
+
+Rejected candidate: `6484694550dd48ad648242685718ab868dc6dcc3`.
+
+The repair uses a 64 request pending bound, signed-64 or non-empty NUL-free 256-character request IDs, an explicit mutually-exclusive envelope classifier, READY-only allowlisted requests, and immutable/redacted `InboundServerRequest` ownership. Responses require the exact pending instance; terminal IDs may be reused only by a new instance. The profile-bound bridge serializes decisions, supplies finite kinds/results and bounded redacted context, owns send tasks across cancellation, and wakes on protocol terminal. ADR-0014 permissions mappings remain unchanged.
+
+The protocol classifier now separates `id + method + params` server requests from client responses, preserves exact string/integer request IDs, has a bounded pending server-request queue (64), permits same IDs in opposite directions, rejects duplicate pending server IDs, and leaves notifications on their separate queue. Each inbound approval ID has one response-attempt owner. A send failure is `APPROVAL_RESPONSE_UNKNOWN`; no resend or replacement DENY is attempted. EOF with an unanswered server request faults terminally.
 
 `CodexApprovalAdapter` is fake-operator-only. Its public `ApprovalRequest` has finite opaque identity fields and no raw parameter payload in its representation. Command/file-change ALLOW/DENY maps to `accept`/`decline`; apply-patch/exec-command maps to `approved`/`denied`.
 
 Focused checks passed:
 
-- `PYTHONPATH=src python -m unittest tests.unit.test_codex_approvals tests.unit.test_codex_protocol tests.unit.test_codex_capabilities tests.unit.test_codex_errors` — 56 tests.
-- `PYTHONPATH=src python -m unittest discover -s tests -p 'test_*.py'` — 166 tests. The existing P1.6 suite emits pending-task shutdown warnings but exits successfully.
+- `PYTHONPATH=src python3 -m unittest tests.unit.test_codex_protocol tests.unit.test_codex_approvals` — 28 tests.
+- `PYTHONPATH=src python3 -m unittest discover -s tests -v` — 169 tests.
 - `python -m compileall -q src` — passed.
 
 Focused approval coverage proves exact permissions DENY; ALLOW with multiple filesystem entries; network-only and filesystem-only mappings; empty request/operator exception/operator cancellation/invalid decision denial; all other approval method allow/deny maps; redaction; opposite-direction same-ID support; duplicate pending server ID rejection; and ambiguous send one-attempt normalization.

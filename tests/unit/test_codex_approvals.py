@@ -80,15 +80,15 @@ class ApprovalTests(unittest.IsolatedAsyncioTestCase):
             await CodexApprovalAdapter(op).handle_envelope(self.client,await self._inbound(PERMISSIONS,payload,request_id))
             self.assertEqual(self.transport.sent[-1]["result"],{"permissions":{},"scope":"turn"})
         # A cancelling operator is contained and produces exactly the same DENY.
-        with self.assertRaises(asyncio.CancelledError):
-            await CodexApprovalAdapter(Operator(error=asyncio.CancelledError())).handle_envelope(self.client,await self._inbound(PERMISSIONS,permissions(network=True),"cancel"))
+        result=await CodexApprovalAdapter(Operator(error=asyncio.CancelledError())).handle_envelope(self.client,await self._inbound(PERMISSIONS,permissions(network=True),"cancel"))
+        self.assertEqual(result.status.value,"denied")
         self.assertEqual(self.transport.sent[-1]["result"],{"permissions":{},"scope":"turn"})
 
     async def test_handler_cancellation_before_send_denies_then_propagates_cancel(self):
         operator=WaitingOperator(); adapter=CodexApprovalAdapter(operator)
         task=asyncio.create_task(adapter.handle_envelope(self.client,await self._inbound(PERMISSIONS,permissions(network=True),"outer-cancel")))
         await operator.started.wait(); task.cancel()
-        with self.assertRaises(asyncio.CancelledError): await task
+        self.assertEqual((await task).status.value,"denied")
         self.assertEqual(self.transport.sent[-1],{"id":"outer-cancel","result":{"permissions":{},"scope":"turn"}})
 
     async def test_each_non_permission_exact_mapping(self):
@@ -112,7 +112,7 @@ class ApprovalTests(unittest.IsolatedAsyncioTestCase):
         client_request=asyncio.create_task(self.client.request("test",{})); await asyncio.sleep(0)
         self.transport.deliver({"id":2,"method":COMMAND,"params":{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"}})
         self.transport.deliver({"id":2,"result":{}}); await asyncio.sleep(0)
-        inbound=await self.client.next_server_request(); self.assertEqual(inbound["id"],2); self.assertEqual(await client_request,{})
+        inbound=await self.client.next_server_request(); self.assertEqual(inbound.request_id,2); self.assertEqual(await client_request,{})
 
     async def test_duplicate_pending_server_id_faults_and_eof_is_terminal(self):
         await self._inbound(COMMAND,{"itemId":"i","startedAtMs":1,"threadId":"t","turnId":"u"},"same")
@@ -122,7 +122,6 @@ class ApprovalTests(unittest.IsolatedAsyncioTestCase):
     async def test_ambiguous_send_is_not_retried_and_normalizes_unknown(self):
         self.transport.fail_send=True
         inbound=await self._inbound(PERMISSIONS,permissions(network=True),"lost")
-        with self.assertRaises(Exception) as raised:
-            await CodexApprovalAdapter(Operator()).handle_envelope(self.client,inbound)
-        self.assertIs(normalize_error(raised.exception).category,CodexAdapterErrorCategory.APPROVAL_RESPONSE_UNKNOWN)
+        result=await CodexApprovalAdapter(Operator()).handle_envelope(self.client,inbound)
+        self.assertEqual(result.status.value,"response_unknown")
         self.assertEqual(sum(x.get("id")=="lost" for x in self.transport.sent),1)

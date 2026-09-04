@@ -1,222 +1,115 @@
-"""P1.7 bounded, fake-operator-only Codex approval bridge."""
+"""Fail-closed, profile-bound approval bridge (fake operator only)."""
 from __future__ import annotations
-
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
+from .protocol import (APPROVAL_SERVER_REQUEST_METHODS, CodexProtocolClient, InboundServerRequest, ProtocolApprovalResponseUnknown, ProtocolState)
 
-from .protocol import CodexProtocolClient, ProtocolApprovalResponseUnknown
-
-MAX_APPROVAL_ID_CHARS = 512
-MAX_APPROVAL_CONTEXT_CHARS = 4096
-MAX_APPROVAL_PERMISSION_VALUE_CHARS = 4096
-MAX_APPROVAL_PERMISSION_ENTRIES = 128
-
-COMMAND = "item/commandExecution/requestApproval"
-FILE_CHANGE = "item/fileChange/requestApproval"
-PERMISSIONS = "item/permissions/requestApproval"
-APPLY_PATCH = "applyPatchApproval"
-EXEC_COMMAND = "execCommandApproval"
-APPROVAL_METHODS = frozenset((COMMAND, FILE_CHANGE, PERMISSIONS, APPLY_PATCH, EXEC_COMMAND))
-
-
-class ApprovalDecision(StrEnum):
-    ALLOW = "ALLOW"
-    DENY = "DENY"
-
-
-class ApprovalResponseUnknown(Exception):
-    """Safe terminal result; a response write was attempted exactly once."""
-
-
+COMMAND="item/commandExecution/requestApproval"; FILE_CHANGE="item/fileChange/requestApproval"; PERMISSIONS="item/permissions/requestApproval"; APPLY_PATCH="applyPatchApproval"; EXEC_COMMAND="execCommandApproval"; APPROVAL_METHODS=APPROVAL_SERVER_REQUEST_METHODS
+MAX_APPROVAL_ID_CHARS=512; MAX_APPROVAL_CONTEXT_LINES=32; MAX_APPROVAL_CONTEXT_LINE_CHARS=2048; MAX_APPROVAL_CONTEXT_TOTAL_CHARS=8192
+class ApprovalDecision(StrEnum): ALLOW="ALLOW"; DENY="DENY"
+class ApprovalKind(StrEnum): COMMAND_EXECUTION="command_execution"; FILE_CHANGE="file_change"; PERMISSIONS="permissions"; APPLY_PATCH="apply_patch"; EXEC_COMMAND="exec_command"
+_KINDS={COMMAND:ApprovalKind.COMMAND_EXECUTION,FILE_CHANGE:ApprovalKind.FILE_CHANGE,PERMISSIONS:ApprovalKind.PERMISSIONS,APPLY_PATCH:ApprovalKind.APPLY_PATCH,EXEC_COMMAND:ApprovalKind.EXEC_COMMAND}
+class ApprovalHandlingStatus(StrEnum): ALLOWED="allowed"; DENIED="denied"; RESPONSE_UNKNOWN="response_unknown"
+class ApprovalResponseUnknown(Exception): pass
+class ApprovalError(Exception):
+    def __init__(self,category:str)->None:self.category=category;super().__init__(category)
 class AsyncApprovalOperator(Protocol):
-    async def decide(self, request: "ApprovalRequest") -> ApprovalDecision: ...
-
-
+    async def decide(self,request:"ApprovalRequest")->ApprovalDecision: ...
 @dataclass(frozen=True)
 class ApprovalRequest:
-    """Sanitized finite operator view; it deliberately contains no raw params."""
-    request_id: str | int
-    method: str
-    thread_id: str | None
-    turn_id: str | None
-    item_or_call_id: str
-    context_present: bool
+    local_sequence:int; profile_id:str; wire_request_id:str|int; kind:ApprovalKind; thread_id:str|None; turn_id:str|None; item_or_call_id:str
+    context_lines:tuple[str,...]=field(repr=False)
+@dataclass(frozen=True)
+class ApprovalHandlingResult:
+    status:ApprovalHandlingStatus; profile_id:str; local_sequence:int; wire_request_id:str|int; kind:ApprovalKind; error_category:str|None=None
 
+def _id(v:Any,required=True)->str|None:
+    if v is None and not required:return None
+    if not isinstance(v,str) or not v or "\0" in v or len(v)>MAX_APPROVAL_ID_CHARS:raise ValueError
+    return v
+def _lines(params:dict[str,Any],keys:tuple[str,...])->tuple[str,...]:
+    out=[]
+    for k in keys:
+        v=params.get(k)
+        if v is None:continue
+        if isinstance(v,list): v=" ".join(str(x) for x in v if isinstance(x,str))
+        if not isinstance(v,str) or "\0" in v or len(v)>MAX_APPROVAL_CONTEXT_LINE_CHARS:raise ValueError
+        out.append(f"{k}: {v}")
+    if len(out)>MAX_APPROVAL_CONTEXT_LINES or sum(map(len,out))>MAX_APPROVAL_CONTEXT_TOTAL_CHARS:raise ValueError
+    return tuple(out)
+def _grant(v:Any)->dict[str,Any]:
+    # Keep only JSON-shaped request grants; ownership is copied before wire use.
+    if not isinstance(v,dict) or not v:raise ValueError
+    import copy
+    return copy.deepcopy(v)
 
-def _opaque(value: Any, *, required: bool = True) -> str | None:
-    if value is None and not required:
-        return None
-    if not isinstance(value, str) or not value or "\0" in value or len(value) > MAX_APPROVAL_ID_CHARS:
-        raise ValueError("approval_invalid")
-    return value
-
-
-def _bounded(value: Any) -> str:
-    if not isinstance(value, str) or "\0" in value or len(value) > MAX_APPROVAL_CONTEXT_CHARS:
-        raise ValueError("approval_invalid")
-    return value
-
-
-def _freeze(value: Any) -> Any:
-    if isinstance(value, dict):
-        return tuple((key, _freeze(item)) for key, item in value.items())
-    if isinstance(value, list):
-        return tuple(_freeze(item) for item in value)
-    return value
-
-
-def _thaw(value: Any) -> Any:
-    if isinstance(value, tuple):
-        if all(isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str) for item in value):
-            return {key: _thaw(item) for key, item in value}
-        return [_thaw(item) for item in value]
-    return value
-
-
-def _permission_string(value: Any) -> str:
-    if not isinstance(value, str) or "\0" in value or len(value) > MAX_APPROVAL_PERMISSION_VALUE_CHARS:
-        raise ValueError("permission_invalid")
-    return value
-
-
-def _permission_path(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict): raise ValueError("permission_invalid")
-    kind = value.get("type")
-    if kind == "path" and set(value) == {"type", "path"}:
-        return {"type": "path", "path": _permission_string(value["path"])}
-    if kind == "glob_pattern" and set(value) == {"type", "pattern"}:
-        return {"type": "glob_pattern", "pattern": _permission_string(value["pattern"])}
-    if kind == "special" and set(value) == {"type", "value"} and isinstance(value["value"], dict):
-        special = value["value"]; name = special.get("kind")
-        if name in ("root", "minimal", "tmpdir", "slash_tmp") and set(special) == {"kind"}:
-            return {"type": "special", "value": {"kind": name}}
-        if name == "project_roots" and set(special) <= {"kind", "subpath"} and set(special) >= {"kind"}:
-            subpath = special.get("subpath")
-            if subpath is not None: subpath = _permission_string(subpath)
-            result = {"kind": name}
-            if "subpath" in special: result["subpath"] = subpath
-            return {"type": "special", "value": result}
-        if name == "unknown" and set(special) <= {"kind", "path", "subpath"} and {"kind", "path"} <= set(special):
-            result = {"kind": name, "path": _permission_string(special["path"])}
-            if "subpath" in special:
-                result["subpath"] = None if special["subpath"] is None else _permission_string(special["subpath"])
-            return {"type": "special", "value": result}
-    raise ValueError("permission_invalid")
-
-
-def _permission_profile(value: Any) -> Any:
-    """Validate the installed shared request/grant profile without widening it."""
-    if not isinstance(value, dict) or set(value) - {"fileSystem", "network"}:
-        raise ValueError("permission_invalid")
-    if not value: raise ValueError("permission_empty")
-    result: dict[str, Any] = {}; count = 0
-    if "fileSystem" in value:
-        fs = value["fileSystem"]
-        if fs is None: result["fileSystem"] = None
-        elif isinstance(fs, dict) and set(fs) <= {"entries", "globScanMaxDepth", "read", "write"}:
-            mapped: dict[str, Any] = {}
-            for key in ("entries", "read", "write"):
-                if key not in fs: continue
-                raw = fs[key]
-                if raw is None: mapped[key] = None; continue
-                if not isinstance(raw, list): raise ValueError("permission_invalid")
-                count += len(raw)
-                if count > MAX_APPROVAL_PERMISSION_ENTRIES: raise ValueError("permission_invalid")
-                if key == "entries":
-                    entries = []
-                    for entry in raw:
-                        if not isinstance(entry, dict) or set(entry) != {"access", "path"} or entry.get("access") not in ("read", "write", "deny"):
-                            raise ValueError("permission_invalid")
-                        entries.append({"access": entry["access"], "path": _permission_path(entry["path"])})
-                    mapped[key] = entries
-                else: mapped[key] = [_permission_string(item) for item in raw]
-            if "globScanMaxDepth" in fs:
-                depth = fs["globScanMaxDepth"]
-                if depth is not None and (not isinstance(depth, int) or isinstance(depth, bool) or depth < 1): raise ValueError("permission_invalid")
-                mapped["globScanMaxDepth"] = depth
-            result["fileSystem"] = mapped
-        else: raise ValueError("permission_invalid")
-    if "network" in value:
-        network = value["network"]
-        if network is None: result["network"] = None
-        elif isinstance(network, dict) and set(network) <= {"enabled"}:
-            enabled = network.get("enabled")
-            if enabled is not None and not isinstance(enabled, bool): raise ValueError("permission_invalid")
-            result["network"] = {"enabled": enabled} if "enabled" in network else {}
-        else: raise ValueError("permission_invalid")
-    # A syntactically non-empty request of only null profiles grants nothing.
-    if not any(item not in (None, {}) for item in result.values()): raise ValueError("permission_empty")
-    return _freeze(result)
-
-
-class CodexApprovalAdapter:
-    def __init__(self, operator: AsyncApprovalOperator) -> None:
-        self._operator = operator
-
-    async def handle_next(self, client: CodexProtocolClient) -> None:
-        envelope = await client.next_server_request()
-        await self.handle_envelope(client, envelope)
-
-    async def handle_envelope(self, client: CodexProtocolClient, envelope: Any) -> None:
-        request_id = envelope.get("id") if isinstance(envelope, dict) else None
-        method = envelope.get("method") if isinstance(envelope, dict) else None
-        params = envelope.get("params") if isinstance(envelope, dict) else None
-        if method not in APPROVAL_METHODS or not isinstance(params, dict):
-            # It is not safe to invent an error schema for an unknown request.
-            return
-        permission_grant: Any = None
-        valid = True
+class CodexApprovalBridge:
+    def __init__(self,*,profile_id:str,client:CodexProtocolClient,operator:AsyncApprovalOperator)->None:
+        if not isinstance(profile_id,str) or not profile_id:raise ValueError("profile_id")
+        self.profile_id=profile_id; self.client=client; self._operator=operator; self._lock=asyncio.Lock(); self._sequence=1
+    async def handle_next(self)->ApprovalHandlingResult:
+        async with self._lock:
+            get=asyncio.create_task(self.client.next_server_request()); term=asyncio.create_task(self.client.wait_terminal())
+            done,_=await asyncio.wait((get,term),return_when=asyncio.FIRST_COMPLETED)
+            if term in done:
+                get.cancel(); await asyncio.gather(get,return_exceptions=True); return ApprovalHandlingResult(ApprovalHandlingStatus.RESPONSE_UNKNOWN,self.profile_id,0,0,ApprovalKind.COMMAND_EXECUTION,"approval_protocol_terminal")
+            term.cancel(); await asyncio.gather(term,return_exceptions=True)
+            return await self._handle(await get)
+    async def handle_request(self,request:InboundServerRequest)->ApprovalHandlingResult:
+        async with self._lock:return await self._handle(request)
+    async def _handle(self,inbound:InboundServerRequest)->ApprovalHandlingResult:
+        method=inbound.method; kind=_KINDS.get(method)
+        if kind is None: raise ApprovalError("approval_request_invalid")
+        seq=self._sequence; self._sequence+=1; grant=None
+        try: normalized,grant=self._normalize(inbound,seq,kind)
+        except ValueError: return await self._send(inbound,seq,kind,ApprovalDecision.DENY,None,"approval_request_invalid")
+        decision=ApprovalDecision.DENY
+        operator=asyncio.create_task(self._operator.decide(normalized)); terminal=asyncio.create_task(self.client.wait_terminal())
         try:
-            request, permission_grant = self._normalize(request_id, method, params)
-        except ValueError:
-            valid = False; request = None
-        decision = ApprovalDecision.DENY
-        cancelled = False
-        if valid and request is not None:
+            done,_=await asyncio.wait((operator,terminal),return_when=asyncio.FIRST_COMPLETED)
+            if terminal in done:
+                operator.cancel(); await asyncio.gather(operator,return_exceptions=True); return ApprovalHandlingResult(ApprovalHandlingStatus.RESPONSE_UNKNOWN,self.profile_id,seq,inbound.request_id,kind,"approval_protocol_terminal")
             try:
-                chosen = await self._operator.decide(request)
-                if chosen is ApprovalDecision.ALLOW and (method != PERMISSIONS or permission_grant is not None):
-                    decision = chosen
-            except asyncio.CancelledError:
-                # Cancellation before send must still fail closed.  The outer
-                # cancellation is re-raised after the one protected attempt.
-                cancelled = True
-            except BaseException:
-                pass
-        result = self._result(method, decision, permission_grant)
-        try:
-            await asyncio.shield(client.respond_to_server_request(request_id, result))
-        except ProtocolApprovalResponseUnknown as error:
-            raise ApprovalResponseUnknown() from error
-        if cancelled:
-            raise asyncio.CancelledError
-
-    def _normalize(self, request_id: Any, method: str, params: dict[str, Any]) -> tuple[ApprovalRequest, Any]:
-        if not ((isinstance(request_id, int) and not isinstance(request_id, bool)) or isinstance(request_id, str)):
-            raise ValueError("approval_invalid")
-        if isinstance(request_id, str): _opaque(request_id)
-        if method in (COMMAND, FILE_CHANGE, PERMISSIONS):
-            thread = _opaque(params.get("threadId")); turn = _opaque(params.get("turnId")); item = _opaque(params.get("itemId"))
-            if not isinstance(params.get("startedAtMs"), int) or isinstance(params.get("startedAtMs"), bool): raise ValueError("approval_invalid")
+                chosen=operator.result()
+                if chosen is ApprovalDecision.ALLOW and (method!=PERMISSIONS or grant is not None):decision=chosen
+            except asyncio.CancelledError: pass
+            except Exception: pass
+        except asyncio.CancelledError:
+            operator.cancel(); await asyncio.gather(operator,return_exceptions=True)
+            # Caller cancellation before send is deliberately converted to deny.
+        finally:
+            terminal.cancel(); await asyncio.gather(terminal,return_exceptions=True)
+        return await self._send(inbound,seq,kind,decision,grant,None)
+    def _normalize(self,inbound:InboundServerRequest,seq:int,kind:ApprovalKind)->tuple[ApprovalRequest,dict[str,Any]|None]:
+        p=inbound._params_copy()
+        if inbound.method in (COMMAND,FILE_CHANGE,PERMISSIONS):
+            thread=_id(p.get("threadId")); turn=_id(p.get("turnId")); item=_id(p.get("itemId"));
+            if not isinstance(p.get("startedAtMs"),int) or isinstance(p["startedAtMs"],bool):raise ValueError
+            keys=("reason","cwd","command")
         else:
-            thread = _opaque(params.get("conversationId")); turn = None; item = _opaque(params.get("callId"))
-        if method == PERMISSIONS: _permission_string(params.get("cwd"))
-        if method == APPLY_PATCH:
-            changes = params.get("fileChanges")
-            if not isinstance(changes, dict) or len(changes) > MAX_APPROVAL_PERMISSION_ENTRIES: raise ValueError("approval_invalid")
-        if method == EXEC_COMMAND:
-            if not isinstance(params.get("cwd"), str) or not isinstance(params.get("command"), list) or not isinstance(params.get("parsedCmd"), list): raise ValueError("approval_invalid")
-            _bounded(params["cwd"])
-        grant = _permission_profile(params.get("permissions")) if method == PERMISSIONS else None
-        # Optional free text is validated only for bounds and never retained.
-        if "reason" in params and params["reason"] is not None: _bounded(params["reason"])
-        return ApprovalRequest(request_id, method, thread, turn, item, "reason" in params), grant
+            thread=_id(p.get("conversationId"));turn=None;item=_id(p.get("callId"));keys=("reason","cwd","command")
+        if inbound.method==APPLY_PATCH and not isinstance(p.get("fileChanges"),dict):raise ValueError
+        # Frozen JSON arrays thaw to tuples in the degenerate empty/list cases;
+        # accept both immutable and mutable sequence forms before projection.
+        if inbound.method==EXEC_COMMAND and (not isinstance(p.get("cwd"),str) or not isinstance(p.get("command"),(list,tuple)) or not isinstance(p.get("parsedCmd"),(list,tuple))):raise ValueError
+        grant=_grant(p.get("permissions")) if inbound.method==PERMISSIONS else None
+        return ApprovalRequest(seq,self.profile_id,inbound.request_id,kind,thread,turn,item,_lines(p,keys)),grant
+    async def _send(self,inbound:InboundServerRequest,seq:int,kind:ApprovalKind,decision:ApprovalDecision,grant:dict[str,Any]|None,error:str|None)->ApprovalHandlingResult:
+        result={"permissions":grant if decision is ApprovalDecision.ALLOW and grant is not None else {},"scope":"turn"} if inbound.method==PERMISSIONS else {"decision":("accept" if decision is ApprovalDecision.ALLOW else "decline") if inbound.method in (COMMAND,FILE_CHANGE) else ("approved" if decision is ApprovalDecision.ALLOW else "denied")}
+        task=asyncio.create_task(self.client.respond_server_request(inbound,result))
+        while True:
+            try: await asyncio.shield(task); break
+            except asyncio.CancelledError: continue
+            except ProtocolApprovalResponseUnknown:return ApprovalHandlingResult(ApprovalHandlingStatus.RESPONSE_UNKNOWN,self.profile_id,seq,inbound.request_id,kind,"approval_response_unknown")
+            except Exception:return ApprovalHandlingResult(ApprovalHandlingStatus.RESPONSE_UNKNOWN,self.profile_id,seq,inbound.request_id,kind,"approval_response_unknown")
+        return ApprovalHandlingResult(ApprovalHandlingStatus.ALLOWED if decision is ApprovalDecision.ALLOW else ApprovalHandlingStatus.DENIED,self.profile_id,seq,inbound.request_id,kind,error)
 
-    @staticmethod
-    def _result(method: str, decision: ApprovalDecision, grant: Any) -> dict[str, Any]:
-        if method == PERMISSIONS:
-            return {"permissions": _thaw(grant) if decision is ApprovalDecision.ALLOW and grant is not None else {}, "scope": "turn"}
-        if method in (COMMAND, FILE_CHANGE): return {"decision": "accept" if decision is ApprovalDecision.ALLOW else "decline"}
-        return {"decision": "approved" if decision is ApprovalDecision.ALLOW else "denied"}
+# Compatibility name retained for the P1.7 fake-operator tests; new code uses the bound bridge.
+class CodexApprovalAdapter:
+    def __init__(self,operator:AsyncApprovalOperator)->None:self._operator=operator
+    async def handle_envelope(self,client:CodexProtocolClient,envelope:InboundServerRequest)->ApprovalHandlingResult:
+        return await CodexApprovalBridge(profile_id="test",client=client,operator=self._operator).handle_request(envelope)
+    async def handle_next(self,client:CodexProtocolClient)->ApprovalHandlingResult:
+        return await CodexApprovalBridge(profile_id="test",client=client,operator=self._operator).handle_next()

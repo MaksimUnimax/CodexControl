@@ -1,0 +1,10 @@
+{
+  "codex_version":"codex-cli 0.144.6",
+  "schema_sha256":"40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466",
+  "request_envelope":{"required":["id","method","params"],"jsonrpc_absent":true},
+  "response_envelope":{"required":["id","result"],"jsonrpc_absent":true},
+  "request_id":{"types":["string","integer"],"integer_format":"int64","string_architect_bound":256},
+  "accepted_methods":["item/commandExecution/requestApproval","item/fileChange/requestApproval","item/permissions/requestApproval","applyPatchApproval","execCommandApproval"],
+  "max_pending_server_requests":64,
+  "directional_id_namespaces":true
+}

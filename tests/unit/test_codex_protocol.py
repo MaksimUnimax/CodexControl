@@ -5,6 +5,8 @@ import unittest
 
 from codex_control.adapters.codex.protocol import (
     CodexProtocolClient,
+    InboundServerRequest,
+    MAX_PENDING_SERVER_REQUESTS,
     ProtocolFault,
     ProtocolRemoteError,
     ProtocolState,
@@ -48,6 +50,28 @@ class CodexProtocolTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_initial_state_is_new(self):
         self.assertIs(self.client.state, ProtocolState.NEW)
+
+    async def test_server_request_is_immutable_redacted_and_exact_instance_owned(self):
+        await self._ready()
+        sentinel="PRIVATE_SERVER_PARAMS_MUST_NOT_LEAK"
+        self.transport.deliver({"id":" A ","method":"item/commandExecution/requestApproval","params":{"secret":sentinel}})
+        await asyncio.sleep(0)
+        request=await self.client.next_server_request()
+        self.assertIsInstance(request,InboundServerRequest)
+        self.assertEqual(request.request_id," A ")
+        self.assertNotIn(sentinel,repr(request))
+        await self.client.respond_server_request(request,{"decision":"decline"})
+        self.assertEqual(self.transport.sent[-1],{"id":" A ","result":{"decision":"decline"}})
+        with self.assertRaises(ProtocolFault):
+            await self.client.respond_server_request(request,{"decision":"decline"})
+
+    async def test_mixed_envelope_and_pre_ready_server_request_fault(self):
+        task=asyncio.create_task(self.client.initialize()); await asyncio.sleep(0)
+        self.transport.deliver({"id":9,"method":"item/commandExecution/requestApproval","params":{},"result":{}})
+        await asyncio.sleep(0)
+        self.assertIs(self.client.state,ProtocolState.FAULTED)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError): await task
 
     async def test_business_request_before_initialize_is_rejected_without_send(self):
         with self.assertRaisesRegex(ProtocolFault, "request_not_allowed"):
