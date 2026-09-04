@@ -13,29 +13,33 @@ Date: 2026-09-04
 - P1.3 accepted implementation after three repair reviews: `7568f0b01b204b48676447db9c71ab847a0be5b2`.
 - P1.4 accepted implementation after one repair review: `981b0c359f09e82354c50bb68eb3317d389a9c15`.
 - P1.5 accepted implementation after two repair reviews: `e7851d813944d3326b7fd9317da9e21f216557fa`.
+- P1.6 accepted implementation after two repair reviews: `de36b3ef3657a464b29ff2d17692fce5fc2b2388`.
 
-## P1.5 accepted thread-lifecycle facts
-- Durable P1.5 Codex thread identity is only owning `profile_id` + exact opaque `thread_id`; P1.5 did not redefine the existing foundation dialogue/turn objects.
-- `thread/start` and `thread/resume` operate only on the exact owning profile runtime and use fake/simulated runtimes in P1 acceptance.
-- P1.5 captures one runtime before start selection, then requires the P1.4 catalog profile/generation to match that exact runtime before dispatch; it does not reacquire/rebase onto a newer generation.
-- `thread/start` sends trusted absolute `cwd`, approval policy `on-request`, sandbox `workspace-write`, exact P1.4 `wire_model`, and `ephemeral=false`.
-- ADR-0013 is binding: P1.5 validates explicit-or-runtime-default reasoning effort against P1.4 before start, but does not encode reasoning effort in `thread/start`; exact effort wire transmission belongs to P1.6 `turn/start` after schema verification.
-- Installed `thread/start` has no typed reasoning-effort field; its optional `config` is unrestricted and is not used to guess a reasoning key.
-- `thread/resume` sends exact `threadId`, trusted `cwd`, approval policy `on-request`, and sandbox `workspace-write`; it does not override model or reasoning effort.
-- Installed 0.144.6 start/resume schemas expose no raw-event toggle and no extended-history toggle; resume exposes no persistence selector; start persistence uses `ephemeral=false`.
-- Successful start/resume accepts only exact bounded thread identity; malformed or mismatched successful envelopes become operation-specific UNKNOWN, never blind retry.
-- Definitive app-server remote errors are operation-specific REJECTED and retain only safe numeric remote code; ambiguous protocol/transport/process or inner-request cancellation is operation-specific UNKNOWN.
-- Caller cancellation before side-effect dispatch sends no thread RPC and releases the profile guard. After dispatch, repeated caller cancellation cannot detach/cancel the exact side-effect request; the same public invocation resolves to CONFIRMED, REJECTED, or UNKNOWN.
-- At most one thread lifecycle side effect is active per profile per adapter instance; different profiles are independent; exact-token cleanup prevents stale completion from releasing a replacement reservation.
-- `MODEL_LIST`, `THREAD_START`, and `THREAD_RESUME` are locally `IMPLEMENTED`; later P1 capabilities remain `NOT_IMPLEMENTED`.
+## P1.6 accepted turn-lifecycle facts
+- Installed `turn/start` requires `input` and `threadId`; exact successful turn identity is `turn.id`.
+- Plain text input is sent as `[{"type":"text","text":...}]`; product input is bounded to 65,536 characters, NUL-free, and preserved exactly.
+- Per-turn exact model selection uses P1.4 `wire_model` through typed `model`; reasoning effort uses exact typed `effort`. ADR-0013 is satisfied without opaque config guessing.
+- Installed `TurnStartParams.effort` is optional/nullable and references `#/definitions/v2/ReasoningEffort`; the referenced JSON type is string, no enum is declared, and `minLength` is 1. Accepted P1.4 always supplies a validated non-empty advertised default when caller effort is absent.
+- `turn/start` also uses trusted `cwd`, approval policy `on-request`, and `sandboxPolicy: {"type":"workspaceWrite"}`; no arbitrary config/base/developer/provider fields are injected.
+- P1.6 captures one runtime before catalog lookup and requires catalog profile/generation to match that exact runtime; there is no lifecycle-level reacquire/rebase or blind retry.
+- Pre-dispatch cancellation sends no turn RPC. After dispatch, repeated caller cancellation cannot detach/cancel the exact side-effect request; the same invocation resolves to CONFIRMED, REJECTED, or UNKNOWN. Inner request cancellation after dispatch is TURN_START_UNKNOWN.
+- Durable/external turn identity is exact `profile_id + thread_id + turn_id`; turn IDs are opaque, case/whitespace preserving, NUL-free, and bounded to 512 characters.
+- A single collector owns the exact active turn notification stream. Canonical user-visible output comes only from completed `item/completed` items whose `item.type == agentMessage`; deltas are transient and never canonical output.
+- Completed agent-message item IDs are exact/bounded and duplicates fail closed. Agent text allows empty strings because the installed schema has no minLength; one message is bounded to 1,000,000 characters, at most 256 messages and 2,000,000 total completed user-visible characters are accepted per turn.
+- Non-agent command/file-change/reasoning/internal items are never projected as user-visible answer content.
+- Recognized malformed delta/completed/terminal envelopes for the active stream fail closed as TURN_STREAM_UNKNOWN; well-formed other-thread/other-turn events are ignored.
+- `turn/completed` exact status mapping: `completed` -> COMPLETED; `failed` and `interrupted` -> definitive FAILED; `inProgress` on terminal notification or invalid status -> TURN_STREAM_UNKNOWN.
+- Collector observes protocol terminal state and cannot hang waiting only on notifications. Queued matching terminal notifications are processed deterministically before protocol-terminal UNKNOWN where safely available.
+- Active-turn notification consumption is bounded to 16,384 notifications.
+- Active collector state and completed terminal results are separate. Terminal publication is exact-token/lock protected; active state clears atomically and at most one immutable completed result is retained per profile/thread key. A newer CONFIRMED turn evicts the prior completed result; stale publication cannot overwrite replacement state.
+- A cancelled read-only `wait_turn` waiter does not cancel the collector; a later waiter may retrieve the retained exact terminal result while it remains current for that key.
+- `MODEL_LIST`, `THREAD_START`, `THREAD_RESUME`, `TURN_START`, `AGENT_MESSAGE_EVENTS`, and `TURN_TERMINAL_EVENTS` are locally `IMPLEMENTED`; `THREAD_DELETE`, `TURN_INTERRUPT`, `APPROVAL_SERVER_REQUESTS`, and `APPROVAL_RESPONSE_SCHEMA` remain `NOT_IMPLEMENTED`.
 
 ## Execution authority
 Codex must not self-start work from this document.
 
-Only **P1.6 — `turn/start` + ordered user-visible agent-message/terminal handling** is eligible for the next explicit implementation prompt.
+Only **P1.7 — bidirectional server-request envelope + approval request/response port using a fake operator** is eligible for the next explicit implementation prompt.
 
-P1.6 does not authorize bidirectional server-request/approval handling, interrupt, thread delete, Telegram, SQLite, systemd, production deployment, or architecture/roadmap edits.
+P1.7 owns the previously deferred P1.1 inbound `id + method + params` server-request distinction, exact installed approval request parsing, exact response-envelope emission, one-time approval ownership, and fake-operator acceptance tests. It does not authorize real Telegram approval UI, real production approvals, turn interrupt, thread delete, SQLite, systemd, or production deployment.
 
-P1.6 must freeze the exact installed Codex 0.144.6 `turn/start` request/response and relevant server-notification schemas. In particular, ADR-0013 requires P1.6 to determine the exact installed authoritative reasoning-effort wire shape; if no exact typed/schema-authoritative shape exists, Codex must stop for architect decision rather than guess opaque config keys.
-
-P1.6 tests must use fake/simulated READY runtimes and protocol events only. Real production-profile turn execution is reserved for P7 unless an architect prompt explicitly authorizes an isolated disposable acceptance operation.
+P1.7 must re-verify the exact installed Codex 0.144.6 schema before implementation. If exact approval request/response shapes or enum values cannot be determined from the installed schema, Codex must stop for architect decision rather than guess.
