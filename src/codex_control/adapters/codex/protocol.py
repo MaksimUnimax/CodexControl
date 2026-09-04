@@ -50,6 +50,7 @@ class CodexProtocolClient:
         self._completed_ids: set[int] = set()
         self._notifications: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._reader_task: asyncio.Task[None] | None = None
+        self._terminal = asyncio.Event()
         self.initialize_result: InitializeResult | None = None
 
     @property
@@ -89,10 +90,16 @@ class CodexProtocolClient:
     async def next_notification(self) -> dict[str, Any]:
         return await self._notifications.get()
 
+    async def wait_terminal(self) -> ProtocolState:
+        """Wait for a closed or faulted client without exposing wire content."""
+        await self._terminal.wait()
+        return self._state
+
     async def close(self) -> None:
         if self._state not in (ProtocolState.CLOSED, ProtocolState.FAULTED):
             self._state = ProtocolState.CLOSED
             self._fail_pending(ProtocolFault("client_closed"))
+        self._terminal.set()
         if self._reader_task is not None:
             self._reader_task.cancel()
             try:
@@ -127,6 +134,7 @@ class CodexProtocolClient:
                         self._fault("eof_pending")
                     elif self._state not in (ProtocolState.CLOSED, ProtocolState.FAULTED):
                         self._state = ProtocolState.CLOSED
+                        self._terminal.set()
                     return
                 self._handle_line(line)
         except asyncio.CancelledError:
@@ -186,6 +194,7 @@ class CodexProtocolClient:
         if self._state is ProtocolState.FAULTED:
             return
         self._state = ProtocolState.FAULTED
+        self._terminal.set()
         self._fail_pending(ProtocolFault(category))
 
     def _fail_pending(self, error: ProtocolError) -> None:
