@@ -17,8 +17,8 @@ class FoundationTests(unittest.TestCase):
         snapshot = capture_turn(binding)
         later = CodexSelection(CodexProfile("two", "/profile-two", "Two"), "model-b", "low")
         self.assertNotEqual(snapshot.binding.profile_id, later.profile.profile_id)
-        self.assertEqual(snapshot.binding.thread_id, "thread-1")
-        self.assertEqual(tuple(snapshot.binding.__dataclass_fields__), ("server_id", "profile_id", "thread_id"))
+        self.assertEqual(snapshot.binding.model, "model-a")
+        self.assertEqual(snapshot.binding.reasoning_effort, "high")
 
     def test_profile_repr_redacts_home(self):
         self.assertNotIn("/private", repr(CodexProfile("p", "/private", "Profile")))

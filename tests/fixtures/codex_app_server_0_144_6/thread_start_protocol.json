@@ -9,5 +9,7 @@
   "typed_reasoning_effort_field": null,
   "config_additional_properties": true,
   "omitted_parameter_fields": ["baseInstructions", "config", "developerInstructions"],
+  "raw_event_toggle": "ABSENT",
+  "extended_history_toggle": "ABSENT",
   "result_thread_id_path": ["thread", "id"]
 }

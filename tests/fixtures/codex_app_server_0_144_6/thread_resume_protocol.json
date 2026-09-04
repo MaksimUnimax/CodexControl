@@ -2,8 +2,13 @@
   "codex_version": "0.144.6",
   "schema_sha256": "40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466",
   "method": "thread/resume",
-  "sent_parameter_fields": ["threadId"],
+  "sent_parameter_fields": ["threadId", "cwd", "approvalPolicy", "sandbox"],
   "required_parameter_fields": ["threadId"],
-  "omitted_parameter_fields": ["approvalPolicy", "baseInstructions", "config", "cwd", "developerInstructions", "model", "sandbox"],
+  "omitted_parameter_fields": ["baseInstructions", "config", "developerInstructions", "model"],
+  "approval_policy": "on-request",
+  "sandbox": "workspace-write",
+  "raw_event_toggle": "ABSENT",
+  "extended_history_toggle": "ABSENT",
+  "persistence_selector": "ABSENT",
   "result_thread_id_path": ["thread", "id"]
 }

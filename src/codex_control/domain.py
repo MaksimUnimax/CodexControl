@@ -36,3 +36,5 @@ class DialogueBinding:
     server_id: str
     profile_id: str
     thread_id: str
+    model: str | None
+    reasoning_effort: str | None

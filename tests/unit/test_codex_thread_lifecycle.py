@@ -72,7 +72,23 @@ class FixtureTests(unittest.TestCase):
         self.assertEqual(start["sent_parameter_fields"], ["cwd", "approvalPolicy", "sandbox", "model", "ephemeral"])
         self.assertIsNone(start["typed_reasoning_effort_field"])
         self.assertTrue(start["config_additional_properties"])
-        self.assertEqual(resume["sent_parameter_fields"], ["threadId"])
+        self.assertEqual(resume["sent_parameter_fields"], ["threadId", "cwd", "approvalPolicy", "sandbox"])
+
+    def test_thread_lifecycle_error_is_finite_and_safe(self):
+        categories = (
+            CodexAdapterErrorCategory.THREAD_REQUEST_INVALID,
+            CodexAdapterErrorCategory.THREAD_PRECONDITION_CHANGED,
+            CodexAdapterErrorCategory.THREAD_OPERATION_BUSY,
+            CodexAdapterErrorCategory.THREAD_START_REJECTED,
+            CodexAdapterErrorCategory.THREAD_START_UNKNOWN,
+            CodexAdapterErrorCategory.THREAD_RESUME_REJECTED,
+            CodexAdapterErrorCategory.THREAD_RESUME_UNKNOWN,
+        )
+        for category in categories:
+            self.assertEqual(ThreadLifecycleError(category).category, category)
+        unsafe = ThreadLifecycleError("remote text /private/cwd and payload")
+        self.assertEqual(unsafe.category, CodexAdapterErrorCategory.THREAD_REQUEST_INVALID)
+        self.assertNotIn("/private", repr(unsafe))
 
 
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):
@@ -99,7 +115,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                     await self.adapter.start("p", model_id=model_id, reasoning_effort=effort, working_directory=self.cwd)
                 self.assertEqual(self.client.calls, [])
         self.catalog.values["p"] = catalog(generation=2)
-        with self.assertRaisesRegex(ThreadLifecycleError, "runtime_catalog_generation_mismatch"):
+        with self.assertRaisesRegex(ThreadLifecycleError, "thread_precondition_changed"):
             await self.adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd)
         self.assertEqual(self.client.calls, [])
 
@@ -107,7 +123,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.client.responses = [ProtocolRemoteError(400)]
         rejected = await self.adapter.start("p", model_id="visible-id", reasoning_effort="high", working_directory=self.cwd)
         self.assertEqual(rejected.status, ThreadOperationStatus.START_REJECTED)
-        self.assertEqual(rejected.error.category, CodexAdapterErrorCategory.REMOTE_APP_SERVER_ERROR)
+        self.assertEqual(rejected.error.category, CodexAdapterErrorCategory.THREAD_START_REJECTED)
         self.client.responses = [ProtocolFault("eof_pending")]
         unknown = await self.adapter.start("p", model_id="visible-id", reasoning_effort="high", working_directory=self.cwd)
         self.assertEqual(unknown.status, ThreadOperationStatus.START_UNKNOWN)
@@ -120,19 +136,19 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_resume_uses_owner_exact_id_and_confirms_returned_id(self):
         self.client.responses = [{"thread": {"id": "thread-1", "turns": ["PRIVATE"]}}]
         binding = ThreadBinding("p", "thread-1")
-        result = await self.adapter.resume(binding)
+        result = await self.adapter.resume(binding=binding, working_directory=self.cwd)
         self.assertEqual(result.status, ThreadOperationStatus.RESUME_CONFIRMED)
-        self.assertEqual(self.client.calls, [("thread/resume", {"threadId": "thread-1"})])
+        self.assertEqual(self.client.calls, [("thread/resume", {"threadId": "thread-1", "cwd": "/trusted/workspace", "approvalPolicy": "on-request", "sandbox": "workspace-write"})])
         self.client.responses = [{"thread": {"id": "different"}}]
-        mismatch = await self.adapter.resume(binding)
+        mismatch = await self.adapter.resume(binding=binding, working_directory=self.cwd)
         self.assertEqual(mismatch.status, ThreadOperationStatus.RESUME_UNKNOWN)
 
     async def test_resume_rejected_unknown_and_caller_cancellation_keeps_dispatched_task_owned(self):
         self.client.responses = [ProtocolRemoteError(403)]
-        rejected = await self.adapter.resume(ThreadBinding("p", "thread-1"))
+        rejected = await self.adapter.resume(binding=ThreadBinding("p", "thread-1"), working_directory=self.cwd)
         self.assertEqual(rejected.status, ThreadOperationStatus.RESUME_REJECTED)
         self.client.responses = [ProtocolFault("eof_pending")]
-        unknown = await self.adapter.resume(ThreadBinding("p", "thread-1"))
+        unknown = await self.adapter.resume(binding=ThreadBinding("p", "thread-1"), working_directory=self.cwd)
         self.assertEqual(unknown.status, ThreadOperationStatus.RESUME_UNKNOWN)
 
         gate = asyncio.Event()
@@ -141,14 +157,72 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         caller = asyncio.create_task(self.adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd))
         await client.dispatched.wait()
         caller.cancel()
-        with self.assertRaises(asyncio.CancelledError):
-            await caller
-        with self.assertRaisesRegex(ThreadLifecycleError, "profile_lifecycle_busy"):
-            await self.adapter.resume(ThreadBinding("p", "thread-1"))
+        self.assertFalse(caller.done())
+        with self.assertRaisesRegex(ThreadLifecycleError, "thread_operation_busy"):
+            await self.adapter.resume(binding=ThreadBinding("p", "thread-1"), working_directory=self.cwd)
         gate.set()
-        completed = await self.adapter.await_inflight("p")
+        completed = await caller
         self.assertEqual(completed.status, ThreadOperationStatus.START_CONFIRMED)
         self.assertEqual(len(client.calls), 1)
+
+    async def test_post_dispatch_cancellation_is_owned_for_start_and_resume_terminal_results(self):
+        for method, response, expected in (
+            ("start", {"thread": {"id": "thread-1"}}, ThreadOperationStatus.START_CONFIRMED),
+            ("start", ProtocolRemoteError(401), ThreadOperationStatus.START_REJECTED),
+            ("start", ProtocolFault("lost"), ThreadOperationStatus.START_UNKNOWN),
+            ("resume", {"thread": {"id": "thread-1"}}, ThreadOperationStatus.RESUME_CONFIRMED),
+            ("resume", ProtocolRemoteError(401), ThreadOperationStatus.RESUME_REJECTED),
+            ("resume", ProtocolFault("lost"), ThreadOperationStatus.RESUME_UNKNOWN),
+        ):
+            with self.subTest(method=method, expected=expected):
+                gate, client = asyncio.Event(), Client([response], None)
+                # A manual gate after observation makes cancellation ordering exact.
+                client.gate = gate
+                self.manager.runtimes["p"] = Runtime("p", 1, client)
+                if method == "start":
+                    caller = asyncio.create_task(self.adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd))
+                else:
+                    caller = asyncio.create_task(self.adapter.resume(binding=ThreadBinding("p", "thread-1"), working_directory=self.cwd))
+                await client.dispatched.wait()
+                caller.cancel(); caller.cancel()
+                self.assertFalse(caller.done())
+                self.assertEqual(len(client.calls), 1)
+                gate.set()
+                self.assertEqual((await caller).status, expected)
+                self.assertNotIn("p", self.adapter._inflight)
+
+    async def test_pre_dispatch_cancellation_never_sends_and_releases_guard(self):
+        gate = asyncio.Event()
+        entered = asyncio.Event()
+        class GatedCatalog(Catalog):
+            async def get_catalog(inner, profile_id):
+                entered.set()
+                await gate.wait()
+                return await super(GatedCatalog, inner).get_catalog(profile_id)
+        adapter = CodexThreadLifecycleAdapter(self.manager, GatedCatalog(self.catalog.values))
+        caller = asyncio.create_task(adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd))
+        await entered.wait()
+        caller.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await caller
+        gate.set()
+        self.assertEqual(self.client.calls, [])
+        self.assertNotIn("p", adapter._inflight)
+        result = await adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd)
+        self.assertEqual(result.status, ThreadOperationStatus.START_CONFIRMED)
+
+    async def test_inner_cancellation_is_unknown_and_guard_reusable(self):
+        class CancelClient(Client):
+            async def request(inner, method, params):
+                inner.calls.append((method, dict(params)))
+                inner.dispatched.set()
+                raise asyncio.CancelledError()
+        client = CancelClient()
+        self.manager.runtimes["p"] = Runtime("p", 1, client)
+        result = await self.adapter.start("p", model_id="visible-id", reasoning_effort="low", working_directory=self.cwd)
+        self.assertEqual(result.status, ThreadOperationStatus.START_UNKNOWN)
+        self.assertEqual(result.error.category, CodexAdapterErrorCategory.THREAD_START_UNKNOWN)
+        self.assertNotIn("p", self.adapter._inflight)
 
     async def test_different_profiles_are_independent_and_inputs_are_bounded(self):
         p_gate, q_gate = asyncio.Event(), asyncio.Event()
@@ -163,7 +237,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await second).status, ThreadOperationStatus.START_CONFIRMED)
         for value in ("relative", "/bad\0path", "/" + "x" * 4097):
             with self.subTest(value=value[:10]):
-                with self.assertRaisesRegex(ThreadLifecycleError, "working_directory_invalid"):
+                with self.assertRaisesRegex(ThreadLifecycleError, "thread_request_invalid"):
                     TrustedWorkingDirectory(value)
-        with self.assertRaisesRegex(ThreadLifecycleError, "thread_id_invalid"):
+        with self.assertRaisesRegex(ThreadLifecycleError, "thread_request_invalid"):
             ThreadBinding("p", "x" * (MAX_THREAD_ID_CHARS + 1))
