@@ -1,7 +1,7 @@
 """Exact 0.144.6 turn start and completed-agent-message projection."""
 from __future__ import annotations
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
 from .errors import CodexAdapterError, CodexAdapterErrorCategory
@@ -15,7 +15,7 @@ TURN_START_METHOD="turn/start"
 TURN_INTERRUPT_METHOD="turn/interrupt"
 
 class TurnLifecycleError(Exception):
-    _ALLOWED=frozenset((CodexAdapterErrorCategory.TURN_REQUEST_INVALID,CodexAdapterErrorCategory.TURN_PRECONDITION_CHANGED,CodexAdapterErrorCategory.TURN_OPERATION_BUSY,CodexAdapterErrorCategory.TURN_START_REJECTED,CodexAdapterErrorCategory.TURN_START_UNKNOWN,CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN,CodexAdapterErrorCategory.TURN_TERMINAL_FAILED,CodexAdapterErrorCategory.TURN_INTERRUPT_NOT_ACTIVE,CodexAdapterErrorCategory.TURN_INTERRUPT_BUSY))
+    _ALLOWED=frozenset((CodexAdapterErrorCategory.TURN_REQUEST_INVALID,CodexAdapterErrorCategory.TURN_PRECONDITION_CHANGED,CodexAdapterErrorCategory.TURN_OPERATION_BUSY,CodexAdapterErrorCategory.TURN_START_REJECTED,CodexAdapterErrorCategory.TURN_START_UNKNOWN,CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN,CodexAdapterErrorCategory.TURN_TERMINAL_FAILED,CodexAdapterErrorCategory.TURN_INTERRUPT_NOT_ACTIVE,CodexAdapterErrorCategory.TURN_INTERRUPT_BUSY,CodexAdapterErrorCategory.TURN_INTERRUPT_REJECTED,CodexAdapterErrorCategory.TURN_INTERRUPT_UNKNOWN))
     def __init__(self, category: CodexAdapterErrorCategory|str)->None:
         try: parsed=CodexAdapterErrorCategory(category)
         except (TypeError,ValueError): parsed=CodexAdapterErrorCategory.TURN_REQUEST_INVALID
@@ -52,9 +52,19 @@ class TurnTerminalResult: binding:TurnBinding; status:TurnTerminalStatus; messag
 @dataclass(frozen=True)
 class TurnInterruptResult:
     status:TurnInterruptStatus; binding:TurnBinding; terminal_result:TurnTerminalResult|None=None; error:CodexAdapterError|None=None
+    def __repr__(self)->str:
+        """Keep terminal message payloads out of generic diagnostics."""
+        terminal_status = self.terminal_result.status.value if self.terminal_result is not None else None
+        error_category = self.error.category.value if self.error is not None else None
+        return (
+            "TurnInterruptResult("
+            f"status={self.status.value!r}, profile_id={self.binding.profile_id!r}, "
+            f"thread_id={self.binding.thread_id!r}, turn_id={self.binding.turn_id!r}, "
+            f"terminal_status={terminal_status!r}, error_category={error_category!r})"
+        )
 @dataclass(frozen=True)
 class _ActiveTurn:
-    binding:TurnBinding; token:object; runtime:Any
+    binding:TurnBinding; token:object=field(repr=False,compare=False); runtime:Any=field(repr=False,compare=False)
 class RuntimeManagerLike(Protocol):
     async def acquire(self,profile_id:str)->Any: ...
 
@@ -152,7 +162,8 @@ class CodexTurnLifecycleAdapter:
                     wire="success" if isinstance(response,dict) else "ambiguous"
                     break
                 except asyncio.CancelledError:
-                    if request.cancelled(): wire="ambiguous"; break
+                    if request.cancelled():
+                        wire="ambiguous"; break
                     if not dispatched.is_set():
                         request.cancel(); await asyncio.gather(request,return_exceptions=True); raise
                     continue
@@ -184,7 +195,10 @@ class CodexTurnLifecycleAdapter:
             try:
                 result=await asyncio.shield(collector)
                 return result if result.status in (TurnTerminalStatus.COMPLETED,TurnTerminalStatus.FAILED) else None
-            except asyncio.CancelledError: continue
+            except asyncio.CancelledError:
+                if collector.cancelled():
+                    return None
+                continue
             except Exception:return None
     async def _release_interrupt(self,key:tuple[str,str],reservation:object)->None:
         async with self._lock:

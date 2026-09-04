@@ -107,3 +107,21 @@ class ErrorTests(unittest.TestCase):
         self.assertEqual(normalized.category, CodexAdapterErrorCategory.TURN_REQUEST_INVALID)
         self.assertNotIn(raw, str(unsafe) + repr(unsafe) + str(normalized) + repr(normalized))
         self.assertFalse(hasattr(normalized, "retryable")); self.assertFalse(hasattr(normalized, "safe_to_retry"))
+
+    def test_turn_interrupt_categories_normalize_exactly_and_fail_closed(self):
+        for category in (
+            CodexAdapterErrorCategory.TURN_INTERRUPT_NOT_ACTIVE,
+            CodexAdapterErrorCategory.TURN_INTERRUPT_BUSY,
+            CodexAdapterErrorCategory.TURN_INTERRUPT_REJECTED,
+            CodexAdapterErrorCategory.TURN_INTERRUPT_UNKNOWN,
+        ):
+            with self.subTest(category=category):
+                normalized = normalize_error(TurnLifecycleError(category))
+                self.assertEqual(normalized.category, category)
+                self.assertFalse(hasattr(normalized, "retryable"))
+                self.assertFalse(hasattr(normalized, "safe_to_retry"))
+        unsafe = TurnLifecycleError("PRIVATE_INTERRUPT_ERROR_MUST_NOT_LEAK")
+        normalized = normalize_error(unsafe)
+        self.assertEqual(normalized.category, CodexAdapterErrorCategory.TURN_REQUEST_INVALID)
+        rendered = str(unsafe) + repr(unsafe) + str(normalized) + repr(normalized)
+        self.assertNotIn("PRIVATE_INTERRUPT_ERROR_MUST_NOT_LEAK", rendered)

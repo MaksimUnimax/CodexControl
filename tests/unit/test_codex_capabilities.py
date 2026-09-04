@@ -78,3 +78,28 @@ class CapabilityManifestTests(unittest.TestCase):
                 self.assertIs(manifest.capabilities[capability].adapter_implementation, AdapterImplementation.IMPLEMENTED)
             else:
                 self.assertIs(manifest.capabilities[capability].adapter_implementation, AdapterImplementation.NOT_IMPLEMENTED)
+
+    def test_p1_8_exact_capability_readiness(self):
+        manifest = load_manifest()
+        implemented = {
+            CodexCapability.MODEL_LIST,
+            CodexCapability.THREAD_START,
+            CodexCapability.THREAD_RESUME,
+            CodexCapability.TURN_START,
+            CodexCapability.TURN_INTERRUPT,
+            CodexCapability.AGENT_MESSAGE_EVENTS,
+            CodexCapability.TURN_TERMINAL_EVENTS,
+            CodexCapability.APPROVAL_SERVER_REQUESTS,
+            CodexCapability.APPROVAL_RESPONSE_SCHEMA,
+        }
+        not_implemented = {
+            CodexCapability.THREAD_DELETE,
+        }
+        for capability in implemented:
+            self.assertIs(manifest.capabilities[capability].adapter_implementation, AdapterImplementation.IMPLEMENTED)
+        for capability in not_implemented:
+            self.assertIs(manifest.capabilities[capability].adapter_implementation, AdapterImplementation.NOT_IMPLEMENTED)
+        for capability in CodexCapability:
+            if capability in implemented or capability in not_implemented:
+                continue
+            self.assertIs(manifest.capabilities[capability].adapter_implementation, AdapterImplementation.NOT_IMPLEMENTED)
