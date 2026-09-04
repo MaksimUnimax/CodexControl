@@ -13,5 +13,7 @@
   "terminal_status_path": "turn.status",
   "terminal_status_values": ["completed", "interrupted", "failed", "inProgress"],
   "success_status_set": ["completed"],
-  "failure_status_set": ["interrupted", "failed"]
+  "failure_status_set": ["interrupted", "failed"],
+  "agent_message_text_min_length": null,
+  "delta_min_length": null
 }

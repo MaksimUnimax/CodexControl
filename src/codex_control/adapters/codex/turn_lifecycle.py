@@ -23,6 +23,16 @@ def _opaque(value:Any,limit:int,category:CodexAdapterErrorCategory=CodexAdapterE
     if not isinstance(value,str) or not value or "\0" in value or len(value)>limit: raise TurnLifecycleError(category)
     return value
 
+def _content(value:Any,limit:int)->str:
+    """Installed event content is a JSON string, not an opaque identifier.
+
+    The 0.144.6 schema has no minLength for agent text or delta text.  In
+    particular an empty completed agent message is a valid remote value.
+    """
+    if not isinstance(value,str) or len(value)>limit:
+        raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN)
+    return value
+
 @dataclass(frozen=True)
 class TurnBinding:
     profile_id:str; thread_id:str; turn_id:str
@@ -54,10 +64,17 @@ class CodexTurnLifecycleAdapter:
             runtime=await self._manager.acquire(thread_binding.profile_id); catalog=await self._catalog.get_catalog(thread_binding.profile_id)
             if runtime.profile_id!=thread_binding.profile_id or catalog.profile_id!=thread_binding.profile_id or runtime.generation!=catalog.runtime_generation: raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_PRECONDITION_CHANGED)
             descriptor=catalog.resolve_model(model_id); effort=catalog.validate_reasoning_effort(model_id,reasoning_effort)
+            if descriptor.hidden:
+                raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_REQUEST_INVALID)
             params={"threadId":thread_binding.thread_id,"input":[{"type":"text","text":user_text}],"model":descriptor.wire_model,"effort":effort,"cwd":working_directory.path,"approvalPolicy":"on-request","sandboxPolicy":{"type":"workspaceWrite"}}
             result=await self._request(runtime,params)
             if result.status is not TurnStartStatus.CONFIRMED:return result
             assert result.binding is not None
+            # Keep at most the previous terminal result until this new turn is
+            # confirmed.  Active collectors are never evicted.
+            for old_binding, old_task in tuple(self._collectors.items()):
+                if (old_binding.profile_id,old_binding.thread_id)==key and old_task.done():
+                    self._collectors.pop(old_binding,None)
             self._collectors[result.binding]=asyncio.create_task(self._collect(runtime,result.binding,token)); keep=True
             return result
         except asyncio.CancelledError: raise
@@ -72,6 +89,11 @@ class CodexTurnLifecycleAdapter:
         while True:
             try: response=await asyncio.shield(task); break
             except asyncio.CancelledError:
+                # A CancelledError can be from this public caller or from the
+                # owned request itself.  Once dispatched, only the former is
+                # deferred; an inner cancellation is an ambiguous start.
+                if task.cancelled():
+                    return TurnStartResult(TurnStartStatus.UNKNOWN,error=CodexAdapterError(CodexAdapterErrorCategory.TURN_START_UNKNOWN))
                 if not dispatched.is_set(): task.cancel(); await asyncio.gather(task,return_exceptions=True); raise
                 continue
             except ProtocolRemoteError as error:return TurnStartResult(TurnStartStatus.REJECTED,error=CodexAdapterError(CodexAdapterErrorCategory.TURN_START_REJECTED,remote_code=error.code))
@@ -99,29 +121,44 @@ class CodexTurnLifecycleAdapter:
                     continue
                 return self._unknown(binding,messages)
         finally:
-            notification.cancel(); terminal.cancel(); await asyncio.gather(notification,terminal,return_exceptions=True); self._collectors.pop(binding,None); await self._release((binding.profile_id,binding.thread_id),token)
+            notification.cancel(); terminal.cancel(); await asyncio.gather(notification,terminal,return_exceptions=True); await self._release((binding.profile_id,binding.thread_id),token)
     def _unknown(self,binding:TurnBinding,messages:list[AgentMessageCompleted])->TurnTerminalResult:return TurnTerminalResult(binding,TurnTerminalStatus.UNKNOWN,tuple(messages),CodexAdapterError(CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN))
     def _consume(self,raw:Any,binding:TurnBinding,messages:list[AgentMessageCompleted],seen:set[str])->TurnTerminalResult|None:
-        if not isinstance(raw,dict) or not isinstance(raw.get("method"),str) or not isinstance(raw.get("params"),dict):return None
-        method,p=raw["method"],raw["params"]
+        if not isinstance(raw,dict) or not isinstance(raw.get("method"),str):return None
+        method=raw["method"]
+        if method not in ("item/agentMessage/delta","item/completed","turn/completed"):return None
+        p=raw.get("params")
+        if not isinstance(p,dict):return self._unknown(binding,messages)
+        try: thread_id=_opaque(p.get("threadId"),512,CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN)
+        except TurnLifecycleError:return self._unknown(binding,messages)
         if method=="item/agentMessage/delta":
-            if p.get("threadId")!=binding.thread_id or p.get("turnId")!=binding.turn_id:return None
-            try:_opaque(p.get("itemId"),MAX_TURN_ITEM_ID_CHARS); _opaque(p.get("delta"),MAX_AGENT_MESSAGE_CHARS)
+            try:_opaque(p.get("itemId"),MAX_TURN_ITEM_ID_CHARS,CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN); _content(p.get("delta"),MAX_AGENT_MESSAGE_CHARS)
             except TurnLifecycleError:return self._unknown(binding,messages)
+            try: turn_id=_opaque(p.get("turnId"),MAX_TURN_ID_CHARS,CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN)
+            except TurnLifecycleError:return self._unknown(binding,messages)
+            if thread_id!=binding.thread_id or turn_id!=binding.turn_id:return None
             return None
         if method=="item/completed":
-            if p.get("threadId")!=binding.thread_id or p.get("turnId")!=binding.turn_id:return None
             item=p.get("item")
             if not isinstance(item,dict) or not isinstance(item.get("type"),str):return self._unknown(binding,messages)
+            try: turn_id=_opaque(p.get("turnId"),MAX_TURN_ID_CHARS,CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN)
+            except TurnLifecycleError:return self._unknown(binding,messages)
+            try: item_id=_opaque(item.get("id"),MAX_TURN_ITEM_ID_CHARS,CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN)
+            except TurnLifecycleError:return self._unknown(binding,messages)
+            if thread_id!=binding.thread_id or turn_id!=binding.turn_id:return None
             if item["type"]!="agentMessage":return None
             try:
-                iid=_opaque(item.get("id"),MAX_TURN_ITEM_ID_CHARS); text=_opaque(item.get("text"),MAX_AGENT_MESSAGE_CHARS)
+                iid=item_id; text=_content(item.get("text"),MAX_AGENT_MESSAGE_CHARS)
                 if iid in seen or len(messages)>=MAX_AGENT_MESSAGES_PER_TURN or sum(len(m.text) for m in messages)+len(text)>MAX_TOTAL_AGENT_MESSAGE_CHARS:raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN)
             except TurnLifecycleError:return self._unknown(binding,messages)
             seen.add(iid); messages.append(AgentMessageCompleted(len(messages)+1,iid,text)); return None
         if method=="turn/completed":
             turn=p.get("turn")
-            if p.get("threadId")!=binding.thread_id or not isinstance(turn,dict) or turn.get("id")!=binding.turn_id:return None
+            if not isinstance(turn,dict):return self._unknown(binding,messages)
+            try: turn_id=_opaque(turn.get("id"),MAX_TURN_ID_CHARS,CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN)
+            except TurnLifecycleError:return self._unknown(binding,messages)
+            if turn.get("status") not in ("completed","failed","interrupted","inProgress"):return self._unknown(binding,messages)
+            if thread_id!=binding.thread_id or turn_id!=binding.turn_id:return None
             if turn.get("status")=="completed":return TurnTerminalResult(binding,TurnTerminalStatus.COMPLETED,tuple(messages))
             if turn.get("status") in ("failed","interrupted"):return TurnTerminalResult(binding,TurnTerminalStatus.FAILED,tuple(messages),CodexAdapterError(CodexAdapterErrorCategory.TURN_TERMINAL_FAILED))
             return self._unknown(binding,messages)
