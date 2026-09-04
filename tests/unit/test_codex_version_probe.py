@@ -49,6 +49,33 @@ class ProbeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(VersionProbeError, "version_output_invalid"): await probe.probe()
         self.assertIsNone(probe._unresolved_process)
         self.assertEqual(parse_version_stdout(b"codex-cli 0.144.7\n"), "0.144.7")
+    async def test_missing_absolute_executable_is_rejected_before_spawn(self):
+        factory = Factory([])
+        probe = CodexVersionProbe("/some/absolute/path/that/does/not/exist", parent_environment={"PATH": "/bin", "TEST_ONLY_ENV_NAME": "TEST_ONLY_ENV_VALUE_DOES_NOT_LEAK"}, process_factory=factory, timeout=.01, cleanup_timeout=.01)
+        with self.assertRaisesRegex(VersionProbeError, "executable_invalid") as raised:
+            await probe.probe()
+        self.assertEqual(factory.calls, [])
+        self.assertIsNone(probe._owned_process); self.assertIsNone(probe._unresolved_process)
+        self.assertNotIn("TEST_ONLY_ENV_VALUE_DOES_NOT_LEAK", str(raised.exception) + repr(raised.exception))
+    async def test_existing_non_executable_file_is_rejected_before_spawn(self):
+        descriptor, path = tempfile.mkstemp()
+        os.close(descriptor); os.chmod(path, 0o644)
+        try:
+            factory = Factory([])
+            probe = CodexVersionProbe(path, parent_environment={"PATH": "/bin"}, process_factory=factory, timeout=.01, cleanup_timeout=.01)
+            with self.assertRaisesRegex(VersionProbeError, "executable_invalid"):
+                await probe.probe()
+            self.assertEqual(factory.calls, [])
+            self.assertIsNone(probe._owned_process); self.assertIsNone(probe._unresolved_process)
+        finally:
+            os.unlink(path)
+    def test_malformed_semver_outputs_are_rejected(self):
+        for output in (b"codex-cli 0.144\n", b"codex-cli 0.144.x\n", b"codex-cli v0.144.6\n", b"codex-cli 0.144.6 extra\n"):
+            with self.subTest(output=output), self.assertRaisesRegex(VersionProbeError, "version_output_invalid"):
+                parse_version_stdout(output)
+    def test_multiple_nonempty_version_lines_are_rejected(self):
+        with self.assertRaisesRegex(VersionProbeError, "version_output_invalid"):
+            parse_version_stdout(b"codex-cli 0.144.6\nunexpected second line\n")
     async def test_nonzero_completed_process_releases_ownership(self):
         probe = self.probe(Factory([FakeProcess(code=2)]))
         with self.assertRaisesRegex(VersionProbeError, "version_probe_failed"): await probe.probe()

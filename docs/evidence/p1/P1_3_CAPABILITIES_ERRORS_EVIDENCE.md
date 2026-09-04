@@ -50,3 +50,14 @@ No Codex business RPC was sent, no production `CODEX_HOME` was used, no producti
 - `CapabilityManifestError("unsupported_codex_version")` now normalizes to `UNSUPPORTED_CODEX_VERSION`; manifest version/SHA mismatches normalize to `CAPABILITY_MANIFEST_INVALID`. Cleanup-unresolved and busy remain safe version-probe diagnostics with no stderr/environment exposure or retry decision.
 - Exact installed agent-message lifecycle notifications found: `item/agentMessage/delta`, `item/completed`. The manifest logical `AGENT_MESSAGE_EVENTS` now includes both. Exact installed terminal-turn notification found: `turn/completed` only. Confirmed approval server requests: `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/permissions/requestApproval`, `applyPatchApproval`, `execCommandApproval`.
 - Verification: `PYTHONPATH=src python3 -m unittest tests.unit.test_codex_capabilities -v` (14 passed); `PYTHONPATH=src python3 -m unittest tests.unit.test_codex_errors -v` (10 passed); `PYTHONPATH=src python3 -m unittest tests.unit.test_codex_version_probe -v` (12 passed); runtime (27 passed); protocol (16 passed); full discovery (83 passed); compileall and import passed. Package-resource loading outside repository cwd is covered directly by the capability suite.
+
+## Architect second repair pass
+
+- Second candidate requiring test-completeness repair: `e0369abce620075acb04221372c6e1421cd13f42`.
+- Added an explicit missing absolute executable test: `/some/absolute/path/that/does/not/exist` fails as `executable_invalid` before process-factory invocation, with no owned or unresolved child and no exception environment exposure.
+- Added an existing non-executable temporary-file test: it fails as `executable_invalid` before process-factory invocation, with no owned or unresolved child.
+- Added focused malformed semantic-version output cases: `0.144`, `0.144.x`, `v0.144.6`, and `0.144.6 extra` each fail as `version_output_invalid` under the current parser contract.
+- Added a separate ambiguous multi-line stdout test: a valid version line followed by another non-empty line fails as `version_output_invalid`.
+- Added an exact directionality assertion freezing the five installed approval server requests in both `server_requests` and logical `APPROVAL_SERVER_REQUESTS`, and proving they are neither client requests nor server notifications.
+- Added an exact response-schema assertion freezing `CommandExecutionRequestApprovalResponse`, `FileChangeRequestApprovalResponse`, `PermissionsRequestApprovalResponse`, `ApplyPatchApprovalResponse`, and `ExecCommandApprovalResponse` in both manifest authority and logical `APPROVAL_RESPONSE_SCHEMA`.
+- Verification: version-probe focused suite (16 passed); capabilities focused suite (16 passed); errors focused suite (10 passed); P1.2 runtime suite (27 passed); P1.1 protocol suite (16 passed); full discovery (89 passed); compileall and import passed.

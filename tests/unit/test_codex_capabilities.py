@@ -51,6 +51,16 @@ class CapabilityManifestTests(unittest.TestCase):
         self.assertIn("item/completed", self.manifest.server_notifications)
         self.assertIn("turn/completed", self.manifest.server_notifications)
         self.assertNotEqual(self.manifest.client_requests, self.manifest.server_requests)
+    def test_exact_installed_approval_server_request_directionality(self):
+        expected = ("item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "applyPatchApproval", "execCommandApproval")
+        self.assertEqual(self.manifest.server_requests, expected)
+        self.assertEqual(self.manifest.capabilities[CodexCapability.APPROVAL_SERVER_REQUESTS].server_requests, expected)
+        self.assertTrue(set(expected).isdisjoint(self.manifest.client_requests))
+        self.assertTrue(set(expected).isdisjoint(self.manifest.server_notifications))
+    def test_exact_installed_approval_response_schemas(self):
+        expected = ("CommandExecutionRequestApprovalResponse", "FileChangeRequestApprovalResponse", "PermissionsRequestApprovalResponse", "ApplyPatchApprovalResponse", "ExecCommandApprovalResponse")
+        self.assertEqual(self.manifest.approval_response_schemas, expected)
+        self.assertEqual(self.manifest.capabilities[CodexCapability.APPROVAL_RESPONSE_SCHEMA].approval_response_schemas, expected)
     def test_package_resource_loads_outside_repository_cwd(self):
         original = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:
