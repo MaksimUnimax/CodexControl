@@ -169,12 +169,54 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(RuntimeErrorSafe, "unresolved_process"): await manager.acquire("p")
         self.assertEqual(len(factory.processes), 1); factory.processes[0].exit(); await runtime.watcher
 
+    async def test_shutdown_profile_starting_kill_reap_timeout_is_visible_and_blocks_replacement(self):
+        factory = Factory(response="blocked", exit_on_close=False, exit_on_terminate=False, exit_on_kill=False, stderr_payload=b"private-stderr-content"); manager = self.manager(factory)
+        acquire = asyncio.create_task(manager.acquire("p")); await factory.created.wait()
+        with self.assertRaisesRegex(RuntimeErrorSafe, "kill_reap_timeout") as raised: await manager.shutdown_profile("p")
+        runtime = manager._unresolved["p"]
+        self.assertEqual(runtime.state, RuntimeState.FAULTED); self.assertTrue(runtime.kill_reap_timed_out)
+        self.assertEqual(factory.processes[0].kill_calls, 1); self.assertEqual(len(factory.calls), 1)
+        with self.assertRaisesRegex(RuntimeErrorSafe, "unresolved_process"): await manager.acquire("p")
+        self.assertEqual(len(factory.calls), 1); self.assertNotIn("/chosen", repr(raised.exception)); self.assertNotIn("private-stderr-content", repr(raised.exception))
+        with self.assertRaisesRegex(RuntimeErrorSafe, "kill_reap_timeout"): await acquire
+        factory.processes[0].exit(); await runtime.watcher
+
+    async def test_shutdown_all_starting_kill_reap_timeout_is_visible_and_terminal(self):
+        factory = Factory(response="blocked", exit_on_close=False, exit_on_terminate=False, exit_on_kill=False); manager = self.manager(factory)
+        acquire = asyncio.create_task(manager.acquire("p")); await factory.created.wait()
+        with self.assertRaisesRegex(RuntimeErrorSafe, "kill_reap_timeout"): await manager.shutdown_all()
+        runtime = manager._unresolved["p"]
+        self.assertEqual(runtime.state, RuntimeState.FAULTED); self.assertEqual(len(factory.calls), 1)
+        with self.assertRaisesRegex(RuntimeErrorSafe, "manager_shutting_down"): await manager.acquire("p")
+        self.assertEqual(len(factory.calls), 1)
+        with self.assertRaisesRegex(RuntimeErrorSafe, "kill_reap_timeout"): await acquire
+        factory.processes[0].exit(); await runtime.watcher
+
+    async def test_late_exit_after_startup_shutdown_timeout_allows_one_new_generation(self):
+        factory = Factory(response="blocked", exit_on_close=False, exit_on_terminate=False, exit_on_kill=False); manager = self.manager(factory)
+        acquire = asyncio.create_task(manager.acquire("p")); await factory.created.wait()
+        with self.assertRaisesRegex(RuntimeErrorSafe, "kill_reap_timeout"): await manager.shutdown_profile("p")
+        old = manager._unresolved["p"]; factory.processes[0].exit(); await old.watcher
+        self.assertNotIn("p", manager._unresolved)
+        factory.kwargs.update(response="success", exit_on_terminate=True, exit_on_kill=True)
+        new = await manager.acquire("p")
+        self.assertEqual(new.generation, 2); self.assertEqual(len(factory.processes), 2)
+        self.assertIsNone(new.process.returncode); self.assertIsNot(old, new)
+        with self.assertRaisesRegex(RuntimeErrorSafe, "kill_reap_timeout"): await acquire
+        await manager.shutdown_all()
+
+    async def test_late_exit_after_shutdown_all_timeout_clears_unresolved_but_stays_terminal(self):
+        factory = Factory(response="blocked", exit_on_close=False, exit_on_terminate=False, exit_on_kill=False); manager = self.manager(factory)
+        acquire = asyncio.create_task(manager.acquire("p")); await factory.created.wait()
+        with self.assertRaisesRegex(RuntimeErrorSafe, "kill_reap_timeout"): await manager.shutdown_all()
+        old = manager._unresolved["p"]; factory.processes[0].exit(); await old.watcher
+        self.assertNotIn("p", manager._unresolved)
+        with self.assertRaisesRegex(RuntimeErrorSafe, "manager_shutting_down"): await manager.acquire("p")
+        self.assertEqual(len(factory.processes), 1)
+        with self.assertRaisesRegex(RuntimeErrorSafe, "kill_reap_timeout"): await acquire
+
     async def test_shutdown_idempotent_after_clean_stop(self):
         manager = self.manager(); runtime = await manager.acquire("p"); await manager.shutdown_profile("p"); await manager.shutdown_profile("p"); self.assertEqual(runtime.state, RuntimeState.STOPPED)
-
-    async def test_stopped_runtime_never_becomes_ready_again(self):
-        manager = self.manager(); runtime = await manager.acquire("p"); await manager.shutdown_profile("p")
-        self.assertEqual(runtime.state, RuntimeState.STOPPED); self.assertEqual(runtime.state, RuntimeState.STOPPED)
 
     async def test_post_ready_protocol_fault_no_auto_restart_then_resolved_retry(self):
         factory = Factory(); manager = self.manager(factory); old = await manager.acquire("p")

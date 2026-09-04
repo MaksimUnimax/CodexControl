@@ -155,26 +155,63 @@ class CodexRuntimeManager:
 
     async def shutdown_profile(self, profile_id: str) -> None:
         async with self._lock:
-            self._stopping.add(profile_id); task = self._starting.get(profile_id); runtime = self._runtimes.get(profile_id); unresolved = self._unresolved.get(profile_id)
+            self._stopping.add(profile_id); task = self._starting.get(profile_id); runtime = self._runtimes.get(profile_id)
+        startup_cleanup_failure: RuntimeErrorSafe | None = None
         try:
             if self._profile_shutdown_reserved is not None: await self._profile_shutdown_reserved(profile_id)
             if task is not None:
                 task.cancel()
-                try: await task
-                except (asyncio.CancelledError, RuntimeErrorSafe): pass
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                except RuntimeErrorSafe as error:
+                    # A normal startup error is harmless only after the current
+                    # ownership state below proves that cleanup completed.
+                    startup_cleanup_failure = error
+            # Cancellation can run _start() cleanup and install unresolved
+            # ownership.  These values must be read after awaiting that task.
+            async with self._lock:
+                starting = self._starting.get(profile_id)
+                if task is not None and starting is task and starting.done(): self._starting.pop(profile_id, None)
+                runtime = self._runtimes.get(profile_id)
+                unresolved = self._unresolved.get(profile_id)
             if runtime is not None: await self._shutdown_runtime(runtime)
             if unresolved is not None and unresolved is not runtime:
-                if unresolved.kill_reap_timed_out: raise RuntimeErrorSafe("unresolved_process", profile_id)
+                if unresolved.kill_reap_timed_out:
+                    if startup_cleanup_failure is not None:
+                        raise startup_cleanup_failure
+                    raise RuntimeErrorSafe("kill_reap_timeout", profile_id)
                 await self._shutdown_runtime(unresolved)
+            async with self._lock:
+                unresolved = self._unresolved.get(profile_id)
+            if unresolved is not None:
+                if startup_cleanup_failure is not None:
+                    raise startup_cleanup_failure
+                if unresolved.kill_reap_timed_out:
+                    raise RuntimeErrorSafe("kill_reap_timeout", profile_id)
+                raise RuntimeErrorSafe("unresolved_process", profile_id)
+            if startup_cleanup_failure is not None and startup_cleanup_failure.category == "kill_reap_timeout":
+                # A bounded cleanup failure remains observable even if a late
+                # watcher exit races with this final ownership observation.
+                raise startup_cleanup_failure
         finally:
             async with self._lock: self._stopping.discard(profile_id)
 
     async def shutdown_all(self) -> None:
         async with self._lock:
-            self._shutting_down = True; profiles = set(self._starting) | set(self._runtimes) | set(self._unresolved)
+            self._shutting_down = True; profiles = sorted(set(self._starting) | set(self._runtimes) | set(self._unresolved))
         results = await asyncio.gather(*(self.shutdown_profile(p) for p in profiles), return_exceptions=True)
-        for result in results:
-            if isinstance(result, RuntimeErrorSafe): raise result
+        failures = {profile: result for profile, result in zip(profiles, results) if isinstance(result, RuntimeErrorSafe)}
+        async with self._lock:
+            unresolved = {profile: runtime for profile, runtime in self._unresolved.items()}
+        if unresolved:
+            profile_id = sorted(unresolved)[0]
+            failure = failures.get(profile_id)
+            if failure is not None: raise failure
+            if unresolved[profile_id].kill_reap_timed_out: raise RuntimeErrorSafe("kill_reap_timeout", profile_id)
+            raise RuntimeErrorSafe("unresolved_process", profile_id)
+        if failures: raise failures[sorted(failures)[0]]
 
     async def _shutdown_runtime(self, runtime: CodexRuntime) -> None:
         assert runtime.shutdown_lock is not None

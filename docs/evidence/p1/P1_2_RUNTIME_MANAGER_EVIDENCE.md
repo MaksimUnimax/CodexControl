@@ -39,3 +39,12 @@
 - Shutdown has bounded graceful, terminate and kill/reap waits. The named `DEFAULT_KILL_REAP_TIMEOUT_SECONDS` controls the final wait. A timed-out final reap faults the runtime with `kill_reap_timeout`, retains unresolved process ownership and blocks replacement generation creation.
 - The runtime suite has 24 tests. Explicit failure/lifecycle tests include default exec/no-shell, blocked initialize, remote-error cleanup, protocol-fault cleanup, premature initialize exit, post-READY protocol fault, retry after resolved fault, single-flight failure clearing, three clean shutdown paths, kill/reap timeout, and an event-gated stale-watcher/new-generation race.
 - Repair verification: `PYTHONPATH=src python3 -m unittest tests.unit.test_codex_runtime -v` passed (24 tests). This evidence records repair facts only; P1.2 is not architect accepted.
+
+## Architect second repair pass
+
+- Second rejected candidate: `cf753ecb38f2c5aa9d400bd69524f097e505d0e0`.
+- Startup cancellation cleanup failures now remain visible: after awaiting a cancelled startup task, `shutdown_profile()` re-reads current starting, ready, and unresolved ownership under manager synchronization. A final kill/reap timeout remains a sanitized `kill_reap_timeout`; unresolved ownership is retained and blocks replacement generation creation.
+- `shutdown_all()` remains terminal, waits for every selected profile shutdown, then deterministically checks unresolved ownership and raises a sanitized failure rather than reporting success.
+- Event-driven fake-child tests cover profile and manager shutdown while initialize is blocked and close/terminate/kill are ignored; both assert bounded failure, retained FAULTED unresolved ownership, one factory call, and replacement blocking. Late-exit tests prove watcher removal of unresolved ownership, permit exactly one next generation after profile shutdown, and retain manager terminality after manager shutdown.
+- The tautological sequential STOPPED test was removed. READY/STOP behavior is evidenced by the existing event-gated pre-publication shutdown tests and READY-publication-before-shutdown test.
+- Verification for this pass: `PYTHONPATH=src python3 -m unittest tests.unit.test_codex_runtime -v` passed (27 tests); `PYTHONPATH=src python3 -m unittest tests.unit.test_codex_protocol -v` passed (16 tests); `PYTHONPATH=src python3 -m unittest discover -s tests -v` passed (47 tests); compileall and package import passed. This evidence records repair facts only; P1.2 is not architect accepted.
