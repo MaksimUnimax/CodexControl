@@ -1,15 +1,16 @@
-# Decisions
+# Architecture decisions index
 
-Append-only ADR-like record.
+Architect-owned; individual records under `docs/adr/`.
 
-- D001 — bot-per-server; no mandatory central controller.
-- D002 — common private Telegram supergroup.
-- D003 — ACTIVE/SLEEP controls ordinary-message routing.
-- D004 — separate private settings surface.
-- D005 — explicit `CODEX_HOME` profile selection.
-- D006 — real persistent Codex dialogue/thread.
-- D007 — mandatory hard-delete lifecycle.
-- D008 — no conversation contents in journald.
-- D009 — no public Codex listener; prefer stdio.
-- D010 — configuration-driven server-N extensibility.
-- D011 — Codex 0.144.6 app-server is the primary adapter because its installed schema exposes thread deletion and runtime model metadata; `codex exec` is not sufficient proof for hard deletion.
+- ADR-0001 autonomous controller/bot per server; no mandatory central runtime.
+- ADR-0002 human-originated persistent group keyboard routes fleet.
+- ADR-0003 restart always SLEEP; group message order is control epoch.
+- ADR-0004 app-server stdio primary; one child per profile max.
+- ADR-0005 dialogue profile immutable; model/effort only between turns.
+- ADR-0006 V1 root controller; Telegram approval bridge compensates privileged execution.
+- ADR-0007 local SQLite metadata/state; minimize duplicate conversation content.
+- ADR-0008 hard delete = official thread/delete + local purge + measured storage proof.
+- ADR-0009 no content in journald; ambiguous effects UNKNOWN/no blind retry.
+- ADR-0010 configuration-driven fleet/server-N.
+- ADR-0011 one live dialogue/one running turn; no delayed prompt queue.
+- ADR-0012 architect-led development; Codex implementation executor only.

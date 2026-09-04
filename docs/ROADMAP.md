@@ -1,15 +1,58 @@
-# Roadmap
+# CodexControl roadmap
 
-- [x] P0 — Foundation and contracts
-- [ ] P1 — Codex adapter and capability abstraction
-- [ ] P2 — Durable local state / idempotency
-- [ ] P3 — Telegram private settings UI
-- [ ] P4 — Telegram group ACTIVE/SLEEP routing
-- [ ] P5 — Persistent dialogue lifecycle
-- [ ] P6 — hard-delete implementation and proof
-- [ ] P7 — server-80 isolated deployment
-- [ ] P8 — server-80 live Telegram acceptance
-- [ ] P9 — server-78 deployment
-- [ ] P10 — multi-bot shared-group acceptance
-- [ ] P11 — add/remove server-N workflow
-- [ ] P12 — security and recovery acceptance
+Status authority: architect only. `[DONE]` means architect-verified GitHub evidence plus required acceptance.
+
+## P0 — Repository, architecture and governance
+- [DONE] P0.1 server-80 discovery and dedicated deploy key.
+- [DONE] P0.2 foundation commit `626bcd48f8719b467a565de601564a4550ead83b` verified in GitHub.
+- [DONE] P0.3 installed Codex 0.144.6 capability baseline.
+- [DONE] P0.4 architect V1 product/topology/state/data/security/retention/testing/governance baseline.
+- [DONE] P0.5 Codex executor authority and documentation structure.
+
+## P1 — Codex app-server adapter (no Telegram/production)
+- [NEXT] P1.1 exact 0.144.6 stdio protocol fixtures/types + initialize handshake.
+- [PLANNED] P1.2 child supervisor + per-profile single-flight runtime manager.
+- [PLANNED] P1.3 capability probe + normalized errors.
+- [PLANNED] P1.4 authenticated model/list normalization/cache.
+- [PLANNED] P1.5 thread start/resume.
+- [PLANNED] P1.6 turn start + ordered user-visible agent-message/terminal handling.
+- [PLANNED] P1.7 approval request/response port using fake operator.
+- [PLANNED] P1.8 interrupt.
+- [PLANNED] P1.9 thread/delete + ambiguity handling.
+- [PLANNED] P1.10 T0/T1/T2 acceptance; no real production conversation.
+
+## P2 — Durable local state/idempotency
+SQLite schema/repos/transactions; ingress dedupe/control epoch/callback tokens; dialogue/job/outbox/delete state machines; transient retention/sanitizer; crash/restart harness.
+
+## P3 — Dialogue application service
+Lazy create, one-dialogue invariant, immutable turn claims; BUSY/no queue; model/effort idle mutation/profile lock; interrupt/recovery; hard-delete orchestration over ports.
+
+## P4 — Telegram private management
+Authorization edge, panel, profile/model/reasoning/status, dialogue/delete/interrupt, opaque callbacks, approval UI, tap-able menu fallback.
+
+## P5 — Telegram group routing
+Persistent fleet keyboard, serialized group updates, activation epoch/restart-SLEEP, SLEEP ignore, ACTIVE prompt ingress, BUSY, fleet status/version safeguards.
+
+## P6 — Response delivery/full local orchestration
+Progress/edit path, deterministic chunk/outbox, ambiguous send handling, end-to-end fake recovery.
+
+## P7 — Real Codex isolated acceptance / hard-delete proof
+Disposable server-80 thread, authenticated eligibility, multi-turn/interrupt/approval, thread/delete storage measurement across sessions/history/state/logs, architecture gate on shared profiles vs dedicated homes.
+
+## P8 — Deployment packaging/rollback
+Root-owned config/secrets, systemd, install/upgrade/rollback runbooks, resource/retention guards.
+
+## P9 — server-80 live Telegram acceptance
+Dedicated token/private test group; T4/T5 UX/auth/restart/delete/rollback; promote exact accepted SHA.
+
+## P10 — server-78 discovery/deployment
+Repeat discovery/profile/storage/capability; dedicated deploy key/token/config; same source architecture, no fork.
+
+## P11 — Multi-bot shared-group acceptance
+Activation ordering/non-target silence/all-sleep/status; offline/restart/backlog; independent outage.
+
+## P12 — Server-N lifecycle
+Add/remove fleet member runbook/config propagation; manifest mismatch safeguards; zero source edits for ordinary server addition.
+
+## P13 — Final security/recovery acceptance
+Threat audit, secret/log/replay tests, SQLite corruption/restore, Codex child failures, token rotation/decommission runbooks, V1 checkpoint.
