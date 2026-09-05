@@ -82,6 +82,7 @@ class ErrorTests(unittest.TestCase):
             CodexAdapterErrorCategory.THREAD_START_UNKNOWN,
             CodexAdapterErrorCategory.THREAD_RESUME_REJECTED,
             CodexAdapterErrorCategory.THREAD_RESUME_UNKNOWN,
+            CodexAdapterErrorCategory.THREAD_DELETE_UNKNOWN,
         )
         for category in categories:
             with self.subTest(category=category):

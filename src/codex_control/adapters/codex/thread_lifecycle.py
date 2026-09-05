@@ -1,4 +1,4 @@
-"""Ambiguity-safe, profile-bound ``thread/start`` and ``thread/resume``."""
+"""Ambiguity-safe, profile-bound thread lifecycle operations."""
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +15,7 @@ MAX_THREAD_ID_CHARS = 512
 MAX_WORKING_DIRECTORY_CHARS = 4096
 THREAD_START_METHOD = "thread/start"
 THREAD_RESUME_METHOD = "thread/resume"
+THREAD_DELETE_METHOD = "thread/delete"
 THREAD_APPROVAL_POLICY = "on-request"
 THREAD_SANDBOX = "workspace-write"
 
@@ -29,6 +30,7 @@ class ThreadLifecycleError(Exception):
         CodexAdapterErrorCategory.THREAD_START_UNKNOWN,
         CodexAdapterErrorCategory.THREAD_RESUME_REJECTED,
         CodexAdapterErrorCategory.THREAD_RESUME_UNKNOWN,
+        CodexAdapterErrorCategory.THREAD_DELETE_UNKNOWN,
     ))
 
     def __init__(self, category: CodexAdapterErrorCategory | str) -> None:
@@ -70,6 +72,7 @@ class ThreadBinding:
 class ThreadOperationStatus(StrEnum):
     START_CONFIRMED = "START_CONFIRMED"; START_REJECTED = "START_REJECTED"; START_UNKNOWN = "START_UNKNOWN"
     RESUME_CONFIRMED = "RESUME_CONFIRMED"; RESUME_REJECTED = "RESUME_REJECTED"; RESUME_UNKNOWN = "RESUME_UNKNOWN"
+    DELETE_CONFIRMED = "DELETE_CONFIRMED"; DELETE_UNKNOWN = "DELETE_UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -104,6 +107,74 @@ class CodexThreadLifecycleAdapter:
         if not isinstance(binding, ThreadBinding) or not isinstance(working_directory, TrustedWorkingDirectory):
             raise ThreadLifecycleError(CodexAdapterErrorCategory.THREAD_REQUEST_INVALID)
         return await self._begin(binding.profile_id, lambda: self._resume(binding, working_directory))
+
+    async def delete(self, *, binding: ThreadBinding) -> ThreadOperationResult:
+        if not isinstance(binding, ThreadBinding):
+            raise ThreadLifecycleError(CodexAdapterErrorCategory.THREAD_REQUEST_INVALID)
+        return await self._begin(binding.profile_id, lambda: self._delete(binding))
+
+    async def _before_delete_dispatch(self) -> None:
+        """Test seam only; production performs no pre-dispatch work."""
+
+    async def _delete(self, binding: ThreadBinding) -> ThreadOperationResult:
+        try:
+            runtime = await self._manager.acquire(binding.profile_id)
+            if runtime.profile_id != binding.profile_id:
+                raise ThreadLifecycleError(CodexAdapterErrorCategory.THREAD_PRECONDITION_CHANGED)
+        except asyncio.CancelledError:
+            raise
+        except ThreadLifecycleError:
+            raise
+        except Exception as error:
+            raise ThreadLifecycleError(CodexAdapterErrorCategory.THREAD_PRECONDITION_CHANGED) from error
+
+        await self._before_delete_dispatch()
+        return await self._delete_request(runtime, binding)
+
+    async def _delete_request(self, runtime: Any, binding: ThreadBinding) -> ThreadOperationResult:
+        """Own exactly one destructive request after it is dispatched."""
+        dispatched = asyncio.Event()
+
+        async def invoke() -> Any:
+            dispatched.set()
+            return await runtime.client.request(THREAD_DELETE_METHOD, {"threadId": binding.thread_id})
+
+        request = asyncio.create_task(invoke())
+        while True:
+            try:
+                response = await asyncio.shield(request)
+                if isinstance(response, dict):
+                    return ThreadOperationResult(ThreadOperationStatus.DELETE_CONFIRMED, binding)
+                return ThreadOperationResult(
+                    ThreadOperationStatus.DELETE_UNKNOWN,
+                    binding,
+                    CodexAdapterError(CodexAdapterErrorCategory.THREAD_DELETE_UNKNOWN),
+                )
+            except asyncio.CancelledError:
+                if request.cancelled():
+                    return ThreadOperationResult(
+                        ThreadOperationStatus.DELETE_UNKNOWN,
+                        binding,
+                        CodexAdapterError(CodexAdapterErrorCategory.THREAD_DELETE_UNKNOWN),
+                    )
+                if not dispatched.is_set():
+                    request.cancel()
+                    await asyncio.gather(request, return_exceptions=True)
+                    raise
+                # Caller cancellation cannot detach the owned destructive RPC.
+                continue
+            except ProtocolRemoteError as error:
+                return ThreadOperationResult(
+                    ThreadOperationStatus.DELETE_UNKNOWN,
+                    binding,
+                    CodexAdapterError(CodexAdapterErrorCategory.THREAD_DELETE_UNKNOWN, remote_code=error.code),
+                )
+            except Exception:
+                return ThreadOperationResult(
+                    ThreadOperationStatus.DELETE_UNKNOWN,
+                    binding,
+                    CodexAdapterError(CodexAdapterErrorCategory.THREAD_DELETE_UNKNOWN),
+                )
 
     async def _begin(self, profile_id: str, operation: Callable[[], Awaitable[ThreadOperationResult]]) -> ThreadOperationResult:
         token = object()

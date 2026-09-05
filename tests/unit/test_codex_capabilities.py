@@ -70,21 +70,22 @@ class CapabilityManifestTests(unittest.TestCase):
     def test_manifest_has_no_secret_fields(self):
         text = resources.files("codex_control.adapters.codex.manifests").joinpath("codex_0_144_6.json").read_text().lower()
         for term in ("token", "auth", "cookie", "account"): self.assertNotIn(term, text)
-    def test_p1_7_approval_capabilities_are_locally_implemented(self):
+    def test_p1_9_delete_and_prior_capabilities_are_locally_implemented(self):
         manifest = load_manifest()
-        implemented = {CodexCapability.MODEL_LIST, CodexCapability.THREAD_START, CodexCapability.THREAD_RESUME, CodexCapability.TURN_START, CodexCapability.TURN_INTERRUPT, CodexCapability.AGENT_MESSAGE_EVENTS, CodexCapability.TURN_TERMINAL_EVENTS, CodexCapability.APPROVAL_SERVER_REQUESTS, CodexCapability.APPROVAL_RESPONSE_SCHEMA}
+        implemented = {CodexCapability.MODEL_LIST, CodexCapability.THREAD_START, CodexCapability.THREAD_RESUME, CodexCapability.THREAD_DELETE, CodexCapability.TURN_START, CodexCapability.TURN_INTERRUPT, CodexCapability.AGENT_MESSAGE_EVENTS, CodexCapability.TURN_TERMINAL_EVENTS, CodexCapability.APPROVAL_SERVER_REQUESTS, CodexCapability.APPROVAL_RESPONSE_SCHEMA}
         for capability in CodexCapability:
             if capability in implemented:
                 self.assertIs(manifest.capabilities[capability].adapter_implementation, AdapterImplementation.IMPLEMENTED)
             else:
                 self.assertIs(manifest.capabilities[capability].adapter_implementation, AdapterImplementation.NOT_IMPLEMENTED)
 
-    def test_p1_8_exact_capability_readiness(self):
+    def test_p1_9_exact_capability_readiness(self):
         manifest = load_manifest()
         implemented = {
             CodexCapability.MODEL_LIST,
             CodexCapability.THREAD_START,
             CodexCapability.THREAD_RESUME,
+            CodexCapability.THREAD_DELETE,
             CodexCapability.TURN_START,
             CodexCapability.TURN_INTERRUPT,
             CodexCapability.AGENT_MESSAGE_EVENTS,
@@ -92,9 +93,7 @@ class CapabilityManifestTests(unittest.TestCase):
             CodexCapability.APPROVAL_SERVER_REQUESTS,
             CodexCapability.APPROVAL_RESPONSE_SCHEMA,
         }
-        not_implemented = {
-            CodexCapability.THREAD_DELETE,
-        }
+        not_implemented = set()
         for capability in implemented:
             self.assertIs(manifest.capabilities[capability].adapter_implementation, AdapterImplementation.IMPLEMENTED)
         for capability in not_implemented:
