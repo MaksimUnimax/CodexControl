@@ -24,7 +24,7 @@ Date: 2026-09-05
 ## P2.2 accepted core repositories
 - Immutable repository records; finite/redacted repository errors distinct from `StorageError`.
 - Injected clock is finite/redacted; mutation timestamps are monotonic and version/generation overflow fails closed.
-- Controller repository exposes only `get` and `begin_boot`; every boot returns effective SLEEP while historical persisted requested mode/control epoch are preserved.
+- `ControllerRuntimeRepository` public semantic surface remains exactly `get` + `begin_boot`; every boot returns effective SLEEP while historical persisted requested mode/control epoch are preserved.
 - Settings repository exposes durable initialize-if-absent and whole-record optimistic CAS replace.
 - Dialogue repository exposes only create-intent path `NO_DIALOGUE -> CREATING -> IDLE | CREATE_UNKNOWN | ERROR`; profile/server identity and one-time thread binding are immutable.
 - P2.2 final proof counts: unit 6, integration 20, full `287 + 6 + 20 = 313`. P2.1/P1 regressions, compile/import/diff/security passed. No production DB/state/service effects.
@@ -39,6 +39,7 @@ Binding source: `docs/adr/0020-ingress-control-and-callback-claims.md` plus ADR-
 - All repository operations use only accepted `SqliteStorage.read/write`; no DDL/kernel changes.
 - All numeric IDs/timestamps are exact signed-64 integers, bool forbidden. Update/control epochs are non-negative; Telegram user ID positive; chat ID non-zero signed-64.
 - No raw Telegram JSON/text, callback token plaintext, secret or conversation content is accepted for durable storage.
+- Accepted P2.2 public repository surfaces remain unchanged. Control claims use a separate `ControlIngressRepository`; do not add methods to `ControllerRuntimeRepository`.
 
 ### Ingress dedupe
 - Materialized ingress disposition kinds: `CONTROL`, `IGNORED_SLEEP`, `IGNORED_UNAUTHORIZED`, `JOB`.
@@ -47,7 +48,7 @@ Binding source: `docs/adr/0020-ingress-control-and-callback-claims.md` plus ADR-
 - `claim_ignored(update_id, disposition)` accepts only SLEEP/UNAUTHORIZED ignored dispositions. New claim writes received/completed timestamps once. Duplicate update returns the existing durable disposition unchanged, calls no clock and never reclassifies the update.
 
 ### Atomic control ingress/epoch claim
-- P2.3 extends `ControllerRuntimeRepository` with one combined control claim transaction; Telegram label/message parsing remains later application work.
+- P2.3 exposes a separate `ControlIngressRepository` for the combined control claim transaction; Telegram label/message parsing remains later application work.
 - Input: bot-specific durable `update_id`, group-order `control_epoch` (later routing supplies the group message epoch), and exact `ControllerMode` requested result.
 - Status is exactly `APPLIED`, `STALE`, `DUPLICATE`.
 - Existing ingress update => DUPLICATE: no clock, no controller mutation. A replayed prior activation after restart therefore cannot restore ACTIVE.
