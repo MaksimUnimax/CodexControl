@@ -22,3 +22,4 @@ Architect-owned; individual records under `docs/adr/`.
 - ADR-0018 freezes the exact schema-v1 SQL table/column/check/FK/index layout and migration identity consumed by P2.1 and later P2 repositories.
 - ADR-0019 freezes P2.2 core durable repository semantics for controller boot state, durable settings and the dialogue create-intent path with finite repository errors and optimistic versions; control epoch, turn/delete state machines and other repositories remain later slices.
 - ADR-0020 freezes P2.3 durable ingress dedupe, atomic control-message epoch/mode claims and hashed opaque callback one-time claim semantics; no raw Telegram content/token, JOB creation, subject business mutation or Telegram integration is included.
+- ADR-0021 freezes P2.4a atomic JOB ingress + turn-job execution claims + bounded transient payload storage. Delivery segments, approvals and retention deletion remain P2.4b.
