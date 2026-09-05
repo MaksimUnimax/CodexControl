@@ -20,7 +20,8 @@ Date: 2026-09-05
 - ADR-0014 defines permissions approval semantics.
 - ADR-0015 defines active-turn interrupt ownership/reconciliation.
 - ADR-0016 defines destructive thread/delete response authority and partial-failure ambiguity.
-- ADR-0017 defines the P2.1 SQLite storage kernel and schema-v1 boundary.
+- ADR-0017 defines the P2.1 SQLite storage-kernel/runtime/migration boundary.
+- ADR-0018 freezes the exact physical schema-v1 SQL, migration ID, table set and explicit index set.
 
 ## P1 closing acceptance facts
 - P1.10 was proof-only: no production source, version fixture or packaged manifest changed.
@@ -33,7 +34,7 @@ Date: 2026-09-05
 ## P2.1 exact architect authority
 P2.1 is **SQLite storage kernel + schema-v1 bootstrap/migration + process lock + transaction primitive only**.
 
-Binding source: `docs/adr/0017-sqlite-storage-kernel-and-schema-v1.md` plus `docs/DATA_MODEL.md`.
+Binding sources: `docs/adr/0017-sqlite-storage-kernel-and-schema-v1.md`, `docs/adr/0018-sqlite-schema-v1-physical-layout.md`, and `docs/DATA_MODEL.md`. ADR-0018 is authoritative for exact physical table/column/check/FK/index names and values.
 
 ### Runtime/storage ownership
 - Standard-library `sqlite3` only; do not add `aiosqlite` or another DB runtime dependency.
@@ -58,25 +59,22 @@ Binding source: `docs/adr/0017-sqlite-storage-kernel-and-schema-v1.md` plus `doc
 Finite safe storage categories are equivalent to: `INVALID_PATH`, `INSECURE_PATH`, `LOCKED`, `OPEN_FAILED`, `SCHEMA_UNSUPPORTED`, `SCHEMA_INVALID`, `CLOSED`, `TRANSACTION_FAILED`. Generic rendering contains category only; no path, SQL, parameter/content, exception body, environment or secret.
 
 ### Schema/migration authority
-- `SCHEMA_VERSION=1`.
+- `SCHEMA_VERSION=1`; migration ID is exactly `0001_initial_state`.
 - Durable `schema_migrations(version, migration_id, ddl_sha256, applied_at_ms)` plus `PRAGMA user_version`.
+- Canonical migration hash is SHA-256 of the implementation's one canonical UTF-8 v1 DDL constant containing exactly ADR-0018's statements in the frozen order.
 - Version 0 is accepted only for an empty/new DB. A non-empty unversioned DB fails `SCHEMA_INVALID`.
 - Future/newer `user_version` fails `SCHEMA_UNSUPPORTED`.
-- Existing v1 verifies exact migration ID/hash and required table/index names. P2.1 does not auto-repair/drop unknown schema state.
+- Existing v1 verifies exact migration ID/hash and the exact ADR-0018 user-table/explicit-index sets. P2.1 does not auto-repair/drop unknown schema state.
 - Bootstrap is one explicit migration transaction; `user_version=1` only after v1 DDL/history row succeeds.
 - Migration timestamp comes from an injected/testable millisecond clock.
 
-### Schema-v1 business tables
-P2.1 creates only the physical schema defined by ADR-0017 for: `controller_runtime`, `settings`, `dialogues`, `turn_jobs`, `transient_payloads`, `delivery_segments`, `ingress_updates`, `callback_actions`, `approvals`, `deletion_tombstones`, `errors`, plus `schema_migrations` and deterministic supporting indexes.
-
-Important frozen points:
-- at most one retained/live dialogue row through a constant unique live slot;
-- `NO_DIALOGUE` is absence of a dialogue row;
-- long-lived tables do not add prompt/response/raw Telegram JSON/command-output/auth columns;
-- transient content is isolated in `transient_payloads`;
-- approvals represent exact wire request ID type/value but do not make the reusable wire ID globally unique;
-- deletion tombstone stores hashed thread identity rather than dialogue content;
-- foreign-key behavior supports later architect-authorized local purge, but P2.1 exposes no repository method that performs that purge.
+### Schema-v1 content boundary
+- At most one retained/live dialogue row is enforced by the constant unique `live_slot` defined in ADR-0018; `NO_DIALOGUE` is row absence.
+- Long-lived tables do not add prompt/response/raw Telegram JSON/command-output/auth columns.
+- Transient content is isolated in `transient_payloads.content` BLOB.
+- Exact approval wire request type is stored without making the reusable wire ID globally unique.
+- Deletion tombstones use hashed thread identity.
+- P2.1 creates no seed business rows and exposes no repository method that performs purge or state transition.
 
 ### P2.1 forbidden scope
 No controller/settings/dialogue repository APIs; no legal state-transition methods; no ingress/callback dedupe logic; no job claims; no retention cleaner; no approval repository orchestration; no delete finalization; no crash/restart harness; no P3 application service; no Telegram; no deployment; no production DB.
