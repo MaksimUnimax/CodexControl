@@ -32,6 +32,7 @@ Binding source: `docs/adr/0021-turn-job-ingress-and-transient-payloads.md` plus 
 - A new accepted prompt must become durable before external `thread/start`/`turn/start`: one transaction creates `turn_jobs` state RECEIVED/version0, exactly one INPUT `transient_payloads` row, and terminal ingress disposition `JOB:<job_id>` using one timestamp.
 - Existing ingress ID is duplicate-first and is never reclassified. Existing JOB disposition must resolve to a canonical job plus exactly one matching INPUT payload or fail `INVARIANT_VIOLATION`.
 - New job/payload ID collision is `ALREADY_EXISTS`; only dialogue CREATING with NULL thread or dialogue IDLE with exact bound thread may accept a new job claim. Immutable server/profile identity must match the dialogue.
+- A different new update is rejected with `STATE_CONFLICT` while the same dialogue has an outstanding `turn_jobs` row in RECEIVED. This prevents crash-between-ingress-and-turn-claim from creating a delayed prompt queue or a second first-prompt job.
 - Full prompt bytes exist only in transient payload BLOB; long-lived job stores only the canonical input SHA-256.
 
 ### Turn execution claim
@@ -40,6 +41,7 @@ Binding source: `docs/adr/0021-turn-job-ingress-and-transient-payloads.md` plus 
 - `mark_codex_starting` is CLAIMED -> CODEX_STARTING and commits before external P1.6 `turn/start`.
 - `mark_codex_running` is CODEX_STARTING -> CODEX_RUNNING and binds the exact Codex turn ID once.
 - `finish_codex` atomically captures job+dialogue terminal state: COMPLETED -> CODEX_COMPLETED + IDLE; FAILED -> FAILED + ERROR; UNKNOWN -> UNKNOWN + TURN_UNKNOWN. Failed/unknown require sanitized error class. Missing/version/state conflict precedence is finite and no failed semantic precondition calls the clock.
+- If user-visible output has already been obtained, `finish_codex` accepts an all-or-none OUTPUT payload bundle and inserts that OUTPUT BLOB in the SAME terminal transaction; payload failure rolls back job/dialogue terminal changes. Empty/no user-visible output uses no bundle. This closes the terminal-state/content crash window before P2.4b delivery exists.
 - Interrupt-specific dialogue `INTERRUPTING` transitions are not part of P2.4a.
 
 ### Transient payloads
