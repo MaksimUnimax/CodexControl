@@ -16,6 +16,7 @@ This slice must not introduce Telegram networking, turn jobs, approval orchestra
 3. All public numeric IDs/timestamps use exact Python integers, never bool, within signed-64 SQLite bounds. Telegram update/control epochs are non-negative. Telegram user ID is positive signed-64; chat ID is non-zero signed-64 because group chat IDs may be negative.
 4. Repository clocks use the accepted P2.2 validation/redaction/monotonic policy and are called only after semantic preconditions prove that the current invocation needs a timestamp.
 5. No raw Telegram update JSON/text, callback token plaintext, secret, prompt/response, command output or arbitrary exception text is stored.
+6. Accepted P2.2 public repository surfaces remain backward-compatible. In particular `ControllerRuntimeRepository` remains exactly `get` + `begin_boot`; P2.3 control handling is a separate repository boundary rather than extending that class.
 
 ## Decision — ingress record
 
@@ -39,9 +40,11 @@ P2.3 does not expose a JOB-claim method; P2.4 will atomically create turn jobs a
 
 Controller control-message mutation is deliberately combined with ingress dedupe in ONE P2.1 write transaction.
 
-P2.3 extends `ControllerRuntimeRepository` with one semantic method equivalent to:
+P2.3 exposes a separate `ControlIngressRepository` with one semantic method equivalent to:
 
 `claim_control(update_id, control_epoch, requested_mode) -> ControlClaimResult`.
+
+This separate class is deliberate: accepted P2.2 `ControllerRuntimeRepository` remains `get` + `begin_boot` only.
 
 `requested_mode` must be the accepted `ControllerMode` enum. Higher routing layers decide whether a human control maps to ACTIVE or SLEEP; the repository does not parse labels/messages.
 
@@ -73,7 +76,7 @@ P2.3 never accepts or stores callback token plaintext. Its API accepts only a ca
 
 `action`, `subject_type` and `expected_state` are sanitized identifiers using ASCII letters/digits plus `_ . : -` within their schema bounds. `subject_id` is non-empty/NUL-free and <=128. `expected_version` is non-negative signed-64. User/chat IDs follow the common numeric rules above.
 
-`CallbackActionRepository` exposes only semantic create/claim operations (plus no generic arbitrary update/delete API).
+`CallbackActionRepository` exposes only semantic create/claim operations and no generic arbitrary update/delete API.
 
 Create semantics:
 
