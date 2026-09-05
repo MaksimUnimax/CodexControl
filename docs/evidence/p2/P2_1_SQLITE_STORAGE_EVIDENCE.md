@@ -79,3 +79,16 @@ Repair test counts:
 - Full discovery visibly included `test_pragma_contract_and_connection_thread_ownership`, `test_post_submission_write_cancellation_stays_attached_once`, `test_second_owner_locked_then_reopens_after_close`, and `test_fk_cascade_set_null_and_reusable_wire_ids` from `tests.integration.test_sqlite_storage_kernel`.
 - P1.10 counts remained `T0=6`, `T1=1`, `T2=4`; the focused P1 regression commands all passed.
 - The pre-existing P1.6 pending-task warning remained observable during turn-lifecycle/full regression; this repair did not introduce it.
+
+## Architect second repair pass
+
+This is factual second-repair evidence only. P2.1 remains not architect-accepted.
+
+- Candidate entering this repair: `db1f2d212a59f1b808fc303c9ec64d6eed108af6`.
+- The read transaction callback authorizer now carries read/write mode. Read callbacks retain `query_only=ON` and deny query-only bypasses plus INSERT/UPDATE/DELETE action codes.
+- Normal callbacks deny PRAGMA setters and allow only the required contract/schema inspection forms. Frozen connection PRAGMA values remain `foreign_keys=1`, `journal_mode=wal`, `busy_timeout=5000`, `synchronous=2`, `trusted_schema=0`, `user_version=1`.
+- Normal callbacks deny ATTACH/DETACH, schema DDL/reindex/analyze action codes, and INSERT/UPDATE/DELETE targeting `schema_migrations`. Migration/bootstrap remains outside this callback authorizer.
+- Successful callback results are checked for the kernel-owned `isolation_level=None` and `sqlite3.Row` connection contract. Rejected callbacks restore those attributes after rollback.
+- Callback-result validation traverses built-in tuple/list/dict/set/frozenset containers cycle-safely and rejects nested SQLite connection/cursor/row/blob and awaitable/generator/iterator resources. Synchronously closable discovered cursor/blob/lazy resources are disposed.
+- P2.1 focused tests: `8` unit and `31` integration, all pass. Full discovery: `287` tests, pass, with `31` `integration.test_sqlite_storage_kernel` tests included. Formula: `248 + 8 + 31 = 287`.
+- `SCHEMA_V1_DDL_SHA256` remains `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`; no schema/DDL change was made.

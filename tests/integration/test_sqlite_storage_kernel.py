@@ -81,6 +81,326 @@ class StorageKernelTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await storage.close()
 
+    async def test_read_authority_denies_query_only_bypass_and_all_dml(self):
+        storage = await self.open(now_ms=lambda: 1)
+        try:
+            await storage.write(lambda c: (c.execute(
+                "INSERT INTO ingress_updates(update_id, received_at_ms, disposition) "
+                "VALUES (100, 1, 'CONTROL')"
+            ), None)[1])
+
+            calls = 0
+
+            def bypass(connection):
+                nonlocal calls
+                calls += 1
+                self.assertEqual(1, connection.execute("PRAGMA query_only").fetchone()[0])
+                connection.execute("PRAGMA query_only = OFF")
+                connection.execute(
+                    "INSERT INTO ingress_updates(update_id, received_at_ms, disposition) "
+                    "VALUES (101, 1, 'CONTROL')"
+                )
+
+            await self.assert_storage_category(
+                storage.read(bypass), StorageErrorCategory.TRANSACTION_FAILED
+            )
+            self.assertEqual(1, calls)
+            self.assertEqual(0, await storage.write(lambda c: c.execute(
+                "SELECT count(*) FROM ingress_updates WHERE update_id=101"
+            ).fetchone()[0]))
+            self.assertEqual(0, await storage.write(lambda c: c.execute(
+                "PRAGMA query_only"
+            ).fetchone()[0]))
+
+            operations = (
+                ("insert", lambda c: c.execute(
+                    "INSERT INTO ingress_updates(update_id, received_at_ms, disposition) "
+                    "VALUES (102, 1, 'CONTROL')"
+                )),
+                ("update", lambda c: c.execute(
+                    "UPDATE ingress_updates SET disposition='CONTROL' WHERE update_id=100"
+                )),
+                ("delete", lambda c: c.execute(
+                    "DELETE FROM ingress_updates WHERE update_id=100"
+                )),
+            )
+            for name, operation in operations:
+                with self.subTest(operation=name):
+                    operation_calls = 0
+
+                    def direct_dml(connection, operation=operation):
+                        nonlocal operation_calls
+                        operation_calls += 1
+                        operation(connection)
+
+                    await self.assert_storage_category(
+                        storage.read(direct_dml), StorageErrorCategory.TRANSACTION_FAILED
+                    )
+                    self.assertEqual(1, operation_calls)
+            self.assertEqual(1, await storage.read(lambda c: c.execute(
+                "SELECT count(*) FROM ingress_updates WHERE update_id=100"
+            ).fetchone()[0]))
+            await storage.write(lambda c: (c.execute(
+                "INSERT INTO ingress_updates(update_id, received_at_ms, disposition) "
+                "VALUES (103, 1, 'CONTROL')"
+            ), None)[1])
+        finally:
+            await storage.close()
+
+    async def test_callback_pragma_setters_are_denied_and_frozen_values_remain(self):
+        storage = await self.open(now_ms=lambda: 1)
+        try:
+            setters = (
+                ("busy_timeout", "PRAGMA busy_timeout = 0"),
+                ("trusted_schema", "PRAGMA trusted_schema = ON"),
+                ("user_version", "PRAGMA user_version = 2"),
+                ("foreign_keys", "PRAGMA foreign_keys = OFF"),
+                ("journal_mode", "PRAGMA journal_mode = DELETE"),
+                ("synchronous", "PRAGMA synchronous = NORMAL"),
+                ("unknown configuration", "PRAGMA temp_store = MEMORY"),
+            )
+            for index, (name, statement) in enumerate(setters, start=110):
+                with self.subTest(pragma=name):
+                    calls = 0
+
+                    def callback(connection, statement=statement, index=index):
+                        nonlocal calls
+                        calls += 1
+                        connection.execute(
+                            "INSERT INTO ingress_updates(update_id, received_at_ms, disposition) "
+                            "VALUES (?, 1, 'CONTROL')", (index,)
+                        )
+                        connection.execute(statement)
+
+                    await self.assert_storage_category(
+                        storage.write(callback), StorageErrorCategory.TRANSACTION_FAILED
+                    )
+                    self.assertEqual(1, calls)
+                    self.assertEqual(0, await storage.read(lambda c, index=index: c.execute(
+                        "SELECT count(*) FROM ingress_updates WHERE update_id=?", (index,)
+                    ).fetchone()[0]))
+
+            values = await storage.read(lambda c: (
+                c.execute("PRAGMA foreign_keys").fetchone()[0],
+                c.execute("PRAGMA journal_mode").fetchone()[0],
+                c.execute("PRAGMA busy_timeout").fetchone()[0],
+                c.execute("PRAGMA synchronous").fetchone()[0],
+                c.execute("PRAGMA trusted_schema").fetchone()[0],
+                c.execute("PRAGMA user_version").fetchone()[0],
+            ))
+            self.assertEqual((1, "wal", 5000, 2, 0, 1), values)
+        finally:
+            await storage.close()
+
+    async def test_attach_and_detach_are_denied_without_secondary_database(self):
+        storage = await self.open(now_ms=lambda: 1)
+        secondary_path = os.path.join(self.tempdir.name, "secondary.sqlite3")
+        try:
+            calls = 0
+
+            def attach(connection):
+                nonlocal calls
+                calls += 1
+                connection.execute(
+                    "INSERT INTO ingress_updates(update_id, received_at_ms, disposition) "
+                    "VALUES (120, 1, 'CONTROL')"
+                )
+                connection.execute("ATTACH DATABASE ? AS other", (secondary_path,))
+
+            await self.assert_storage_category(
+                storage.write(attach), StorageErrorCategory.TRANSACTION_FAILED
+            )
+            self.assertEqual(1, calls)
+            self.assertFalse(os.path.exists(secondary_path))
+
+            detach_calls = 0
+
+            def detach(connection):
+                nonlocal detach_calls
+                detach_calls += 1
+                connection.execute("DETACH DATABASE other")
+
+            await self.assert_storage_category(
+                storage.write(detach), StorageErrorCategory.TRANSACTION_FAILED
+            )
+            self.assertEqual(1, detach_calls)
+            self.assertEqual(0, await storage.read(lambda c: c.execute(
+                "SELECT count(*) FROM ingress_updates WHERE update_id=120"
+            ).fetchone()[0]))
+            database_names = await storage.read(lambda c: [
+                row[1] for row in c.execute("PRAGMA database_list")
+            ])
+            self.assertIn("main", database_names)
+            self.assertTrue(set(database_names) <= {"main", "temp"})
+            self.assertNotIn("other", database_names)
+            self.assertEqual(1, await storage.read(lambda c: c.execute("SELECT 1").fetchone()[0]))
+        finally:
+            await storage.close()
+
+    async def test_callback_schema_ddl_is_denied_and_schema_is_unchanged(self):
+        storage = await self.open(now_ms=lambda: 1)
+        try:
+            before = await storage.read(lambda c: sorted(
+                (row[0], row[1]) for row in c.execute(
+                    "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+                )
+            ))
+            operations = (
+                ("create table", "CREATE TABLE callback_table (value TEXT)"),
+                ("alter table", "ALTER TABLE ingress_updates ADD COLUMN forbidden TEXT"),
+                ("create index", "CREATE INDEX callback_index ON ingress_updates(disposition)"),
+                ("drop index", "DROP INDEX idx_errors_job"),
+            )
+            for index, (name, statement) in enumerate(operations, start=130):
+                with self.subTest(ddl=name):
+                    calls = 0
+
+                    def callback(connection, statement=statement, index=index):
+                        nonlocal calls
+                        calls += 1
+                        connection.execute(
+                            "INSERT INTO ingress_updates(update_id, received_at_ms, disposition) "
+                            "VALUES (?, 1, 'CONTROL')", (index,)
+                        )
+                        connection.execute(statement)
+
+                    await self.assert_storage_category(
+                        storage.write(callback), StorageErrorCategory.TRANSACTION_FAILED
+                    )
+                    self.assertEqual(1, calls)
+                    self.assertEqual(0, await storage.read(lambda c, index=index: c.execute(
+                        "SELECT count(*) FROM ingress_updates WHERE update_id=?", (index,)
+                    ).fetchone()[0]))
+            after = await storage.read(lambda c: sorted(
+                (row[0], row[1]) for row in c.execute(
+                    "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+                )
+            ))
+            self.assertEqual(before, after)
+            self.assertEqual(1, await storage.read(lambda c: c.execute("SELECT 1").fetchone()[0]))
+        finally:
+            await storage.close()
+
+    async def test_schema_migrations_is_kernel_owned(self):
+        storage = await self.open(now_ms=lambda: 1)
+        expected = (1, "0001_initial_state", "b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c")
+        try:
+            statements = (
+                "UPDATE schema_migrations SET ddl_sha256='c' || substr(ddl_sha256, 2)",
+                "DELETE FROM schema_migrations",
+                "INSERT INTO schema_migrations(version, migration_id, ddl_sha256, applied_at_ms) "
+                "VALUES (2, '0002_forbidden', ?, 2)",
+            )
+            for index, statement in enumerate(statements, start=140):
+                with self.subTest(statement=statement):
+                    calls = 0
+
+                    def callback(connection, statement=statement, index=index):
+                        nonlocal calls
+                        calls += 1
+                        connection.execute(
+                            "INSERT INTO ingress_updates(update_id, received_at_ms, disposition) "
+                            "VALUES (?, 1, 'CONTROL')", (index,)
+                        )
+                        if "VALUES (2" in statement:
+                            connection.execute(statement, ("d" * 64,))
+                        else:
+                            connection.execute(statement)
+
+                    await self.assert_storage_category(
+                        storage.write(callback), StorageErrorCategory.TRANSACTION_FAILED
+                    )
+                    self.assertEqual(1, calls)
+                    self.assertEqual(0, await storage.read(lambda c, index=index: c.execute(
+                        "SELECT count(*) FROM ingress_updates WHERE update_id=?", (index,)
+                    ).fetchone()[0]))
+                    row = await storage.read(lambda c: tuple(c.execute(
+                        "SELECT version, migration_id, ddl_sha256 FROM schema_migrations"
+                    ).fetchone()))
+                    self.assertEqual(expected, row)
+                    self.assertEqual(1, await storage.read(lambda c: c.execute(
+                        "PRAGMA user_version"
+                    ).fetchone()[0]))
+        finally:
+            await storage.close()
+
+    async def test_connection_attributes_are_frozen_and_restored_after_rejection(self):
+        storage = await self.open(now_ms=lambda: 1)
+        try:
+            mutations = (
+                ("row_factory", lambda c: setattr(c, "row_factory", None)),
+                ("isolation_level", lambda c: setattr(c, "isolation_level", "DEFERRED")),
+            )
+            for index, (name, mutate) in enumerate(mutations, start=150):
+                with self.subTest(attribute=name):
+                    calls = 0
+
+                    def callback(connection, mutate=mutate, index=index):
+                        nonlocal calls
+                        calls += 1
+                        connection.execute(
+                            "INSERT INTO ingress_updates(update_id, received_at_ms, disposition) "
+                            "VALUES (?, 1, 'CONTROL')", (index,)
+                        )
+                        mutate(connection)
+
+                    await self.assert_storage_category(
+                        storage.write(callback), StorageErrorCategory.TRANSACTION_FAILED
+                    )
+                    self.assertEqual(1, calls)
+                    self.assertEqual(0, await storage.read(lambda c, index=index: c.execute(
+                        "SELECT count(*) FROM ingress_updates WHERE update_id=?", (index,)
+                    ).fetchone()[0]))
+                    contract = await storage.read(lambda c: (
+                        c.isolation_level,
+                        c.row_factory,
+                    ))
+                    self.assertEqual((None, sqlite3.Row), contract)
+            await storage.write(lambda c: (c.execute(
+                "INSERT INTO ingress_updates(update_id, received_at_ms, disposition) "
+                "VALUES (152, 1, 'CONTROL')"
+            ), None)[1])
+        finally:
+            await storage.close()
+
+    async def test_nested_sqlite_resources_and_lazy_results_are_rejected(self):
+        storage = await self.open(now_ms=lambda: 1)
+        try:
+            results = (
+                ("nested cursor", lambda c: (c.execute("SELECT 1"),)),
+                ("nested row", lambda c: {"row": c.execute("SELECT 1").fetchone()}),
+                ("nested generator", lambda c: {"lazy": (value for value in (1, 2))}),
+                ("nested iterator", lambda c: [iter((1, 2))]),
+            )
+            for name, callback in results:
+                with self.subTest(result=name):
+                    await self.assert_storage_category(
+                        storage.write(callback), StorageErrorCategory.TRANSACTION_FAILED
+                    )
+
+            if hasattr(sqlite3, "Blob"):
+                await self.valid_dialogue(storage, "blob-dialogue")
+                await storage.write(lambda c: (c.execute(
+                    "INSERT INTO transient_payloads(payload_id, dialogue_id, kind, content, "
+                    "content_sha256, byte_length, created_at_ms, expires_at_ms) "
+                    "VALUES ('blob-payload', 'blob-dialogue', 'INPUT', x'61', ?, 1, 1, 1)", (HASH,)
+                ), None)[1])
+                rowid = await storage.read(lambda c: c.execute(
+                    "SELECT rowid FROM transient_payloads WHERE payload_id='blob-payload'"
+                ).fetchone()[0])
+                await self.assert_storage_category(
+                    storage.write(lambda c: (c.blobopen(
+                        "transient_payloads", "content", rowid
+                    ),)),
+                    StorageErrorCategory.TRANSACTION_FAILED,
+                )
+
+            safe = await storage.write(lambda c: {"ids": (1, 2), "name": "safe"})
+            self.assertEqual({"ids": (1, 2), "name": "safe"}, safe)
+            self.assertEqual(1, await storage.read(lambda c: c.execute("SELECT 1").fetchone()[0]))
+        finally:
+            await storage.close()
+
     async def test_write_commit_materializes_value(self):
         storage = await self.open(now_ms=lambda: 1)
         try:

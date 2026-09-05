@@ -28,6 +28,63 @@ _MAX_PATH_LENGTH = 4096
 _CALLBACK_TRANSACTION_OPCODES = frozenset(
     (sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT)
 )
+_CALLBACK_ATTACHMENT_OPCODES = frozenset(
+    (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH)
+)
+_CALLBACK_SCHEMA_OPCODES = frozenset(
+    (
+        sqlite3.SQLITE_CREATE_INDEX,
+        sqlite3.SQLITE_CREATE_TABLE,
+        sqlite3.SQLITE_CREATE_TEMP_INDEX,
+        sqlite3.SQLITE_CREATE_TEMP_TABLE,
+        sqlite3.SQLITE_CREATE_TEMP_TRIGGER,
+        sqlite3.SQLITE_CREATE_TEMP_VIEW,
+        sqlite3.SQLITE_CREATE_TRIGGER,
+        sqlite3.SQLITE_CREATE_VIEW,
+        sqlite3.SQLITE_CREATE_VTABLE,
+        sqlite3.SQLITE_DROP_INDEX,
+        sqlite3.SQLITE_DROP_TABLE,
+        sqlite3.SQLITE_DROP_TEMP_INDEX,
+        sqlite3.SQLITE_DROP_TEMP_TABLE,
+        sqlite3.SQLITE_DROP_TEMP_TRIGGER,
+        sqlite3.SQLITE_DROP_TEMP_VIEW,
+        sqlite3.SQLITE_DROP_TRIGGER,
+        sqlite3.SQLITE_DROP_VIEW,
+        sqlite3.SQLITE_DROP_VTABLE,
+        sqlite3.SQLITE_ALTER_TABLE,
+        sqlite3.SQLITE_REINDEX,
+        sqlite3.SQLITE_ANALYZE,
+    )
+)
+_CALLBACK_DML_OPCODES = frozenset(
+    (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE)
+)
+_CALLBACK_PARAMETERIZED_READONLY_PRAGMAS = frozenset(
+    {
+        "foreign_key_list",
+        "index_info",
+        "index_list",
+        "index_xinfo",
+        "table_info",
+        "table_xinfo",
+    }
+)
+_CALLBACK_READONLY_PRAGMAS = frozenset(
+    {
+        "busy_timeout",
+        "database_list",
+        "foreign_keys",
+        "journal_mode",
+        "query_only",
+        "synchronous",
+        "table_info",
+        "table_xinfo",
+        "trusted_schema",
+        "user_version",
+    }
+    | _CALLBACK_PARAMETERIZED_READONLY_PRAGMAS
+)
+_SCHEMA_MIGRATIONS_TABLE = "schema_migrations"
 
 
 def _failure(category: StorageErrorCategory) -> StorageError:
@@ -374,10 +431,15 @@ class SqliteStorage:
                 or inspect.isgeneratorfunction(callback)
             ):
                 raise _failure(StorageErrorCategory.TRANSACTION_FAILED)
-            connection.set_authorizer(self._callback_authorizer)
+            connection.set_authorizer(self._callback_authorizer(write=write))
             try:
                 result = callback(connection)
                 if self._is_unsupported_callback_result(result):
+                    raise _failure(StorageErrorCategory.TRANSACTION_FAILED)
+                if (
+                    connection.isolation_level is not None
+                    or connection.row_factory is not sqlite3.Row
+                ):
                     raise _failure(StorageErrorCategory.TRANSACTION_FAILED)
             finally:
                 connection.set_authorizer(None)
@@ -387,14 +449,17 @@ class SqliteStorage:
         except StorageError:
             if began:
                 self._rollback(connection)
+            self._restore_connection_contract(connection)
             raise
         except sqlite3.Error:
             if began:
                 self._rollback(connection)
+            self._restore_connection_contract(connection)
             raise _failure(StorageErrorCategory.TRANSACTION_FAILED) from None
         except BaseException:
             if began:
                 self._rollback(connection)
+            self._restore_connection_contract(connection)
             raise
         finally:
             if not write:
@@ -406,38 +471,97 @@ class SqliteStorage:
                     raise _failure(StorageErrorCategory.TRANSACTION_FAILED) from None
 
     @staticmethod
-    def _callback_authorizer(
-        action_code: int,
-        _arg1: str | None,
-        _arg2: str | None,
-        _database_name: str | None,
-        _trigger_name: str | None,
-    ) -> int:
-        if action_code in _CALLBACK_TRANSACTION_OPCODES:
-            return sqlite3.SQLITE_DENY
-        return sqlite3.SQLITE_OK
+    def _callback_authorizer(*, write: bool) -> Callable[..., int]:
+        def authorize(
+            action_code: int,
+            arg1: str | None,
+            arg2: str | None,
+            _database_name: str | None,
+            _trigger_name: str | None,
+        ) -> int:
+            if (
+                action_code in _CALLBACK_TRANSACTION_OPCODES
+                or action_code in _CALLBACK_ATTACHMENT_OPCODES
+                or action_code in _CALLBACK_SCHEMA_OPCODES
+            ):
+                return sqlite3.SQLITE_DENY
+            if action_code == sqlite3.SQLITE_PRAGMA:
+                # Contract PRAGMA assignments carry a non-None second
+                # argument on this SQLite runtime.  Parameterized schema
+                # inspection PRAGMAs are the intentional exception.
+                pragma_name = (arg1 or "").lower()
+                if pragma_name not in _CALLBACK_READONLY_PRAGMAS:
+                    return sqlite3.SQLITE_DENY
+                if pragma_name in _CALLBACK_PARAMETERIZED_READONLY_PRAGMAS:
+                    return sqlite3.SQLITE_OK
+                return sqlite3.SQLITE_DENY if arg2 is not None else sqlite3.SQLITE_OK
+            if action_code in _CALLBACK_DML_OPCODES:
+                if not write or arg1 == _SCHEMA_MIGRATIONS_TABLE:
+                    return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        return authorize
 
     @staticmethod
     def _is_unsupported_callback_result(result: object) -> bool:
-        if isinstance(result, (sqlite3.Connection, sqlite3.Cursor, sqlite3.Row)):
-            return True
-        if inspect.isawaitable(result) or inspect.isgenerator(result) or inspect.isasyncgen(result):
-            close = getattr(result, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
-            return True
-        if isinstance(result, Iterator):
-            close = getattr(result, "close", None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:
-                    pass
-            return True
-        return False
+        blob_type = getattr(sqlite3, "Blob", None)
+        resource_types = (sqlite3.Connection, sqlite3.Cursor, sqlite3.Row)
+        if blob_type is not None:
+            resource_types += (blob_type,)
+        seen: set[int] = set()
+
+        def visit(value: object) -> bool:
+            if isinstance(value, resource_types):
+                if isinstance(value, sqlite3.Cursor) or (
+                    blob_type is not None and isinstance(value, blob_type)
+                ):
+                    SqliteStorage._close_callback_resource(value)
+                return True
+            if inspect.isawaitable(value) or inspect.isgenerator(value) or inspect.isasyncgen(value):
+                SqliteStorage._close_callback_resource(value)
+                return True
+            if isinstance(value, Iterator):
+                SqliteStorage._close_callback_resource(value)
+                return True
+            if isinstance(value, dict):
+                identity = id(value)
+                if identity in seen:
+                    return False
+                seen.add(identity)
+                invalid = False
+                for key, item in value.items():
+                    invalid = visit(key) or invalid
+                    invalid = visit(item) or invalid
+                return invalid
+            if isinstance(value, (tuple, list, set, frozenset)):
+                identity = id(value)
+                if identity in seen:
+                    return False
+                seen.add(identity)
+                invalid = False
+                for item in value:
+                    invalid = visit(item) or invalid
+                return invalid
+            return False
+
+        return visit(result)
+
+    @staticmethod
+    def _close_callback_resource(value: object) -> None:
+        close = getattr(value, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+
+    @staticmethod
+    def _restore_connection_contract(connection: sqlite3.Connection) -> None:
+        try:
+            connection.isolation_level = None
+            connection.row_factory = sqlite3.Row
+        except (sqlite3.Error, TypeError, ValueError):
+            raise _failure(StorageErrorCategory.TRANSACTION_FAILED) from None
 
     @staticmethod
     def _rollback(connection: sqlite3.Connection) -> None:
