@@ -17,13 +17,13 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P1.5 thread start/resume + ambiguity-safe profile-bound thread identity. Accepted implementation after two repair reviews: `e7851d813944d3326b7fd9317da9e21f216557fa`.
 - [DONE] P1.6 turn start + ordered completed-agent-message projection + terminal handling. Accepted implementation after two repair reviews: `de36b3ef3657a464b29ff2d17692fce5fc2b2388`.
 - [DONE] P1.7 bidirectional server-request envelope + approval request/response port using fake operator. Accepted implementation/proof HEAD after iterative repair review: `bbd7445087dfb59185d49787d562637e282ba5aa`.
-- [DONE] P1.8 exact active-turn interrupt + terminal reconciliation through the existing P1.6 collector. Accepted implementation after one recovered repair: `6d8a07b5b95ef377cf60762f4475128bdf810b22`.
+- [DONE] P1.8 exact active-turn interrupt + terminal reconciliation through the existing P1.6 collector. Accepted implementation after one recovered repair: `6d8a07b5b95ef377124c5bff228fad643`.
 - [DONE] P1.9 exact thread/delete + ambiguity-safe external deletion authority. Accepted implementation: `95b2a42e47aaddae6ec9bcbaf9f0f879362d993e`.
 - [DONE] P1.10 T0/T1/T2 adapter acceptance; no real production conversation. Accepted proof commit: `7b236f95df78a05073d67fe362ac9fff343d7c43`.
 
 ## P2 — Durable local state/idempotency
-- [NEXT] P2.1 SQLite storage kernel + schema-v1 bootstrap/migration + process lock + transaction primitive.
-- [PLANNED] P2.2 controller/settings/dialogue repositories + optimistic versions and durable state-transition claims.
+- [DONE] P2.1 secure SQLite storage kernel + exact schema-v1 bootstrap/migration + process lock + owned transaction primitive. Accepted implementation after two repair reviews: `61301fd25ff7253693f367664ce99e13dfc88446`.
+- [NEXT] P2.2 controller/settings/dialogue core repositories + optimistic versions and create-intent state claims.
 - [PLANNED] P2.3 ingress dedupe + control epoch + opaque callback-action atomic claims.
 - [PLANNED] P2.4 turn jobs + transient payloads + delivery segments + approvals repositories and bounded retention/sanitization.
 - [PLANNED] P2.5 deletion tombstones + error fingerprints + confirmed hard-delete local purge/finalization transaction.
