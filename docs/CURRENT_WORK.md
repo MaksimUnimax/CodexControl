@@ -4,75 +4,56 @@ Date: 2026-09-05
 
 ## Accepted facts
 - Repository: `MaksimUnimax/CodexControl`.
-- Installed server-80 Codex authority: `codex-cli 0.144.6`.
-- Installed app-server schema authority SHA-256: `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`.
-- P1 is complete through accepted P1.10 T0/T1/T2; T3 remains deferred to P7.
-- P2.1 accepted after two repair reviews: `61301fd25ff7253693f367664ce99e13dfc88446`.
+- Installed server-80 Codex authority: `codex-cli 0.144.6`; app-server schema SHA-256 `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`.
+- P1 is complete through accepted P1.10 T0/T1/T2; real-Codex T3 remains deferred to P7.
+- P2.1 accepted: `61301fd25ff7253693f367664ce99e13dfc88446`.
 - P2.2 accepted implementation/proof HEAD: `5187c080a7188a59989013defe7d07075662d007`.
-- Accepted schema-v1 DDL SHA-256: `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
-- ADR-0017 defines the secure SQLite kernel/migration boundary.
-- ADR-0018 freezes schema-v1 physical SQL.
-- ADR-0019 defines accepted P2.2 controller/settings/dialogue repository semantics.
-- ADR-0020 defines P2.3 ingress/control/callback claim semantics.
+- P2.3 accepted implementation/repair HEAD: `0d8f34beaa35a2bc02b349abba9507ebb9bc3802`.
+- Frozen schema-v1 DDL SHA-256: `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+- ADR-0017/0018 define the accepted SQLite kernel and physical schema.
+- ADR-0019 defines accepted P2.2 core repositories.
+- ADR-0020 defines accepted P2.3 ingress/control/callback claims.
+- ADR-0021 defines the next P2.4a turn-job + transient-payload slice.
 
-## P2.1 accepted storage boundary
-- Standard-library `sqlite3`; one persistent connection on one dedicated DB worker; secure absolute path + 0600 database/lock + effective-UID ownership + symlink rejection + lifetime non-blocking `flock`.
-- Verified WAL/FK/5000ms busy timeout/FULL/trusted-schema-off/manual transactions/Row factory.
-- Read/write callbacks are synchronous/materialized, owned through repeated caller cancellation and unable to take over transaction control, mutate read transactions, alter connection PRAGMAs/schema/migration authority, ATTACH another DB, or return SQLite/lazy resources.
-- Storage diagnostics are finite/redacted; no auto retry.
+## Accepted P2.3 facts
+- `IngressUpdateRepository.claim_ignored` accepts only exact SLEEP/UNAUTHORIZED ignored enums. Durable duplicate update IDs return the existing record unchanged and are never reclassified. P2.3 materializes but never creates `JOB:<id>`.
+- `ControlIngressRepository` is separate from the accepted P2.2 `ControllerRuntimeRepository`. It atomically combines new CONTROL ingress with epoch/mode mutation; stale new epochs still terminally dedupe without changing controller state; duplicate update IDs mutate nothing.
+- Restart retains historical requested mode but P2.2 `begin_boot` still returns effective SLEEP. A replayed activation is DUPLICATE and cannot restore ACTIVE.
+- Callback storage accepts only canonical lower-case SHA-256 token hashes, never raw tokens. Unauthorized identity is checked before consumed/expiry status. Fresh claims consume once; authorized expiry observation durably terminalizes at `consumed_at_ms=expires_at_ms`, so clock rollback/restart cannot resurrect a token.
+- Unexpected post-precheck CAS mismatch is `INVARIANT_VIOLATION`; no automatic reconciliation/retry.
+- Accepted P2.3 counts: unit 7, integration 28, full `313 + 7 + 28 = 348`. P2.1/P2.2/P1 regressions, compile/import/diff/security passed; no production DB/state/service effects.
 
-## P2.2 accepted core repositories
-- Immutable repository records; finite/redacted repository errors distinct from `StorageError`.
-- Injected clock is finite/redacted; mutation timestamps are monotonic and version/generation overflow fails closed.
-- `ControllerRuntimeRepository` public semantic surface remains exactly `get` + `begin_boot`; every boot returns effective SLEEP while historical persisted requested mode/control epoch are preserved.
-- Settings repository exposes durable initialize-if-absent and whole-record optimistic CAS replace.
-- Dialogue repository exposes only create-intent path `NO_DIALOGUE -> CREATING -> IDLE | CREATE_UNKNOWN | ERROR`; profile/server identity and one-time thread binding are immutable.
-- P2.2 final proof counts: unit 6, integration 20, full `287 + 6 + 20 = 313`. P2.1/P1 regressions, compile/import/diff/security passed. No production DB/state/service effects.
+## P2.4a exact architect authority
+P2.4 is split into two executor slices. P2.4a is **atomic JOB ingress + turn-job execution claims + bounded transient payload storage**. P2.4b will later add delivery segments, approvals and bounded retention deletion.
 
-## P2.3 exact architect authority
-P2.3 implements only durable ingress dedupe, atomic control-message epoch/mode claims, and opaque callback-action one-time claims over the accepted schema-v1.
+Binding source: `docs/adr/0021-turn-job-ingress-and-transient-payloads.md` plus accepted ADR-0017..0020 and `docs/DATA_MODEL.md` / `docs/STATE_MACHINES.md`.
 
-Binding source: `docs/adr/0020-ingress-control-and-callback-claims.md` plus ADR-0017/0018/0019, `docs/DATA_MODEL.md`, `docs/STATE_MACHINES.md`, `docs/PRODUCT_REQUIREMENTS.md`, and `docs/TELEGRAM_INTERACTION_CONTRACT.md`.
+### Atomic prompt ingress
+- A new accepted prompt must become durable before external `thread/start`/`turn/start`: one transaction creates `turn_jobs` state RECEIVED/version0, exactly one INPUT `transient_payloads` row, and terminal ingress disposition `JOB:<job_id>` using one timestamp.
+- Existing ingress ID is duplicate-first and is never reclassified. Existing JOB disposition must resolve to a canonical job plus exactly one matching INPUT payload or fail `INVARIANT_VIOLATION`.
+- New job/payload ID collision is `ALREADY_EXISTS`; only dialogue CREATING with NULL thread or dialogue IDLE with exact bound thread may accept a new job claim. Immutable server/profile identity must match the dialogue.
+- Full prompt bytes exist only in transient payload BLOB; long-lived job stores only the canonical input SHA-256.
 
-### Common P2.3 contract
-- Existing `RepositoryErrorCategory` remains unchanged; operational dedupe/callback outcomes use finite result-status enums.
-- All repository operations use only accepted `SqliteStorage.read/write`; no DDL/kernel changes.
-- All numeric IDs/timestamps are exact signed-64 integers, bool forbidden. Update/control epochs are non-negative; Telegram user ID positive; chat ID non-zero signed-64.
-- No raw Telegram JSON/text, callback token plaintext, secret or conversation content is accepted for durable storage.
-- Accepted P2.2 public repository surfaces remain unchanged. Control claims use a separate `ControlIngressRepository`; do not add methods to `ControllerRuntimeRepository`.
+### Turn execution claim
+- `TurnJobRepository` is a new separate repository; accepted P2.2/P2.3 class surfaces remain unchanged.
+- `claim_turn` atomically moves job RECEIVED -> CLAIMED and dialogue IDLE -> TURN_RUNNING with exact job/dialogue expected versions. It binds a previously NULL job thread exactly once and requires it to equal the dialogue thread.
+- `mark_codex_starting` is CLAIMED -> CODEX_STARTING and commits before external P1.6 `turn/start`.
+- `mark_codex_running` is CODEX_STARTING -> CODEX_RUNNING and binds the exact Codex turn ID once.
+- `finish_codex` atomically captures job+dialogue terminal state: COMPLETED -> CODEX_COMPLETED + IDLE; FAILED -> FAILED + ERROR; UNKNOWN -> UNKNOWN + TURN_UNKNOWN. Failed/unknown require sanitized error class. Missing/version/state conflict precedence is finite and no failed semantic precondition calls the clock.
+- Interrupt-specific dialogue `INTERRUPTING` transitions are not part of P2.4a.
 
-### Ingress dedupe
-- Materialized ingress disposition kinds: `CONTROL`, `IGNORED_SLEEP`, `IGNORED_UNAUTHORIZED`, `JOB`.
-- `JOB:<id>` materializes only with a non-empty/NUL-free job ID <=128; P2.3 does not create JOB dispositions.
-- `IngressUpdateRepository.get(update_id)` returns durable record/None.
-- `claim_ignored(update_id, disposition)` accepts only SLEEP/UNAUTHORIZED ignored dispositions. New claim writes received/completed timestamps once. Duplicate update returns the existing durable disposition unchanged, calls no clock and never reclassifies the update.
+### Transient payloads
+- `TransientPayloadKind` is exactly INPUT / OUTPUT / APPROVAL / DISPLAY.
+- Payload content is exact immutable bytes, size 1..8,388,608 bytes, SHA-256/byte length computed internally. Content is excluded from generic repr.
+- INPUT creation is reserved to the atomic prompt-ingress claim; generic payload create is only OUTPUT/APPROVAL/DISPLAY.
+- Generic create requires canonical owner references, duplicate payload ID fails without clock, and expiry must be strictly after creation time.
+- `get_input_for_job` requires exactly one INPUT row and verifies its hash equals the job's immutable `input_sha256`.
+- P2.4a does not delete expired payloads; delivery/approval-aware retention is P2.4b.
 
-### Atomic control ingress/epoch claim
-- P2.3 exposes a separate `ControlIngressRepository` for the combined control claim transaction; Telegram label/message parsing remains later application work.
-- Input: bot-specific durable `update_id`, group-order `control_epoch` (later routing supplies the group message epoch), and exact `ControllerMode` requested result.
-- Status is exactly `APPLIED`, `STALE`, `DUPLICATE`.
-- Existing ingress update => DUPLICATE: no clock, no controller mutation. A replayed prior activation after restart therefore cannot restore ACTIVE.
-- New update requires initialized controller singleton. New stale epoch (`epoch <= last_control_epoch`) inserts terminal CONTROL ingress but leaves controller state unchanged. Fresh epoch updates `last_control_epoch`, historical `requested_mode` and monotonic timestamp and inserts CONTROL ingress in the same transaction.
-- Result intentionally has no effective-mode authority. P2.2 `begin_boot` still makes process effective mode SLEEP; later routing changes effective mode only after a fresh APPLIED control claim.
-- STATUS is not a mode mutation and will not use this claim method.
-
-### Callback action storage
-- Repository accepts only canonical lower-case SHA-256 token hashes (`[0-9a-f]{64}`); raw opaque callback token generation/hashing remains P4 and plaintext never enters P2.3 storage APIs.
-- Callback record binds sanitized action/subject type, safe subject ID, expected version/state, exact authorized user/chat IDs, created/expires/consumed timestamps.
-- Create is insert-only; duplicate hash => ALREADY_EXISTS without clock. Expiry must be strictly later than creation time.
-
-### Callback one-time claim
-- Claim statuses exactly: `CLAIMED`, `NOT_FOUND`, `UNAUTHORIZED`, `EXPIRED`, `ALREADY_CONSUMED`.
-- Only CLAIMED returns action metadata. Missing/mismatched/expired/already-consumed claims return no action record.
-- Claim order: missing -> identity mismatch -> already consumed -> clock/expiry -> one exact `consumed_at_ms` CAS.
-- Freshness uses `effective_now=max(clock_now, created_at_ms)` and expires when `effective_now >= expires_at_ms`.
-- Exactly one concurrent claim can return CLAIMED; later claims are ALREADY_CONSUMED. No retry.
-- P2.3 performs no external effect or subject-specific business mutation. Returned expected version/state are only immutable binding metadata; later layers must complete their durable subject claim before any external effect.
-
-### P2.3 forbidden scope
-No Telegram client/handlers/label parsing, STATUS routing, JOB disposition creation, turn jobs, transient payloads, delivery, approvals, retention, token generation, subject-specific callback business mutation, hard delete, P3 service or production deployment.
+### Forbidden P2.4a scope
+No delivery-segment mutation, approval repository, retention deletion, callback subject effect, interrupt/delete dialogue transitions, tombstones/errors, hard-delete purge, P3 application service, Telegram or production deployment.
 
 ## Execution authority
 Codex must not self-start work from this document.
 
-Only **P2.3 — ingress dedupe + atomic control epoch/mode claim + opaque callback-action one-time claims** is eligible for the next explicit implementation prompt.
+Only **P2.4a — atomic JOB ingress + turn-job execution claims + bounded transient payload repository** is eligible for the next explicit implementation prompt.
