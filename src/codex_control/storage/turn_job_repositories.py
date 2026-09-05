@@ -194,6 +194,18 @@ def _materialize_job(row: Any) -> TurnJobRecord:
     if updated_at_ms < created_at_ms:
         raise _invariant()
     error_class = _validate_stored_error(row[16])
+    if state is TurnJobState.RECEIVED:
+        if codex_turn_id is not None or error_class is not None:
+            raise _invariant()
+    elif state in (TurnJobState.CLAIMED, TurnJobState.CODEX_STARTING):
+        if thread_id is None or codex_turn_id is not None or error_class is not None:
+            raise _invariant()
+    elif state in (TurnJobState.CODEX_RUNNING, TurnJobState.CODEX_COMPLETED):
+        if thread_id is None or codex_turn_id is None or error_class is not None:
+            raise _invariant()
+    elif state in (TurnJobState.FAILED, TurnJobState.UNKNOWN):
+        if thread_id is None or error_class is None:
+            raise _invariant()
     assert job_id is not None and dialogue_id is not None and server_id is not None and profile_id is not None
     assert input_sha256 is not None
     return TurnJobRecord(
@@ -203,7 +215,7 @@ def _materialize_job(row: Any) -> TurnJobRecord:
     )
 
 
-def _materialize_payload(row: Any) -> TransientPayloadRecord:
+def _materialize_payload(connection: Any, row: Any) -> TransientPayloadRecord:
     if row is None or len(row) != 9:
         raise _invariant()
     payload_id = _validate_stored_string(row[0], _ID_LENGTH)
@@ -224,10 +236,34 @@ def _materialize_payload(row: Any) -> TransientPayloadRecord:
     if expires_at_ms <= created_at_ms:
         raise _invariant()
     assert payload_id is not None and content_sha256 is not None
-    return TransientPayloadRecord(
+    payload = TransientPayloadRecord(
         payload_id, dialogue_id, job_id, kind, content, content_sha256,
         byte_length, created_at_ms, expires_at_ms,
     )
+    dialogue: DialogueRecord | None = None
+    if payload.dialogue_id is not None:
+        dialogue_row = _dialogue_row(connection, payload.dialogue_id)
+        if dialogue_row is None:
+            raise _invariant()
+        dialogue = _materialize_dialogue(dialogue_row)
+    job: TurnJobRecord | None = None
+    if payload.job_id is not None:
+        job_row = _job_row(connection, payload.job_id)
+        if job_row is None:
+            raise _invariant()
+        job = _materialize_job(job_row)
+        job_dialogue_row = _dialogue_row(connection, job.dialogue_id)
+        if job_dialogue_row is None:
+            raise _invariant()
+        _materialize_dialogue(job_dialogue_row)
+    if dialogue is not None and job is not None and job.dialogue_id != dialogue.dialogue_id:
+        raise _invariant()
+    if payload.kind is TransientPayloadKind.INPUT:
+        if dialogue is None or job is None or job.dialogue_id != payload.dialogue_id:
+            raise _invariant()
+        if job.input_sha256 != payload.content_sha256:
+            raise _invariant()
+    return payload
 
 
 def _job_select() -> str:
@@ -258,6 +294,12 @@ def _job_row(connection: Any, job_id: str) -> Any:
     return connection.execute(_job_select() + " WHERE job_id = ?", (job_id,)).fetchone()
 
 
+def _job_row_for_update(connection: Any, update_id: int) -> Any:
+    return connection.execute(
+        _job_select() + " WHERE telegram_update_id = ?", (update_id,)
+    ).fetchone()
+
+
 def _payload_row(connection: Any, payload_id: str) -> Any:
     return connection.execute(_payload_select() + " WHERE payload_id = ?", (payload_id,)).fetchone()
 
@@ -270,15 +312,20 @@ def _ingress_row(connection: Any, update_id: int) -> Any:
     ).fetchone()
 
 
-def _input_for_job(connection: Any, job: TurnJobRecord) -> TransientPayloadRecord:
+def _input_for_job(
+    connection: Any,
+    job: TurnJobRecord,
+    *,
+    missing_category: RepositoryErrorCategory = RepositoryErrorCategory.NOT_FOUND,
+) -> TransientPayloadRecord:
     rows = connection.execute(
         _payload_select() + " WHERE job_id = ? AND kind = 'INPUT'", (job.job_id,)
     ).fetchall()
     if not rows:
-        raise _not_found()
+        raise _error(missing_category)
     if len(rows) != 1:
         raise _invariant()
-    payload = _materialize_payload(rows[0])
+    payload = _materialize_payload(connection, rows[0])
     if (
         payload.job_id != job.job_id
         or payload.dialogue_id != job.dialogue_id
@@ -306,7 +353,7 @@ class TransientPayloadRepository(_RepositoryBase):
 
         def read(connection: Any) -> TransientPayloadRecord | None:
             row = _payload_row(connection, payload_id)
-            return None if row is None else _materialize_payload(row)
+            return None if row is None else _materialize_payload(connection, row)
 
         return await self._storage.read(read)
 
@@ -359,6 +406,10 @@ class TransientPayloadRepository(_RepositoryBase):
                 if row is None:
                     raise _not_found()
                 job = _materialize_job(row)
+                job_dialogue_row = _dialogue_row(connection, job.dialogue_id)
+                if job_dialogue_row is None:
+                    raise _invariant()
+                _materialize_dialogue(job_dialogue_row)
 
             if dialogue is not None and job is not None and job.dialogue_id != dialogue.dialogue_id:
                 raise _error(RepositoryErrorCategory.STATE_CONFLICT)
@@ -435,7 +486,10 @@ class TurnJobRepository(_RepositoryBase):
                     job = _materialize_job(job_row)
                     if job.telegram_update_id != update_id or job.job_id != ingress.job_id:
                         raise _invariant()
-                    payload = _input_for_job(connection, job)
+                    payload = _input_for_job(
+                        connection, job,
+                        missing_category=RepositoryErrorCategory.INVARIANT_VIOLATION,
+                    )
                     return TurnIngressClaimResult(
                         TurnIngressClaimStatus.DUPLICATE, ingress, job, payload
                     )
@@ -443,6 +497,8 @@ class TurnJobRepository(_RepositoryBase):
                     TurnIngressClaimStatus.DUPLICATE, ingress, None, None
                 )
 
+            if _job_row_for_update(connection, update_id) is not None:
+                raise _invariant()
             if _job_row(connection, job_id) is not None:
                 raise _error(RepositoryErrorCategory.ALREADY_EXISTS)
             if _payload_row(connection, input_payload_id) is not None:
@@ -558,7 +614,10 @@ class TurnJobRepository(_RepositoryBase):
             ingress = _materialize_ingress(ingress_row)
             if ingress.disposition.value != "JOB" or ingress.job_id != job.job_id:
                 raise _invariant()
-            _input_for_job(connection, job)
+            _input_for_job(
+                connection, job,
+                missing_category=RepositoryErrorCategory.INVARIANT_VIOLATION,
+            )
 
             job_version = _next_version(job.version)
             dialogue_version = _next_version(dialogue.version)

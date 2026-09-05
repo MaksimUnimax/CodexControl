@@ -110,3 +110,48 @@ Commands also passed:
 All tests used temporary SQLite directories. No production DB or state root was opened or touched, no auth.json or secrets file was read, no real Codex or Telegram call was made, no service was changed, and no runtime dependency was added.
 
 This is implementation evidence only and does not claim architect acceptance.
+
+## Architect first repair pass
+
+Repair parent/rejected candidate: `4c02053a1edcd187bdeaf5fb7b3de8080ab4b0f8`.
+
+The first repair pass addressed the architect review comment `5550501091` for
+Issue #14. It remains implementation evidence only; P2.4a is not architect-
+accepted, and no P2.4b work is started.
+
+Repair/proof coverage:
+
+- Internal durable-coherence callers classify missing INPUT as
+  `INVARIANT_VIOLATION`, while public `get_input_for_job` retains `NOT_FOUND`.
+- P2.4a-owned turn-job state shapes are validated on materialization; all 11
+  schema-v1 job states materialize with delivery states kept materialization-
+  only.
+- Payload reads validate canonical dialogue/job owners, owner agreement, and
+  the stronger INPUT two-owner/dialogue/hash invariant.
+- New ingress detects an existing `turn_jobs.telegram_update_id` without an
+  ingress row as semantic corruption before clock or insert.
+- Tests prove CREATING -> IDLE -> first `claim_turn` thread binding and reject
+  rebinding; they also prove the actual one-time CODEX_RUNNING turn-ID bind,
+  stale/current replay behavior, and 512-character acceptance.
+- Tests prove duplicate generic payload creation and terminal output collision
+  return before calling the clock; terminal clock failure rolls back both
+  owners and leaves output absent.
+- Tests cover concurrent terminal finish, all six P2.4a version-overflow paths,
+  exact public input boundaries, owner corruption, and redacted diagnostics.
+
+Validation results:
+
+- P2.4a focused unit/integration: `8 / 31`.
+- Accepted prior-slice focused counts: P2.1 `8 / 31`, P2.2 `6 / 20`, P2.3
+  `7 / 28`; P1.10 `6 / 1 / 4`.
+- `BASE_ACCEPTED_FULL_TESTS=348`; `EXPECTED_FULL_TESTS=348 + 8 + 31 = 387`;
+  observed full discovery: `387` passing tests.
+- Compile, public import, diff-check, DDL hash, prior-slice, and existing P1
+  focused checks passed.
+- The known P1.6 pending-task warning was observed in the full/P1 lifecycle
+  output and was not introduced by P2.4a.
+
+No accepted prior-slice production file, schema/DDL, architecture/ADR file,
+production database/state root, secret, service, Telegram/Codex integration,
+or runtime dependency was changed. No architect acceptance is claimed and no
+recommendation to start P2.4b is made.

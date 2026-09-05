@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import os
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -60,6 +61,14 @@ class TurnJobsAndPayloadsTests(unittest.IsolatedAsyncioTestCase):
         running = await repo.mark_codex_running(job_id=created.job.job_id, expected_version=starting.version,
                                                 codex_turn_id="turn")
         return dialogue, repo, created, claimed, running
+
+    async def corrupt(self, storage, sql, parameters=()):
+        await storage.close()
+        with sqlite3.connect(self.path) as connection:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute(sql, parameters)
+            connection.commit()
+        return await self.open()
 
     async def test_ingress_new_and_duplicate_job_restart_authority(self):
         storage = await self.open()
@@ -129,6 +138,39 @@ class TurnJobsAndPayloadsTests(unittest.IsolatedAsyncioTestCase):
                                          model_id=None, reasoning_effort=None, input_payload_id="p4",
                                          input_content=b"x", input_expires_at_ms=30)
             self.assertIs(RepositoryErrorCategory.STATE_CONFLICT, raised.exception.category)
+        finally:
+            await storage.close()
+
+    async def test_new_update_with_orphan_job_update_is_invariant(self):
+        storage = await self.open()
+        try:
+            await self.dialogue(storage)
+
+            def seed_orphan(connection):
+                connection.execute(
+                    "INSERT INTO turn_jobs "
+                    "(job_id, telegram_update_id, source_chat_id, source_message_id, dialogue_id, "
+                    "server_id, profile_id, thread_id, model_id, reasoning_effort, input_sha256, "
+                    "codex_turn_id, state, version, created_at_ms, updated_at_ms, error_class) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, ?, ?, NULL)",
+                    ("orphan-job", 77, -1, 1, "d", "server", "profile", "thread", None, None,
+                     hashlib.sha256(b"orphan").hexdigest(), TurnJobState.RECEIVED.value, 20, 20),
+                )
+
+            await storage.write(seed_orphan)
+            calls = []
+            repo = TurnJobRepository(storage, now_ms=lambda: calls.append(1) or 30)
+            with self.assertRaises(RepositoryError) as raised:
+                await repo.claim_ingress(
+                    update_id=77, job_id="new-job", source_chat_id=-1, source_message_id=2,
+                    dialogue_id="d", server_id="server", profile_id="profile", thread_id="thread",
+                    model_id=None, reasoning_effort=None, input_payload_id="new-payload",
+                    input_content=b"new", input_expires_at_ms=100)
+            self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+            self.assertEqual([], calls)
+            self.assertIsNone(await IngressUpdateRepository(storage).get(77))
+            self.assertEqual("orphan-job", (await repo.get("orphan-job")).job_id)
+            self.assertIsNone(await TransientPayloadRepository(storage).get("new-payload"))
         finally:
             await storage.close()
 
@@ -234,6 +276,44 @@ class TurnJobsAndPayloadsTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await storage.close()
 
+    async def test_missing_input_classification_public_and_internal(self):
+        storage = await self.open()
+        try:
+            dialogue, repo, created = await self.job(storage)
+
+            def remove_input(connection):
+                connection.execute("DELETE FROM transient_payloads WHERE payload_id = ?", (created.input_payload.payload_id,))
+
+            await storage.write(remove_input)
+            public = TransientPayloadRepository(storage)
+            with self.assertRaises(RepositoryError) as raised:
+                await public.get_input_for_job(created.job.job_id)
+            self.assertIs(RepositoryErrorCategory.NOT_FOUND, raised.exception.category)
+
+            duplicate_calls = []
+            duplicate = TurnJobRepository(storage, now_ms=lambda: duplicate_calls.append(1) or 20)
+            with self.assertRaises(RepositoryError) as raised:
+                await duplicate.claim_ingress(
+                    update_id=created.job.telegram_update_id, job_id="replacement", source_chat_id=-1,
+                    source_message_id=99, dialogue_id="d", server_id="server", profile_id="profile",
+                    thread_id="thread", model_id=None, reasoning_effort=None,
+                    input_payload_id="replacement-payload", input_content=b"replacement",
+                    input_expires_at_ms=100)
+            self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+            self.assertEqual([], duplicate_calls)
+
+            claim_calls = []
+            with self.assertRaises(RepositoryError) as raised:
+                await TurnJobRepository(storage, now_ms=lambda: claim_calls.append(1) or 20).claim_turn(
+                    job_id=created.job.job_id, expected_job_version=0,
+                    expected_dialogue_version=dialogue.version, thread_id="thread")
+            self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+            self.assertEqual([], claim_calls)
+            self.assertEqual(TurnJobState.RECEIVED, (await repo.get(created.job.job_id)).state)
+            self.assertEqual(DialogueState.IDLE, (await DialogueRepository(storage).get_live()).state)
+        finally:
+            await storage.close()
+
     async def test_claim_turn_concurrent_one_winner(self):
         storage = await self.open()
         try:
@@ -247,7 +327,7 @@ class TurnJobsAndPayloadsTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await storage.close()
 
-    async def test_codex_starting_and_running_are_one_time_claims(self):
+    async def test_codex_running_turn_id_is_bound_once_and_validated(self):
         storage = await self.open()
         try:
             _, repo, created = await self.job(storage)
@@ -255,6 +335,113 @@ class TurnJobsAndPayloadsTests(unittest.IsolatedAsyncioTestCase):
                                             expected_dialogue_version=1, thread_id="thread")
             starting = await repo.mark_codex_starting(job_id=created.job.job_id, expected_version=claimed.job.version)
             self.assertEqual(TurnJobState.CODEX_STARTING, starting.state)
+
+            calls = []
+            invalid = TurnJobRepository(storage, now_ms=lambda: calls.append(1) or 30)
+            for turn_id in ("", "bad\x00id", "x" * 513):
+                with self.assertRaises(RepositoryError) as raised:
+                    await invalid.mark_codex_running(
+                        job_id=created.job.job_id, expected_version=starting.version, codex_turn_id=turn_id)
+                self.assertIs(RepositoryErrorCategory.INVALID_ARGUMENT, raised.exception.category)
+            self.assertEqual([], calls)
+
+            running = await repo.mark_codex_running(
+                job_id=created.job.job_id, expected_version=starting.version, codex_turn_id="x" * 512)
+            self.assertEqual(TurnJobState.CODEX_RUNNING, running.state)
+            self.assertEqual("x" * 512, running.codex_turn_id)
+            with self.assertRaises(RepositoryError) as raised:
+                await repo.mark_codex_running(
+                    job_id=created.job.job_id, expected_version=starting.version, codex_turn_id="turn-A")
+            self.assertIs(RepositoryErrorCategory.VERSION_CONFLICT, raised.exception.category)
+            with self.assertRaises(RepositoryError) as raised:
+                await repo.mark_codex_running(
+                    job_id=created.job.job_id, expected_version=running.version, codex_turn_id="turn-B")
+            self.assertIs(RepositoryErrorCategory.STATE_CONFLICT, raised.exception.category)
+            durable = await repo.get(created.job.job_id)
+            self.assertEqual("x" * 512, durable.codex_turn_id)
+        finally:
+            await storage.close()
+
+    async def test_first_dialogue_thread_binding_is_exactly_once(self):
+        storage = await self.open()
+        try:
+            creating = await self.dialogue(storage, state=DialogueState.CREATING)
+            repo = TurnJobRepository(storage, now_ms=lambda: 20)
+            created = await repo.claim_ingress(
+                update_id=31, job_id="first-job", source_chat_id=-1, source_message_id=1,
+                dialogue_id="d", server_id="server", profile_id="profile", thread_id=None,
+                model_id=None, reasoning_effort=None, input_payload_id="first-payload",
+                input_content=b"first", input_expires_at_ms=100)
+            self.assertIsNone(created.job.thread_id)
+            confirmed = await DialogueRepository(storage, now_ms=lambda: 30).confirm_created(
+                dialogue_id="d", expected_version=creating.version, thread_id="thread-A")
+            claimed = await repo.claim_turn(
+                job_id="first-job", expected_job_version=0,
+                expected_dialogue_version=confirmed.version, thread_id="thread-A")
+            self.assertEqual(TurnJobState.CLAIMED, claimed.job.state)
+            self.assertEqual(DialogueState.TURN_RUNNING, claimed.dialogue.state)
+            self.assertEqual("thread-A", claimed.job.thread_id)
+            self.assertEqual("thread-A", claimed.dialogue.thread_id)
+
+            with self.assertRaises(RepositoryError) as raised:
+                await repo.claim_turn(
+                    job_id="first-job", expected_job_version=0,
+                    expected_dialogue_version=confirmed.version, thread_id="thread-A")
+            self.assertIs(RepositoryErrorCategory.VERSION_CONFLICT, raised.exception.category)
+            with self.assertRaises(RepositoryError) as raised:
+                await repo.claim_turn(
+                    job_id="first-job", expected_job_version=claimed.job.version,
+                    expected_dialogue_version=claimed.dialogue.version, thread_id="thread-B")
+            self.assertIs(RepositoryErrorCategory.STATE_CONFLICT, raised.exception.category)
+            self.assertEqual("thread-A", (await repo.get("first-job")).thread_id)
+        finally:
+            await storage.close()
+
+    async def test_all_job_states_materialize_and_owned_shapes_fail_closed(self):
+        storage = await self.open()
+        try:
+            _, repo, created = await self.job(storage)
+
+            def update_shape(connection, state, thread, codex_turn, error):
+                connection.execute(
+                    "UPDATE turn_jobs SET state = ?, thread_id = ?, codex_turn_id = ?, error_class = ? WHERE job_id = ?",
+                    (state.value, thread, codex_turn, error, created.job.job_id),
+                )
+
+            canonical = {
+                TurnJobState.RECEIVED: ("thread", None, None),
+                TurnJobState.CLAIMED: ("thread", None, None),
+                TurnJobState.CODEX_STARTING: ("thread", None, None),
+                TurnJobState.CODEX_RUNNING: ("thread", "turn", None),
+                TurnJobState.CODEX_COMPLETED: ("thread", "turn", None),
+                TurnJobState.FAILED: ("thread", None, "CODEX.failed"),
+                TurnJobState.UNKNOWN: ("thread", "turn", "CODEX.unknown"),
+                TurnJobState.DELIVERY_PENDING: ("thread", "turn", None),
+                TurnJobState.DELIVERING: ("thread", "turn", None),
+                TurnJobState.DELIVERED: ("thread", "turn", None),
+                TurnJobState.DELIVERY_UNKNOWN: ("thread", "turn", None),
+            }
+            for state, (thread, codex_turn, error) in canonical.items():
+                await storage.write(lambda c, s=state, t=thread, ct=codex_turn, e=error: update_shape(c, s, t, ct, e))
+                materialized = await repo.get(created.job.job_id)
+                self.assertEqual(state, materialized.state)
+
+            invalid_shapes = (
+                (TurnJobState.CLAIMED, None, None, None),
+                (TurnJobState.CODEX_STARTING, "thread", "turn", None),
+                (TurnJobState.CODEX_RUNNING, "thread", None, None),
+                (TurnJobState.CODEX_COMPLETED, "thread", None, None),
+                (TurnJobState.CODEX_COMPLETED, "thread", "turn", "PRIVATE_STATE_SHAPE"),
+                (TurnJobState.FAILED, "thread", None, None),
+                (TurnJobState.UNKNOWN, "thread", "turn", None),
+                (TurnJobState.RECEIVED, "thread", "turn", None),
+            )
+            for state, thread, codex_turn, error in invalid_shapes:
+                await storage.write(lambda c, s=state, t=thread, ct=codex_turn, e=error: update_shape(c, s, t, ct, e))
+                with self.assertRaises(RepositoryError) as raised:
+                    await repo.get(created.job.job_id)
+                self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+                self.assertNotIn("PRIVATE_STATE_SHAPE", repr(raised.exception))
         finally:
             await storage.close()
 
@@ -340,12 +527,17 @@ class TurnJobsAndPayloadsTests(unittest.IsolatedAsyncioTestCase):
             _, repo, created, claimed, running = await self.running_job(storage)
             await TransientPayloadRepository(storage, now_ms=lambda: 25).create(
                 payload_id="collision", dialogue_id="d", kind=TransientPayloadKind.DISPLAY, content=b"x", expires_at_ms=100)
+            collision_calls = []
+            collision_repo = TurnJobRepository(storage, now_ms=lambda: collision_calls.append(1) or 30)
             with self.assertRaises(RepositoryError) as raised:
-                await repo.finish_codex(job_id=created.job.job_id, expected_job_version=running.version,
-                                        expected_dialogue_version=claimed.dialogue.version, outcome=TurnTerminalOutcome.COMPLETED,
-                                        output_payload_id="collision", output_content=b"y", output_expires_at_ms=100)
+                await collision_repo.finish_codex(
+                    job_id=created.job.job_id, expected_job_version=running.version,
+                    expected_dialogue_version=claimed.dialogue.version, outcome=TurnTerminalOutcome.COMPLETED,
+                    output_payload_id="collision", output_content=b"y", output_expires_at_ms=100)
             self.assertIs(RepositoryErrorCategory.ALREADY_EXISTS, raised.exception.category)
+            self.assertEqual([], collision_calls)
             self.assertEqual(TurnJobState.CODEX_RUNNING, (await repo.get(created.job.job_id)).state)
+            self.assertEqual(DialogueState.TURN_RUNNING, (await DialogueRepository(storage).get_live()).state)
             failing = TurnJobRepository(storage, now_ms=lambda: (_ for _ in ()).throw(RuntimeError("PRIVATE_CLOCK")))
             with self.assertRaises(RepositoryError) as raised:
                 await failing.finish_codex(job_id=created.job.job_id, expected_job_version=running.version,
@@ -353,6 +545,64 @@ class TurnJobsAndPayloadsTests(unittest.IsolatedAsyncioTestCase):
                                            output_payload_id="out", output_content=b"y", output_expires_at_ms=100)
             self.assertIs(RepositoryErrorCategory.CLOCK_INVALID, raised.exception.category)
             self.assertIsNone(await TransientPayloadRepository(storage).get("out"))
+            self.assertEqual(TurnJobState.CODEX_RUNNING, (await repo.get(created.job.job_id)).state)
+            self.assertEqual(DialogueState.TURN_RUNNING, (await DialogueRepository(storage).get_live()).state)
+        finally:
+            await storage.close()
+
+    async def test_generic_payload_duplicate_does_not_call_clock_or_change_record(self):
+        storage = await self.open()
+        try:
+            await self.dialogue(storage)
+            repo = TransientPayloadRepository(storage, now_ms=lambda: 20)
+            original = await repo.create(
+                payload_id="duplicate-payload", dialogue_id="d", kind=TransientPayloadKind.DISPLAY,
+                content=b"original", expires_at_ms=30)
+            calls = []
+            duplicate_repo = TransientPayloadRepository(storage, now_ms=lambda: calls.append(1) or 25)
+            with self.assertRaises(RepositoryError) as raised:
+                await duplicate_repo.create(
+                    payload_id="duplicate-payload", dialogue_id="d", kind=TransientPayloadKind.DISPLAY,
+                    content=b"replacement", expires_at_ms=40)
+            self.assertIs(RepositoryErrorCategory.ALREADY_EXISTS, raised.exception.category)
+            self.assertEqual([], calls)
+            self.assertEqual(original, await repo.get("duplicate-payload"))
+        finally:
+            await storage.close()
+
+    async def test_finish_concurrent_identical_versions_has_one_winner(self):
+        storage = await self.open()
+        try:
+            _, repo, created, claimed, running = await self.running_job(storage)
+            results = await asyncio.gather(
+                repo.finish_codex(
+                    job_id=created.job.job_id, expected_job_version=running.version,
+                    expected_dialogue_version=claimed.dialogue.version, outcome=TurnTerminalOutcome.COMPLETED,
+                    output_payload_id="concurrent-output", output_content=b"output", output_expires_at_ms=100),
+                repo.finish_codex(
+                    job_id=created.job.job_id, expected_job_version=running.version,
+                    expected_dialogue_version=claimed.dialogue.version, outcome=TurnTerminalOutcome.COMPLETED,
+                    output_payload_id="concurrent-output", output_content=b"output", output_expires_at_ms=100),
+                return_exceptions=True,
+            )
+            self.assertEqual(1, sum(not isinstance(result, Exception) for result in results))
+            self.assertEqual(1, sum(
+                isinstance(result, RepositoryError)
+                and result.category in (RepositoryErrorCategory.VERSION_CONFLICT, RepositoryErrorCategory.STATE_CONFLICT)
+                for result in results
+            ))
+            final_job = await repo.get(created.job.job_id)
+            final_dialogue = await DialogueRepository(storage).get_live()
+            self.assertEqual(TurnJobState.CODEX_COMPLETED, final_job.state)
+            self.assertEqual(DialogueState.IDLE, final_dialogue.state)
+            self.assertEqual(running.version + 1, final_job.version)
+            self.assertEqual(claimed.dialogue.version + 1, final_dialogue.version)
+            self.assertEqual(1, await storage.read(
+                lambda c: c.execute(
+                    "SELECT COUNT(*) FROM transient_payloads WHERE kind = 'OUTPUT' AND payload_id = ?",
+                    ("concurrent-output",),
+                ).fetchone()[0]
+            ))
         finally:
             await storage.close()
 
@@ -395,6 +645,44 @@ class TurnJobsAndPayloadsTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await storage.close()
 
+    async def test_payload_owner_and_input_coherence_corruption_fails_closed(self):
+        cases = (
+            ("dangling-dialogue", "UPDATE transient_payloads SET dialogue_id = ? WHERE payload_id = ?", ("missing-dialogue", "payload"), False),
+            ("dangling-job", "UPDATE transient_payloads SET job_id = ? WHERE payload_id = ?", ("missing-job", "payload"), False),
+            ("input-dialogue-only", "UPDATE transient_payloads SET job_id = NULL WHERE payload_id = ?", ("payload-10",), True),
+            ("input-job-only", "UPDATE transient_payloads SET dialogue_id = NULL WHERE payload_id = ?", ("payload-10",), True),
+            ("input-hash", "UPDATE turn_jobs SET input_sha256 = ? WHERE job_id = ?", (hashlib.sha256(b"changed").hexdigest(), "job-10"), True),
+            ("job-dialogue-coherence", "UPDATE turn_jobs SET dialogue_id = ? WHERE job_id = ?", ("missing-dialogue", "job-10"), False),
+        )
+        for index, (name, sql, parameters, is_input) in enumerate(cases):
+            storage = await self.open()
+            try:
+                _, _, created = await self.job(storage, update=10)
+                if is_input:
+                    payload_id = created.input_payload.payload_id
+                else:
+                    await TransientPayloadRepository(storage, now_ms=lambda: 25).create(
+                        payload_id="payload", dialogue_id="d",
+                        job_id=created.job.job_id if name == "job-dialogue-coherence" else None,
+                        kind=TransientPayloadKind.DISPLAY,
+                        content=b"display", expires_at_ms=100)
+                    payload_id = "payload"
+                if "payload_id = ?" in sql and len(parameters) == 1:
+                    corruption_parameters = parameters
+                elif payload_id != "payload" and "transient_payloads" in sql:
+                    corruption_parameters = (parameters[0], payload_id)
+                else:
+                    corruption_parameters = parameters
+                storage = await self.corrupt(storage, sql, corruption_parameters)
+                with self.assertRaises(RepositoryError) as raised:
+                    await TransientPayloadRepository(storage).get(payload_id)
+                self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category, name)
+                self.assertNotIn("missing-dialogue", repr(raised.exception))
+                self.assertNotIn("missing-job", repr(raised.exception))
+            finally:
+                await storage.close()
+            self.path = os.path.join(self.tempdir.name, f"payload-corruption-{index}.sqlite3")
+
     async def test_get_input_for_job_missing_and_corruption(self):
         storage = await self.open()
         try:
@@ -410,6 +698,146 @@ class TurnJobsAndPayloadsTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
         finally:
             await storage.close()
+
+    async def test_version_overflow_paths_fail_before_clock(self):
+        async def assert_overflow(index, setup, operation, verify):
+            storage = await self.open()
+            try:
+                context = await setup(storage)
+                calls = []
+                with self.assertRaises(RepositoryError) as raised:
+                    await operation(storage, context, lambda: calls.append(1) or 30)
+                self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+                self.assertEqual([], calls)
+                await verify(storage, context)
+            finally:
+                await storage.close()
+            self.path = os.path.join(self.tempdir.name, f"overflow-{index}.sqlite3")
+
+        async def setup_claim_job(storage):
+            dialogue, repo, created = await self.job(storage, update=40)
+            await storage.write(lambda c: (c.execute(
+                "UPDATE turn_jobs SET version = ? WHERE job_id = ?", (9223372036854775807, created.job.job_id)
+            ), None)[1])
+            return dialogue, repo, created
+
+        async def operation_claim_job(storage, context, clock):
+            dialogue, _, created = context
+            return await TurnJobRepository(storage, now_ms=clock).claim_turn(
+                job_id=created.job.job_id, expected_job_version=9223372036854775807,
+                expected_dialogue_version=dialogue.version, thread_id="thread")
+
+        async def verify_claim_job(storage, context):
+            _, repo, created = context
+            self.assertEqual(9223372036854775807, (await repo.get(created.job.job_id)).version)
+            self.assertEqual(DialogueState.IDLE, (await DialogueRepository(storage).get_live()).state)
+
+        await assert_overflow(0, setup_claim_job, operation_claim_job, verify_claim_job)
+
+        async def setup_claim_dialogue(storage):
+            dialogue, repo, created = await self.job(storage, update=41)
+            await storage.write(lambda c: (c.execute(
+                "UPDATE dialogues SET version = ? WHERE dialogue_id = ?", (9223372036854775807, dialogue.dialogue_id)
+            ), None)[1])
+            return dialogue, repo, created
+
+        async def operation_claim_dialogue(storage, context, clock):
+            _, _, created = context
+            return await TurnJobRepository(storage, now_ms=clock).claim_turn(
+                job_id=created.job.job_id, expected_job_version=0,
+                expected_dialogue_version=9223372036854775807, thread_id="thread")
+
+        async def verify_claim_dialogue(storage, context):
+            _, repo, created = context
+            self.assertEqual(TurnJobState.RECEIVED, (await repo.get(created.job.job_id)).state)
+            self.assertEqual(9223372036854775807, (await DialogueRepository(storage).get_live()).version)
+
+        await assert_overflow(1, setup_claim_dialogue, operation_claim_dialogue, verify_claim_dialogue)
+
+        async def setup_starting(storage):
+            _, repo, created = await self.job(storage, update=42)
+            claimed = await repo.claim_turn(job_id=created.job.job_id, expected_job_version=0,
+                                            expected_dialogue_version=1, thread_id="thread")
+            await storage.write(lambda c: (c.execute(
+                "UPDATE turn_jobs SET version = ? WHERE job_id = ?", (9223372036854775807, created.job.job_id)
+            ), None)[1])
+            return repo, created, claimed
+
+        async def operation_starting(storage, context, clock):
+            _, created, _ = context
+            return await TurnJobRepository(storage, now_ms=clock).mark_codex_starting(
+                job_id=created.job.job_id, expected_version=9223372036854775807)
+
+        async def verify_starting(storage, context):
+            repo, created, claimed = context
+            job = await repo.get(created.job.job_id)
+            self.assertEqual(TurnJobState.CLAIMED, job.state)
+            self.assertEqual(9223372036854775807, job.version)
+            self.assertEqual(claimed.dialogue.state, (await DialogueRepository(storage).get_live()).state)
+
+        await assert_overflow(2, setup_starting, operation_starting, verify_starting)
+
+        async def setup_running(storage):
+            _, repo, created = await self.job(storage, update=43)
+            claimed = await repo.claim_turn(job_id=created.job.job_id, expected_job_version=0,
+                                            expected_dialogue_version=1, thread_id="thread")
+            starting = await repo.mark_codex_starting(job_id=created.job.job_id, expected_version=claimed.job.version)
+            await storage.write(lambda c: (c.execute(
+                "UPDATE turn_jobs SET version = ? WHERE job_id = ?", (9223372036854775807, created.job.job_id)
+            ), None)[1])
+            return repo, created, starting
+
+        async def operation_running(storage, context, clock):
+            _, created, _ = context
+            return await TurnJobRepository(storage, now_ms=clock).mark_codex_running(
+                job_id=created.job.job_id, expected_version=9223372036854775807, codex_turn_id="turn")
+
+        async def verify_running(storage, context):
+            repo, created, starting = context
+            job = await repo.get(created.job.job_id)
+            self.assertEqual(TurnJobState.CODEX_STARTING, job.state)
+            self.assertEqual(9223372036854775807, job.version)
+
+        await assert_overflow(3, setup_running, operation_running, verify_running)
+
+        async def setup_finish_job(storage):
+            _, repo, created, claimed, running = await self.running_job(storage, update=44)
+            await storage.write(lambda c: (c.execute(
+                "UPDATE turn_jobs SET version = ? WHERE job_id = ?", (9223372036854775807, created.job.job_id)
+            ), None)[1])
+            return repo, created, claimed, running
+
+        async def operation_finish_job(storage, context, clock):
+            _, created, claimed, _ = context
+            return await TurnJobRepository(storage, now_ms=clock).finish_codex(
+                job_id=created.job.job_id, expected_job_version=9223372036854775807,
+                expected_dialogue_version=claimed.dialogue.version, outcome=TurnTerminalOutcome.COMPLETED)
+
+        async def verify_finish_job(storage, context):
+            repo, created, _, _ = context
+            self.assertEqual(TurnJobState.CODEX_RUNNING, (await repo.get(created.job.job_id)).state)
+
+        await assert_overflow(4, setup_finish_job, operation_finish_job, verify_finish_job)
+
+        async def setup_finish_dialogue(storage):
+            _, repo, created, claimed, running = await self.running_job(storage, update=45)
+            await storage.write(lambda c: (c.execute(
+                "UPDATE dialogues SET version = ? WHERE dialogue_id = ?", (9223372036854775807, "d")
+            ), None)[1])
+            return repo, created, claimed, running
+
+        async def operation_finish_dialogue(storage, context, clock):
+            _, created, _, running = context
+            return await TurnJobRepository(storage, now_ms=clock).finish_codex(
+                job_id=created.job.job_id, expected_job_version=running.version,
+                expected_dialogue_version=9223372036854775807, outcome=TurnTerminalOutcome.COMPLETED)
+
+        async def verify_finish_dialogue(storage, context):
+            repo, created, _, running = context
+            self.assertEqual(running.version, (await repo.get(created.job.job_id)).version)
+            self.assertEqual(9223372036854775807, (await DialogueRepository(storage).get_live()).version)
+
+        await assert_overflow(5, setup_finish_dialogue, operation_finish_dialogue, verify_finish_dialogue)
 
     async def test_job_corruption_and_redaction(self):
         storage = await self.open()
@@ -443,6 +871,90 @@ class TurnJobsAndPayloadsTests(unittest.IsolatedAsyncioTestCase):
             _, repo, created = await self.job(storage)
             self.assertEqual(created.job, await TurnJobRepository(storage, now_ms=lambda: (_ for _ in ()).throw(RuntimeError("CLOCK"))).get(created.job.job_id))
             self.assertEqual(created.input_payload, await TransientPayloadRepository(storage, now_ms=lambda: (_ for _ in ()).throw(RuntimeError("CLOCK"))).get(created.input_payload.payload_id))
+        finally:
+            await storage.close()
+
+    async def test_public_input_boundary_matrix(self):
+        max_int = 9223372036854775807
+        max_id = "i" * 128
+        max_thread = "t" * 512
+        max_model = "m" * 256
+        max_effort = "e" * 64
+
+        for index, (update_id, source_chat_id) in enumerate(((0, -9223372036854775808), (max_int, max_int))):
+            storage = await self.open()
+            try:
+                dialogue_repo = DialogueRepository(storage, now_ms=lambda: 10)
+                await dialogue_repo.create_intent(dialogue_id=max_id, server_id="s" * 128, profile_id="p" * 128)
+                await dialogue_repo.confirm_created(dialogue_id=max_id, expected_version=0, thread_id=max_thread)
+                result = await TurnJobRepository(storage, now_ms=lambda: 20).claim_ingress(
+                    update_id=update_id, job_id=max_id, source_chat_id=source_chat_id,
+                    source_message_id=0, dialogue_id=max_id, server_id="s" * 128, profile_id="p" * 128,
+                    thread_id=max_thread, model_id=max_model, reasoning_effort=max_effort,
+                    input_payload_id=max_id, input_content=b"x", input_expires_at_ms=30)
+                self.assertIs(TurnIngressClaimStatus.CREATED, result.status)
+            finally:
+                await storage.close()
+            self.path = os.path.join(self.tempdir.name, f"boundaries-{index + 1}.sqlite3")
+
+        storage = await self.open()
+        try:
+            await self.dialogue(storage)
+            calls = []
+            repo = TurnJobRepository(storage, now_ms=lambda: calls.append(1) or 20)
+            base = dict(
+                update_id=100, job_id="job", source_chat_id=-1, source_message_id=1, dialogue_id="d",
+                server_id="server", profile_id="profile", thread_id="thread", model_id="model",
+                reasoning_effort="high", input_payload_id="payload", input_content=b"x",
+                input_expires_at_ms=30,
+            )
+            invalid_claim_values = {
+                "update_id": (True, -1, max_int + 1),
+                "job_id": ("", "bad\x00id", "x" * 129),
+                "source_chat_id": (0, True, -9223372036854775809, max_int + 1),
+                "source_message_id": (-1, True, max_int + 1),
+                "dialogue_id": ("", "bad\x00id", "x" * 129),
+                "server_id": ("", "bad\x00id", "x" * 129),
+                "profile_id": ("", "bad\x00id", "x" * 129),
+                "thread_id": ("", "bad\x00id", "x" * 513),
+                "model_id": ("", "bad\x00id", "x" * 257),
+                "reasoning_effort": ("", "bad\x00id", "x" * 65),
+                "input_payload_id": ("", "bad\x00id", "x" * 129),
+                "input_expires_at_ms": (-1, True, max_int + 1),
+            }
+            for field, values in invalid_claim_values.items():
+                for value in values:
+                    with self.assertRaises(RepositoryError) as raised:
+                        await repo.claim_ingress(**{**base, field: value})
+                    self.assertIs(RepositoryErrorCategory.INVALID_ARGUMENT, raised.exception.category)
+            payload_repo = TransientPayloadRepository(storage)
+            for field, values in (("payload_id", ("", "bad\x00id", "x" * 129)),
+                                  ("job_id", ("", "bad\x00id", "x" * 129))):
+                for value in values:
+                    with self.assertRaises(RepositoryError) as raised:
+                        await (payload_repo.get(value) if field == "payload_id" else payload_repo.get_input_for_job(value))
+                    self.assertIs(RepositoryErrorCategory.INVALID_ARGUMENT, raised.exception.category)
+
+            for field, values in (
+                ("expected_job_version", (True, -1, 1.5, max_int + 1)),
+                ("expected_dialogue_version", (True, -1, 1.5, max_int + 1)),
+                ("thread_id", ("", "bad\x00id", "x" * 513)),
+            ):
+                turn_args = dict(
+                    job_id="missing", expected_job_version=0,
+                    expected_dialogue_version=1, thread_id="thread",
+                )
+                for value in values:
+                    with self.assertRaises(RepositoryError) as raised:
+                        await repo.claim_turn(**{**turn_args, field: value})
+                    self.assertIs(RepositoryErrorCategory.INVALID_ARGUMENT, raised.exception.category)
+            for version in (0, max_int):
+                with self.assertRaises(RepositoryError) as raised:
+                    await repo.claim_turn(
+                        job_id="missing", expected_job_version=version,
+                        expected_dialogue_version=version, thread_id="thread")
+                self.assertIs(RepositoryErrorCategory.NOT_FOUND, raised.exception.category)
+            self.assertEqual([], calls)
         finally:
             await storage.close()
 
