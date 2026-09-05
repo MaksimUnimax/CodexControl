@@ -44,7 +44,7 @@ The injected migration clock test records `1234567890`; reopen with a clock that
 - P2.1 storage integration: 19 tests, pass
 - P1.10 T0/T1/T2: 6/1/4 tests, pass
 - Focused P1 protocol/runtime/version/capability/catalog/thread/turn/approval/interrupt/delete/error: 28/27/22/18/18/22/17/22/28/15/16 tests, all pass
-- Full discovery: 256 tests, pass
+- Candidate full discovery: 256 tests, pass as reported; this run omitted the integration package and therefore did not include the 19 P2.1 integration tests.
 - Compile/import: pass (`P2_1_IMPORT_PASS`)
 - Diff check: pass
 - Security scan: pass; only explicit fake redaction sentinels matched
@@ -54,3 +54,28 @@ The pre-existing P1.6 pending-task warning was observed during P1 turn-lifecycle
 ## Production effects
 
 No production database was opened or created. `/var/lib/codex-control`, `/etc/codex-control`, secrets, auth files, services, and global SSH configuration were not touched. No application/repository/business API, Telegram integration, P2.2+ work, runtime dependency, or seed state was added.
+
+## Architect first repair pass
+
+This is factual repair evidence only. P2.1 is not architect-accepted, and no P2.2 or later work was started.
+
+- Rejected candidate repaired: `08eb22b413cfec464170dd67b63541f7031be9e9`
+- Original architect P2.1 base: `f9f71f161ba61508e8bd648ea835e63278377a03`
+- Added minimal `tests/integration/__init__.py`; full unittest discovery now imports `tests.integration.test_sqlite_storage_kernel`.
+- Repaired the async/lazy callback connection-escape defect. Obvious coroutine/async-generator/generator callback functions fail with `TRANSACTION_FAILED`; awaitable, generator, async-generator and ordinary iterator results are rejected before commit. Synchronous coroutine/generator disposal is performed where available, and tests prove no coroutine escapes or `RuntimeWarning` is emitted.
+- Reserved callback transaction ownership with a temporary SQLite authorizer denying `SQLITE_TRANSACTION` and `SQLITE_SAVEPOINT`, removed before kernel commit/rollback. Tests cover connection and explicit COMMIT/ROLLBACK, SAVEPOINT/RELEASE/ROLLBACK TO, and nested BEGIN attempts; each rolls back the preceding insert, invokes the callback once, leaves the connection usable, and performs no retry.
+- Normalized an ordinary injected migration-clock exception to redacted `OPEN_FAILED`; the migration rolls back, leaves version 0 with no migration row, releases the lifetime lock, and the same path reopens successfully with a valid clock.
+- Replaced the serialization test's elapsed `asyncio.sleep(0.05)` ownership proof with executor-submit instrumentation and event gating.
+- Added separate existing lock-file and database-file effective-UID mismatch tests using test-only `fstat` metadata substitution. Each rejects before SQLite connect; a later valid open succeeds and the acquired lock is released.
+- Strengthened redaction proof to use an actual `SqliteStorage` instance opened at a sentinel-containing temporary path.
+- Schema unchanged: `SCHEMA_V1_DDL_SHA256` remains `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+
+Repair test counts:
+
+- P2.1 unit tests: `8`
+- P2.1 integration tests: `24`
+- Expected full count: `248 + 8 + 24 = 280`
+- Observed full discovery: `280` tests, pass
+- Full discovery visibly included `test_pragma_contract_and_connection_thread_ownership`, `test_post_submission_write_cancellation_stays_attached_once`, `test_second_owner_locked_then_reopens_after_close`, and `test_fk_cascade_set_null_and_reusable_wire_ids` from `tests.integration.test_sqlite_storage_kernel`.
+- P1.10 counts remained `T0=6`, `T1=1`, `T2=4`; the focused P1 regression commands all passed.
+- The pre-existing P1.6 pending-task warning remained observable during turn-lifecycle/full regression; this repair did not introduce it.

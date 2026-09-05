@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import inspect
 import os
 import sqlite3
 import stat
 import time
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, TypeVar
 
@@ -23,6 +25,9 @@ from .schema import (
 
 T = TypeVar("T")
 _MAX_PATH_LENGTH = 4096
+_CALLBACK_TRANSACTION_OPCODES = frozenset(
+    (sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT)
+)
 
 
 def _failure(category: StorageErrorCategory) -> StorageError:
@@ -257,7 +262,7 @@ class SqliteStorage:
             raise
         except sqlite3.Error:
             raise _failure(StorageErrorCategory.OPEN_FAILED) from None
-        except (TypeError, ValueError, OSError):
+        except Exception:
             raise _failure(StorageErrorCategory.OPEN_FAILED) from None
 
     @staticmethod
@@ -279,7 +284,10 @@ class SqliteStorage:
             for statement in SCHEMA_V1_STATEMENTS:
                 connection.execute(statement)
             clock = now_ms if now_ms is not None else lambda: time.time_ns() // 1_000_000
-            applied_at_ms = clock()
+            try:
+                applied_at_ms = clock()
+            except Exception:
+                raise _failure(StorageErrorCategory.OPEN_FAILED) from None
             if isinstance(applied_at_ms, bool) or not isinstance(applied_at_ms, int) or applied_at_ms < 0:
                 raise _failure(StorageErrorCategory.OPEN_FAILED)
             connection.execute(
@@ -360,9 +368,19 @@ class SqliteStorage:
             else:
                 connection.execute("BEGIN IMMEDIATE")
             began = True
-            result = callback(connection)
-            if isinstance(result, (sqlite3.Connection, sqlite3.Cursor, sqlite3.Row)):
+            if (
+                inspect.iscoroutinefunction(callback)
+                or inspect.isasyncgenfunction(callback)
+                or inspect.isgeneratorfunction(callback)
+            ):
                 raise _failure(StorageErrorCategory.TRANSACTION_FAILED)
+            connection.set_authorizer(self._callback_authorizer)
+            try:
+                result = callback(connection)
+                if self._is_unsupported_callback_result(result):
+                    raise _failure(StorageErrorCategory.TRANSACTION_FAILED)
+            finally:
+                connection.set_authorizer(None)
             connection.execute("COMMIT")
             began = False
             return result
@@ -386,6 +404,40 @@ class SqliteStorage:
                     if began:
                         self._rollback(connection)
                     raise _failure(StorageErrorCategory.TRANSACTION_FAILED) from None
+
+    @staticmethod
+    def _callback_authorizer(
+        action_code: int,
+        _arg1: str | None,
+        _arg2: str | None,
+        _database_name: str | None,
+        _trigger_name: str | None,
+    ) -> int:
+        if action_code in _CALLBACK_TRANSACTION_OPCODES:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    @staticmethod
+    def _is_unsupported_callback_result(result: object) -> bool:
+        if isinstance(result, (sqlite3.Connection, sqlite3.Cursor, sqlite3.Row)):
+            return True
+        if inspect.isawaitable(result) or inspect.isgenerator(result) or inspect.isasyncgen(result):
+            close = getattr(result, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            return True
+        if isinstance(result, Iterator):
+            close = getattr(result, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+            return True
+        return False
 
     @staticmethod
     def _rollback(connection: sqlite3.Connection) -> None:
