@@ -1,11 +1,9 @@
 # Current work authority
 
-Date: 2026-09-04
+Date: 2026-09-05
 
 ## Accepted facts
 - Repository: `MaksimUnimax/CodexControl`.
-- Codex foundation parent: `626bcd48f8719b467a565de601564a4550ead83b`.
-- Architect V1 baseline before implementation: `74c2950c0b22b2f0be1b61d50907eda846a7804d`.
 - Installed server-80 Codex authority: `codex-cli 0.144.6`.
 - Installed app-server schema authority SHA-256: `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`.
 - P1.1 accepted: `7f013ff2950bc185d6f0991c11960311961e53a7`.
@@ -16,59 +14,64 @@ Date: 2026-09-04
 - P1.6 accepted: `de36b3ef3657a464b29ff2d17692fce5fc2b2388`.
 - P1.7 accepted/proof HEAD: `bbd7445087dfb59185d49787d562637e282ba5aa`.
 - P1.8 accepted after recovered repair: `6d8a07b5b95ef377cf60762f4475128bdf810b22`.
+- P1.9 accepted: `95b2a42e47aaddae6ec9bcbaf9f0f879362d993e`.
 - ADR-0014 defines permissions approval semantics.
 - ADR-0015 defines active-turn interrupt ownership/reconciliation.
-- ADR-0016 defines thread/delete response authority and partial-failure ambiguity.
+- ADR-0016 defines destructive thread/delete response authority and partial-failure ambiguity.
 
-## P1.8 accepted interrupt facts
-- Installed `turn/interrupt` request is `TurnInterruptParams` with required string `threadId` and `turnId`; response is object `TurnInterruptResponse`. Both schemas omit `additionalProperties:false` and have no ID `minLength`.
-- Product does not expose the upstream empty-turn-id startup interrupt path.
-- Interrupt accepts only the exact active P1.6 `TurnBinding` and uses the exact runtime/client captured by the original `turn/start`; manager reacquire/rebase is forbidden.
-- The existing P1.6 collector is the sole terminal evidence and notification consumer. `wait_turn` and interrupt may await the same collector.
-- One interrupt reservation exists per profile/thread key; different profile/runtime keys are independent.
-- Exactly one `turn/interrupt` request is sent; there is no automatic retry.
-- Schema-valid RPC success plus definitive P1.6 COMPLETED/FAILED terminal evidence is CONFIRMED.
-- Ambiguous wire outcome plus definitive exact target terminal evidence is RECONCILED; non-definitive/cancelled/exceptional collector is UNKNOWN.
-- Definitive remote rejection with no already-definitive target is REJECTED with safe numeric remote code only; already-definitive target reconciles.
-- Pre-dispatch caller cancellation sends zero interrupt RPC; after dispatch repeated cancellation remains attached to the exact RPC and collector.
-- Cancelled collector is distinguished from caller cancellation and cannot spin indefinitely.
-- Private active runtime/token metadata is excluded from repr diagnostics.
-- Capability readiness now has MODEL_LIST, THREAD_START, THREAD_RESUME, TURN_START, TURN_INTERRUPT, AGENT_MESSAGE_EVENTS, TURN_TERMINAL_EVENTS, APPROVAL_SERVER_REQUESTS and APPROVAL_RESPONSE_SCHEMA IMPLEMENTED. THREAD_DELETE remains NOT_IMPLEMENTED.
-- Accepted recovered proof suite reported P1.8 28, P1.6 17, P1.7 protocol 28, P1.7 approvals 22, errors 16, capabilities 18, full 222; compile/import passed.
-- The established P1.6 pending-task warning remains test-hygiene debt and was not introduced by P1.8.
+## P1.9 accepted delete facts
+- `thread/delete` uses exact `ThreadDeleteParams {threadId}` and schema-valid `ThreadDeleteResponse` object success is the only P1.9 `DELETE_CONFIRMED` authority.
+- Delete acquires the current runtime for the durable binding profile, verifies exact profile ownership, does not consult the model catalog, and shares the accepted P1.5 per-profile lifecycle reservation with start/resume.
+- Every dispatched non-success, including `ProtocolRemoteError`, protocol/transport/ordinary exception, inner request cancellation, or malformed response, is `DELETE_UNKNOWN`; no `DELETE_REJECTED` status exists because exact Codex 0.144.6 can fail after earlier destructive steps have already succeeded.
+- Confirmed and unknown results retain the exact supplied `ThreadBinding`; safe numeric remote code may be retained, while remote text/data/raw response are discarded.
+- Pre-dispatch cancellation sends zero delete RPC; post-dispatch repeated cancellation remains attached to the one destructive request.
+- P1.9 performs no retry, read inference, second delete, `thread/deleted` consumer, automatic interrupt, controller-local purge, durable binding clearing, or storage-erasure claim.
+- All currently defined `CodexCapability` values are locally IMPLEMENTED after P1.9.
+- Accepted P1.9 report: direct 15, P1.5 22, P1.8 28, P1.7 protocol 28, P1.7 approvals 22, P1.6 17, errors 16, capabilities 18, full 237; compile/import/security passed.
+- The established P1.6 pending-task warning remains pre-existing test-hygiene debt and was not introduced by P1.9.
 
-## P1.9 exact architect authority
-P1.9 implements installed Codex 0.144.6 `thread/delete` adapter semantics only.
+## P1.10 exact architect authority
+P1.10 is the closing P1 adapter acceptance gate. It adds no new product capability.
 
-Exact installed/exact-version facts:
-- method: `thread/delete`;
-- request schema: `ThreadDeleteParams` object with required string `threadId` only;
-- response schema: `ThreadDeleteResponse` object with no declared fields;
-- both draft-07 schemas omit `additionalProperties`, so additional properties are allowed;
-- exact delete computes a persisted spawn subtree, prepares loaded threads for removal, deletes descendants then root from the thread store, deletes corresponding app-server state DB rows when configured, then creates the response;
-- schema-valid response is sent only after the official delete routine succeeds;
-- `thread/deleted` notifications are emitted after the response;
-- active-thread shutdown submit failure/timeout does not prevent the delete routine from proceeding;
-- deletion can fail after earlier destructive steps have already succeeded, so a dispatched error response does not prove absence of side effects.
+### T0 — pure unit acceptance
+- No network, subprocess, installed-binary invocation, production filesystem, CODEX_HOME, or authenticated state.
+- Re-run all pure/unit contracts for P1.1-P1.9 and add a small cross-slice acceptance test only where an invariant is not already expressed.
+- Cross-slice T0 invariants include: all defined capabilities IMPLEMENTED; finite status/error enums; no retry/safe-to-retry fields; `DELETE_REJECTED` absent; startup empty-turn interrupt remains forbidden; exact bounded identities; raw secret/content sentinels absent from generic diagnostic surfaces.
 
-Binding decisions from ADR-0016:
-- public input is a profile-bound durable `ThreadBinding`; value reconstruction from durable state is allowed and expected;
-- delete may acquire the current runtime for `binding.profile_id` and must verify `runtime.profile_id` exactly. It does not need the runtime generation that originally created/resumed the persisted thread;
-- delete is serialized with P1.5 start/resume through the same per-profile thread-lifecycle reservation;
-- P1.9 does NOT auto-interrupt a running turn. Application/P3 state-machine orchestration owns interrupt-before-delete ordering;
-- exactly one `thread/delete` RPC is allowed per invocation;
-- schema-valid successful response => DELETE_CONFIRMED and is the P1.9 external deletion authority;
-- every non-success after dispatch => DELETE_UNKNOWN, including ProtocolRemoteError, protocol/transport/process failure, inner request cancellation, and schema-invalid successful payload. There is no DELETE_REJECTED status after dispatch because partial destructive effects are possible;
-- a safe numeric remote code may be retained inside THREAD_DELETE_UNKNOWN for diagnostics, but remote text/data is discarded;
-- pre-dispatch public cancellation may propagate with zero RPC; after dispatch repeated cancellation stays attached to the one owned request;
-- no retry, no `thread/read` guessing, no second delete, and no `thread/deleted` notification consumer in P1.9;
-- DELETE_CONFIRMED/DELETE_UNKNOWN retain the exact ThreadBinding so later durable/application layers keep reconciliation identity;
-- P1.9 does not clear durable binding, purge local controller content, or claim measured physical storage erasure. P7 remains the storage-deletion proof gate;
-- only THREAD_DELETE may newly become IMPLEMENTED after acceptance.
+### T1 — simulated-adapter acceptance
+- Use fakes only; no real Codex app-server business requests.
+- Existing protocol/runtime/model/thread/turn/approval/interrupt/delete fake suites are part of T1 evidence.
+- Add one deterministic integrated fake lifecycle proof: thread start -> turn start -> interrupt terminal reconciliation -> thread delete, preserving the architect-owned runtime distinction: interrupt uses the exact runtime captured at turn/start with no manager reacquire, while delete later acquires the current same-profile runtime and may therefore use a newer generation.
+- The integrated proof must show exact request shapes, one notification consumer for the turn collector, no blind retry, and no cross-profile/client routing.
+- Existing bidirectional approval/client/notification interleaving remains part of T1 acceptance and must stay passing.
+
+### T2 — installed-binary contract acceptance
+- Read-only server-80 checks only; no real dialogue, model/list business RPC, thread/start, turn/start, approval, interrupt, or delete.
+- Exact executable path: `/usr/local/bin/codex`.
+- Require `codex-cli 0.144.6`.
+- Generate app-server JSON schema into a fresh temporary directory and require aggregate SHA-256 `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`.
+- Verify `codex app-server --help` succeeds and preserves stdio app-server availability without starting a business session.
+- Verify every committed fixture under `tests/fixtures/codex_app_server_0_144_6/` is internally tied to the accepted version/SHA and that its referenced method/schema facts are present in the freshly generated installed schema. The current fixture set covers initialize, model/list, thread start/resume/delete, turn start/events/interrupt, server-request framing and approvals.
+- Verify the packaged capability manifest has the same version/SHA and every defined capability is IMPLEMENTED.
+
+### P1.10 change policy
+- Default production-code delta is ZERO.
+- Allowed normal changes are acceptance tests/harnesses and sanitized P1.10 evidence only.
+- If a new T0/T1/T2 acceptance test exposes a real P1.1-P1.9 production defect, Codex must STOP with `P1_10_ACCEPTANCE_DEFECT_STOP` and report the exact reproducer. It must not repair production code under the acceptance slice without a new architect instruction.
+- Do not weaken existing tests or delete prior evidence to make acceptance pass.
+
+### P1.10 completion criteria
+- T0 pure acceptance PASS.
+- T1 simulated integrated acceptance PASS.
+- T2 installed-binary read-only contract PASS.
+- Every accepted P1.1-P1.9 focused suite PASS.
+- Full `unittest discover` PASS, compile/import PASS, diff/security checks PASS.
+- No new task-leak warning attributable to P1.10; the already-known P1.6 warning may be recorded unchanged.
+- No real production conversation or destructive side effect.
 
 ## Execution authority
 Codex must not self-start work from this document.
 
-Only **P1.9 — exact `thread/delete` + ambiguity-safe external deletion authority** is eligible for the next explicit implementation prompt.
+Only **P1.10 — T0/T1/T2 adapter acceptance, no real production conversation** is eligible for the next explicit implementation prompt.
 
-P1.9 does not authorize P1.10 acceptance, SQLite/local purge orchestration, Telegram, systemd, production deployment, real production deletion, or storage-erasure claims.
+P1.10 does not authorize P2 durable state work, real Codex T3 acceptance, Telegram, SQLite, systemd, production deployment, real interrupt/delete, or storage-erasure measurement.
