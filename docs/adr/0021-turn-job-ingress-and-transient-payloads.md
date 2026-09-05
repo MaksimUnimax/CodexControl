@@ -48,14 +48,15 @@ Transaction order:
    - CREATING requires supplied `thread_id=None` and stored dialogue thread NULL.
    - IDLE requires a non-NULL stored thread and supplied `thread_id` exactly equal to it.
    - any other dialogue state is `STATE_CONFLICT`.
-5. Call the repository clock exactly once. `input_expires_at_ms` must be strictly later than creation time.
-6. Compute canonical SHA-256 of the exact input bytes and insert in ONE SQLite transaction:
+5. Before accepting a NEW update, require there is no existing `turn_jobs` row for the same dialogue in state `RECEIVED`. Such a row is an outstanding accepted prompt that has not yet reached the durable turn claim; a different update must fail `STATE_CONFLICT` with no clock/mutation. This closes the crash window between ingress persistence and `claim_turn` and preserves V1 no-queue semantics for both CREATING and IDLE dialogue paths.
+6. Call the repository clock exactly once. `input_expires_at_ms` must be strictly later than creation time.
+7. Compute canonical SHA-256 of the exact input bytes and insert in ONE SQLite transaction:
    - `turn_jobs` with state RECEIVED/version 0 and the immutable snapshot;
    - one `transient_payloads` INPUT row linked to the dialogue/job;
    - terminal `ingress_updates` disposition `JOB:<job_id>` with received/completed time equal to the same clock value.
-7. Any failure rolls all three writes back. No external effect may happen before this claim commits.
+8. Any failure rolls all three writes back. No external effect may happen before this claim commits.
 
-The job ID suffix is non-empty/NUL-free <=128, so the existing P2.3 JOB materializer remains authoritative. A replayed update never creates a second job or payload.
+The job ID suffix is non-empty/NUL-free <=128, so the existing P2.3 JOB materializer remains authoritative. A replayed update never creates a second job or payload. A different update never creates a second outstanding RECEIVED job for the same dialogue.
 
 ## Turn snapshot claim before `turn/start`
 
@@ -89,13 +90,19 @@ No method retries the external side effect or changes dialogue identity.
 
 `TurnTerminalOutcome` is exactly `COMPLETED`, `FAILED`, `UNKNOWN`.
 
-`finish_codex(job_id, expected_job_version, expected_dialogue_version, outcome, error_class=None)` atomically updates job + dialogue:
+`finish_codex(...)` atomically updates job + dialogue and may atomically persist one user-visible OUTPUT payload already obtained from the P1.6 terminal collector.
+
+Common arguments include `job_id`, exact expected job/dialogue versions, outcome and nullable `error_class`. It also accepts an optional all-or-none output bundle: `output_payload_id`, exact non-empty `output_content: bytes`, and `output_expires_at_ms`. If output content exists, the bundle is required and the OUTPUT row is inserted in the SAME transaction as terminal state. If there is no user-visible output, all output-bundle fields are NULL/omitted and no OUTPUT row is created. This prevents a crash from durably recording terminal completion while losing already-obtained user-visible output.
+
+Terminal semantics:
 
 - COMPLETED: requires job CODEX_RUNNING and dialogue TURN_RUNNING; job -> CODEX_COMPLETED, dialogue -> IDLE, clear both error-class fields.
 - FAILED: permits job CODEX_STARTING or CODEX_RUNNING with dialogue TURN_RUNNING; sanitized `error_class` is required; job -> FAILED and dialogue -> ERROR with that class.
 - UNKNOWN: permits job CODEX_STARTING or CODEX_RUNNING with dialogue TURN_RUNNING; sanitized `error_class` is required; job -> UNKNOWN and dialogue -> TURN_UNKNOWN with that class.
 
-Both optimistic versions increment exactly once in the same transaction. Missing -> NOT_FOUND; version mismatch -> VERSION_CONFLICT before state checks; illegal current state/thread/identity -> STATE_CONFLICT. No clock is called on failed semantic preconditions.
+When an output bundle is supplied, its ID must be unused, content must satisfy the transient payload size/type contract, expiry must be strictly later than the same mutation clock, SHA/length are computed internally, and the row is kind OUTPUT linked to the exact job/dialogue. Any output collision/validation/insert failure rolls back the terminal job/dialogue changes.
+
+Both optimistic versions increment exactly once in the same transaction. Missing -> NOT_FOUND; version mismatch -> VERSION_CONFLICT before state checks; illegal current state/thread/identity -> STATE_CONFLICT. No clock is called on failed semantic preconditions. The mutation clock is called exactly once for the whole terminal transaction and is also the OUTPUT creation timestamp when an output bundle exists.
 
 Interrupt-specific `INTERRUPTING` transitions are not added in P2.4a; they remain a later architect-owned durable transition slice before P3 uses P1.8.
 
