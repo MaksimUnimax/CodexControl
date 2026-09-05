@@ -119,3 +119,56 @@
 - Required P2.2, P2.1, P1.10, focused P1 unit suites: all passing
 - `python3 -m unittest discover -s tests -v`: 335 tests.
 
+## Architect first repair pass
+
+Repair parent / rejected candidate: `7068cca5632548cb4cd58ad88ad94ed5e7de70ef`.
+This section records the first repair pass only; P2.3 is not architect-accepted.
+
+The repair closed the independent review findings without changing the accepted
+P2.1/P2.2 implementation slices:
+
+- `claim_ignored` now accepts only the exact `IGNORED_SLEEP` and
+  `IGNORED_UNAUTHORIZED` enum objects. `CONTROL`, `JOB`, strings, integers and
+  `None` fail as `INVALID_ARGUMENT` before SQL/clock execution.
+- `expires_at_ms` is validated as an exact non-bool signed-64 integer before
+  storage transaction entry. Relation validation remains after duplicate-token
+  precheck and the required clock call.
+- Control materialization reuses the accepted P2.2 private materializer, so
+  schema-valid but repository-noncanonical controller values fail as
+  `INVARIANT_VIOLATION`, never caller-input `INVALID_ARGUMENT`.
+- Control and callback CAS rowcount mismatches now fail closed as
+  `INVARIANT_VIOLATION`; no post-precheck stale/already-consumed
+  reconciliation is performed.
+- JOB materialization validates the suffix after parsing `JOB:` and permits a
+  128-character job ID while rejecting 129 characters.
+- Callback corruption assertions were moved outside `assertRaises` bodies;
+  uppercase persisted hashes are checked through the private materializer and
+  classify as `INVARIANT_VIOLATION`.
+
+Added deterministic proofs cover the CONTROL bypass, expiry type/bounds and
+exact boundary, persisted controller corruption, CAS guard, clock-failure
+rollback/redaction, ignored/control cross-classification, higher-epoch final
+authority, same-epoch final mode, duplicate create zero-clock/no-overwrite,
+authorization precedence, numeric and identifier boundaries, enum-only control
+mode, repeated cancellation ownership, fresh-after-restart callback claim,
+JOB suffix limits, callback corruption and uppercase stored-hash handling.
+
+Observed focused counts after repair:
+
+- P2.3 unit: 7.
+- P2.3 integration: 28.
+- Accepted pre-P2.3 full suite: 313.
+- Formula: `313 + 7 + 28 = 348`.
+- Full discovery: 348 tests, all passing.
+- P2.2 unit/integration: 6 / 20, all passing.
+- P2.1 unit/integration: 8 / 31, all passing.
+- P1.10 T0/T1/T2: 6 / 1 / 4, all passing.
+- P1 focused suites: all passing.
+- P1.6 pending-task warning observed: NO. It was not introduced by P2.3.
+
+The canonical P2.1 DDL SHA remains
+`b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+Compile, import, `git diff --check`, allowed-path and security/production-scope
+checks passed. No production database/state root, secrets, services, Telegram
+surface, raw callback token, or conversation content was touched. P2.4 was not
+started and Issue #13 remains open pending architect review.

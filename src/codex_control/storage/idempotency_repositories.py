@@ -9,8 +9,11 @@ from typing import Any
 
 from codex_control.domain import ControllerMode
 
-from .core_repositories import _default_clock, _validate_clock as _validate_clock_value
-from .records import ControllerRuntimeRecord
+from .core_repositories import (
+    _default_clock,
+    _materialize_controller as _materialize_core_controller,
+    _validate_clock as _validate_clock_value,
+)
 from .repository_errors import RepositoryError, RepositoryErrorCategory
 from .sqlite import SqliteStorage
 from .idempotency_records import (
@@ -80,9 +83,9 @@ def _validate_expected_version(value: object) -> int:
 
 
 def _validate_disposition(value: object) -> IngressDispositionKind:
-    if isinstance(value, IngressDispositionKind):
-        if value is IngressDispositionKind.JOB:
-            raise _invalid()
+    if value is IngressDispositionKind.IGNORED_SLEEP:
+        return value
+    if value is IngressDispositionKind.IGNORED_UNAUTHORIZED:
         return value
     raise _invalid()
 
@@ -145,56 +148,11 @@ def _validate_stored_int64(value: object) -> int:
     return value
 
 
-def _validate_stored_int(value: object) -> int:
-    return _validate_nonneg_int(value)
-
-
-def _validate_stored_controller_mode(value: object) -> ControllerMode:
-    if not isinstance(value, str):
-        raise _invariant()
-    try:
-        return ControllerMode(value)
-    except (TypeError, ValueError):
-        raise _invariant() from None
-
-
-def _validate_stored_chat_id(value: object) -> int:
-    value = _validate_nonsized_int(value)
-    if not MIN_SQLITE_INT <= value <= MAX_SQLITE_INT or value == 0:
-        raise _invariant()
-    return value
-
-
 def _validate_stored_chat_id_row(value: object) -> int:
     value = _validate_stored_int64(value)
     if not MIN_SQLITE_INT <= value <= MAX_SQLITE_INT or value == 0:
         raise _invariant()
     return value
-
-
-def _materialize_controller(row: Any) -> ControllerRuntimeRecord:
-    if row is None or len(row) != 7:
-        raise _invariant()
-    singleton = _validate_stored_int(row[0])
-    if singleton != 1:
-        raise _invariant()
-    last_epoch = _validate_stored_int(row[1])
-    requested_mode = _validate_stored_controller_mode(row[2])
-    boot_generation = _validate_stored_int(row[3])
-    fleet_version = _validate_string(row[4], 128)
-    created_at_ms = _validate_stored_int(row[5])
-    updated_at_ms = _validate_stored_int(row[6])
-    if updated_at_ms < created_at_ms:
-        raise _invariant()
-    assert fleet_version is not None
-    return ControllerRuntimeRecord(
-        last_epoch,
-        requested_mode,
-        boot_generation,
-        fleet_version,
-        created_at_ms,
-        updated_at_ms,
-    )
 
 
 def _materialize_ingress(row: Any) -> IngressUpdateRecord:
@@ -205,7 +163,7 @@ def _materialize_ingress(row: Any) -> IngressUpdateRecord:
     completed_at = None if row[2] is None else _validate_stored_nonneg_int(row[2])
     if completed_at is not None and completed_at < received_at_ms:
         raise _invariant()
-    raw_disposition = _validate_stored_string(row[3], 128)
+    raw_disposition = _validate_stored_string(row[3], len(_DISPOSITION_PREFIX) + _INGRESS_UPDATE_ID_LENGTH)
     assert raw_disposition is not None
     if raw_disposition == IngressDispositionKind.CONTROL.value:
         disposition = IngressDispositionKind.CONTROL
@@ -376,7 +334,7 @@ class ControlIngressRepository(_RepositoryBase):
             ).fetchone()
             if controller_row is None:
                 raise RepositoryError(RepositoryErrorCategory.NOT_FOUND)
-            current_controller = _materialize_controller(controller_row)
+            current_controller = _materialize_core_controller(controller_row)
 
             now = _validate_clock(self._clock)
             connection.execute(
@@ -400,27 +358,14 @@ class ControlIngressRepository(_RepositoryBase):
                 (control_epoch, requested_mode.value, updated_at_ms, current_controller.last_control_epoch),
             ).rowcount
 
-            if updated == 1:
-                return ControlClaimResult(
-                    status=ControlClaimStatus.APPLIED,
-                    ingress=ingress,
-                    controller=_materialize_controller(
-                        (1, control_epoch, requested_mode.value, current_controller.boot_generation,
-                         current_controller.fleet_version, current_controller.created_at_ms, updated_at_ms)
-                    ),
-                )
-
-            latest = connection.execute(
-                "SELECT singleton, last_control_epoch, requested_mode, boot_generation, "
-                "fleet_version, created_at_ms, updated_at_ms FROM controller_runtime"
-            ).fetchone()
-            if latest is None:
-                raise _invariant()
-            latest_controller = _materialize_controller(latest)
+            _ensure_exact_rowcount(updated, 1)
             return ControlClaimResult(
-                status=ControlClaimStatus.STALE,
+                status=ControlClaimStatus.APPLIED,
                 ingress=ingress,
-                controller=latest_controller,
+                controller=_materialize_core_controller(
+                    (1, control_epoch, requested_mode.value, current_controller.boot_generation,
+                     current_controller.fleet_version, current_controller.created_at_ms, updated_at_ms)
+                ),
             )
 
         return await self._storage.write(write)
@@ -452,6 +397,7 @@ class CallbackActionRepository(_RepositoryBase):
         if authorized_user_id == 0:
             raise _invalid()
         authorized_chat_id = _validate_chat_id(authorized_chat_id)
+        expires_at_ms = _validate_nonneg_int(expires_at_ms)
 
         def write(connection: Any) -> CallbackActionRecord:
             row = _one_row(
@@ -465,7 +411,7 @@ class CallbackActionRepository(_RepositoryBase):
                 raise RepositoryError(RepositoryErrorCategory.ALREADY_EXISTS)
 
             now = _validate_clock(self._clock)
-            if not 0 <= expires_at_ms <= MAX_SQLITE_INT or expires_at_ms <= now:
+            if expires_at_ms <= now:
                 raise _invalid()
 
             try:
@@ -545,11 +491,8 @@ class CallbackActionRepository(_RepositoryBase):
                     "WHERE token_hash_sha256 = ? AND consumed_at_ms IS NULL",
                     (action.expires_at_ms, token_hash_sha256),
                 ).rowcount
-                if changed == 1:
-                    return CallbackClaimResult(status=CallbackClaimStatus.EXPIRED, record=None)
-                if changed != 0:
-                    _ensure_exact_rowcount(changed, 1)
-                return CallbackClaimResult(status=CallbackClaimStatus.ALREADY_CONSUMED, record=None)
+                _ensure_exact_rowcount(changed, 1)
+                return CallbackClaimResult(status=CallbackClaimStatus.EXPIRED, record=None)
 
             consumed_at = effective_now
             changed = connection.execute(
@@ -557,25 +500,22 @@ class CallbackActionRepository(_RepositoryBase):
                 "WHERE token_hash_sha256 = ? AND consumed_at_ms IS NULL",
                 (consumed_at, token_hash_sha256),
             ).rowcount
-            if changed == 1:
-                return CallbackClaimResult(
-                    status=CallbackClaimStatus.CLAIMED,
-                    record=CallbackActionRecord(
-                        action.token_hash_sha256,
-                        action.action,
-                        action.subject_type,
-                        action.subject_id,
-                        action.expected_version,
-                        action.expected_state,
-                        action.authorized_user_id,
-                        action.authorized_chat_id,
-                        action.created_at_ms,
-                        action.expires_at_ms,
-                        consumed_at,
-                    ),
-                )
-            if changed != 0:
-                _ensure_exact_rowcount(changed, 1)
-            return CallbackClaimResult(status=CallbackClaimStatus.ALREADY_CONSUMED, record=None)
+            _ensure_exact_rowcount(changed, 1)
+            return CallbackClaimResult(
+                status=CallbackClaimStatus.CLAIMED,
+                record=CallbackActionRecord(
+                    action.token_hash_sha256,
+                    action.action,
+                    action.subject_type,
+                    action.subject_id,
+                    action.expected_version,
+                    action.expected_state,
+                    action.authorized_user_id,
+                    action.authorized_chat_id,
+                    action.created_at_ms,
+                    action.expires_at_ms,
+                    consumed_at,
+                ),
+            )
 
         return await self._storage.write(write)

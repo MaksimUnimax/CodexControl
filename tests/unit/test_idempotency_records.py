@@ -1,3 +1,4 @@
+import inspect
 import unittest
 
 from codex_control.storage import (
@@ -15,6 +16,7 @@ from codex_control.storage import (
     ControlClaimResult as PublicControlClaimResult,
     ControlClaimStatus as PublicControlClaimStatus,
     ControlIngressRepository,
+    ControllerRuntimeRepository,
     IngressUpdateRepository,
     IngressUpdateRecord as PublicIngressUpdateRecord,
     IngressDispositionKind as PublicIngressDispositionKind,
@@ -90,6 +92,20 @@ class IdempotencyRecordsAndSurfacesTests(unittest.TestCase):
         )
         self.assertEqual({"claim_control"}, defined_public_callables(ControlIngressRepository))
         self.assertEqual({"create", "claim"}, defined_public_callables(CallbackActionRepository))
+
+    def test_public_signatures_are_hash_only_and_controller_surface_is_preserved(self):
+        for method in (CallbackActionRepository.create, CallbackActionRepository.claim):
+            parameter_names = set(inspect.signature(method).parameters)
+            self.assertIn("token_hash_sha256", parameter_names)
+            self.assertFalse(parameter_names & {"token", "raw_token", "callback_token", "plaintext_token"})
+
+        self.assertEqual(
+            {"get", "begin_boot"},
+            {
+                name for name, value in vars(ControllerRuntimeRepository).items()
+                if not name.startswith("_") and callable(value)
+            },
+        )
 
 
 if __name__ == "__main__":
