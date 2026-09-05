@@ -24,8 +24,8 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 ## P2 — Durable local state/idempotency
 - [DONE] P2.1 secure SQLite storage kernel + exact schema-v1 bootstrap/migration + process lock + owned transaction primitive. Accepted implementation after two repair reviews: `61301fd25ff7253693f367664ce99e13dfc88446`.
 - [DONE] P2.2 controller/settings/dialogue core repositories + optimistic versions and create-intent state claims. Accepted implementation/proof HEAD: `5187c080a7188a59989013defe7d07075662d007`.
-- [NEXT] P2.3 ingress dedupe + control epoch/mode claim + opaque callback-action one-time claims.
-- [PLANNED] P2.4 turn jobs + transient payloads + delivery segments + approvals repositories and bounded retention/sanitization.
+- [DONE] P2.3 ingress dedupe + atomic control epoch/mode claim + opaque callback-action one-time claims. Accepted implementation after one repair review: `0d8f34beaa35a2bc02b349abba9507ebb9bc3802`.
+- [NEXT] P2.4 turn jobs + transient payloads + delivery segments + approvals repositories and bounded retention/sanitization.
 - [PLANNED] P2.5 deletion tombstones + error fingerprints + confirmed hard-delete local purge/finalization transaction.
 - [PLANNED] P2.6 crash/restart/idempotency harness and P2 acceptance.
 
