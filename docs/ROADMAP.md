@@ -19,10 +19,15 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P1.7 bidirectional server-request envelope + approval request/response port using fake operator. Accepted implementation/proof HEAD after iterative repair review: `bbd7445087dfb59185d49787d562637e282ba5aa`.
 - [DONE] P1.8 exact active-turn interrupt + terminal reconciliation through the existing P1.6 collector. Accepted implementation after one recovered repair: `6d8a07b5b95ef377cf60762f4475128bdf810b22`.
 - [DONE] P1.9 exact thread/delete + ambiguity-safe external deletion authority. Accepted implementation: `95b2a42e47aaddae6ec9bcbaf9f0f879362d993e`.
-- [NEXT] P1.10 T0/T1/T2 adapter acceptance; no real production conversation.
+- [DONE] P1.10 T0/T1/T2 adapter acceptance; no real production conversation. Accepted proof commit: `7b236f95df78a05073d67fe362ac9fff343d7c43`.
 
 ## P2 — Durable local state/idempotency
-SQLite schema/repos/transactions; ingress dedupe/control epoch/callback tokens; dialogue/job/outbox/delete state machines; transient retention/sanitizer; crash/restart harness.
+- [NEXT] P2.1 SQLite storage kernel + schema-v1 bootstrap/migration + process lock + transaction primitive.
+- [PLANNED] P2.2 controller/settings/dialogue repositories + optimistic versions and durable state-transition claims.
+- [PLANNED] P2.3 ingress dedupe + control epoch + opaque callback-action atomic claims.
+- [PLANNED] P2.4 turn jobs + transient payloads + delivery segments + approvals repositories and bounded retention/sanitization.
+- [PLANNED] P2.5 deletion tombstones + error fingerprints + confirmed hard-delete local purge/finalization transaction.
+- [PLANNED] P2.6 crash/restart/idempotency harness and P2 acceptance.
 
 ## P3 — Dialogue application service
 Lazy create, one-dialogue invariant, immutable turn claims; BUSY/no queue; model/effort idle mutation/profile lock; interrupt/recovery; hard-delete orchestration over ports.
