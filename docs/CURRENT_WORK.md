@@ -16,70 +16,62 @@ Date: 2026-09-05
 - P1.8 accepted after recovered repair: `6d8a07b5b95ef377cf60762f4475128bdf810b22`.
 - P1.9 accepted: `95b2a42e47aaddae6ec9bcbaf9f0f879362d993e`.
 - P1.10 accepted proof commit: `7b236f95df78a05073d67fe362ac9fff343d7c43`.
-- P1 is complete through T0/T1/T2. T3 real Codex acceptance remains deferred to the later isolated real-Codex phase.
-- ADR-0014 defines permissions approval semantics.
-- ADR-0015 defines active-turn interrupt ownership/reconciliation.
-- ADR-0016 defines destructive thread/delete response authority and partial-failure ambiguity.
-- ADR-0017 defines the P2.1 SQLite storage-kernel/runtime/migration boundary.
-- ADR-0018 freezes the exact physical schema-v1 SQL, migration ID, table set and explicit index set.
+- P1 is complete through T0/T1/T2; T3 real-Codex acceptance remains deferred.
+- P2.1 accepted after two repair reviews: `61301fd25ff7253693f367664ce99e13dfc88446`.
+- ADR-0017 defines the secure SQLite kernel/migration boundary.
+- ADR-0018 freezes exact schema-v1 physical SQL and migration identity.
+- ADR-0019 defines P2.2 core repository semantics.
 
-## P1 closing acceptance facts
-- P1.10 was proof-only: no production source, version fixture or packaged manifest changed.
-- T0 asserted the complete current capability set/readiness, finite status/error contracts, absence of `DELETE_REJECTED`, no embedded retry-policy fields, 512-character thread/turn identity boundaries, startup empty-turn interrupt exclusion and diagnostic redaction.
-- T1 composed accepted adapters through `thread/start -> turn/start -> turn/interrupt -> existing P1.6 collector -> thread/delete`. Same-profile runtime acquisition was A, A, B: interrupt reused captured A without manager reacquire; delete later used current same-profile B. Exact request shapes, one notification consumer and one-call/no-retry behavior were asserted.
-- T2 used only `/usr/local/bin/codex --version`, `app-server --help`, and fresh JSON-schema generation in isolated temporary HOME/CODEX_HOME. It confirmed `codex-cli 0.144.6`, aggregate SHA-256 `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`, all ten committed P1 fixtures and the packaged capability manifest against the fresh installed authority.
-- Accepted P1.10 executor counts: T0 6, T1 1, T2 4, full 248; compile/import/diff/security passed. No real model/list/thread/turn/approval/interrupt/delete business RPC occurred.
-- The established P1.6 pending-task warning remains pre-existing test-hygiene debt. P1.10 introduced no new task leak.
+## P2.1 accepted storage facts
+- Standard-library `sqlite3`; one persistent connection on one dedicated `ThreadPoolExecutor(max_workers=1)` worker; default `check_same_thread=True`.
+- Absolute/secure effective-UID-owned database + `.lock`, exact `0600`, symlink rejection, non-blocking lifetime `flock` and fail-closed second owner.
+- Verified connection authority: foreign keys ON, WAL, busy timeout 5000ms, synchronous FULL, trusted schema OFF, explicit transactions and `sqlite3.Row` rows.
+- Reads use DEFERRED + query-only authority; writes use IMMEDIATE. Once submitted, repeated public cancellation remains attached to the exact DB operation. No automatic retry. Close is owned/idempotent.
+- Normal repository callbacks cannot take over transaction/savepoint control, mutate read transactions, set persistent PRAGMAs, ATTACH/DETACH another DB, mutate schema/migration authority, or return direct/nested SQLite/lazy resources. Connection row-factory/isolation invariants are checked/restored.
+- Storage errors are finite and redact path/SQL/content/exception text.
+- `SCHEMA_VERSION=1`, migration `0001_initial_state`, canonical DDL SHA-256 `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+- Physical schema exactly matches ADR-0018: 12 user tables and 14 explicit indexes. Empty-v0 bootstrap only; v1 reopen verifies migration/hash/object/SQL authority and does not repair drift.
+- Accepted proof counts: P2.1 unit 8, integration 31, full `248 + 8 + 31 = 287`; integration is included in full discovery. P1.10/P1 regressions, compile/import/diff/security passed.
+- No production DB/state root or service was touched. The known P1.6 pending-task warning remains pre-existing debt.
 
-## P2.1 exact architect authority
-P2.1 is **SQLite storage kernel + schema-v1 bootstrap/migration + process lock + transaction primitive only**.
+## P2.2 exact architect authority
+P2.2 implements only the first typed core durable repositories over accepted P2.1.
 
-Binding sources: `docs/adr/0017-sqlite-storage-kernel-and-schema-v1.md`, `docs/adr/0018-sqlite-schema-v1-physical-layout.md`, and `docs/DATA_MODEL.md`. ADR-0018 is authoritative for exact physical table/column/check/FK/index names and values.
+Binding source: `docs/adr/0019-core-state-repositories.md` plus ADR-0017/0018 and `docs/DATA_MODEL.md`.
 
-### Runtime/storage ownership
-- Standard-library `sqlite3` only; do not add `aiosqlite` or another DB runtime dependency.
-- One storage instance owns one persistent connection on one dedicated `ThreadPoolExecutor(max_workers=1)` worker. Connection creation, PRAGMAs, migrations, transactions and close all occur on that worker.
-- Database path must be absolute/NUL-free. Parent must already exist and be a real directory. Parent, DB and sibling `<db>.lock` must not be symlinks.
-- Existing DB/lock files must be regular files owned by the effective UID with no group/other permission bits. New DB/lock files are securely created `0600` before SQLite/locking use.
-- Hold a non-blocking exclusive `fcntl.flock` on `<db>.lock` for the storage lifetime. A second owner fails closed rather than waiting.
-- Connection PRAGMAs must be verified: foreign keys ON, WAL journal, 5000ms busy timeout, synchronous FULL, trusted schema OFF, manual transaction control, `sqlite3.Row` rows.
-- Tests use temporary paths only. P2.1 must not create/open `/var/lib/codex-control` or any production state DB.
+### Common repository contract
+- Immutable/materialized records only; no `sqlite3.Row`, cursor or connection escapes.
+- Repository methods use only `SqliteStorage.read/write`; no direct filesystem/SQLite ownership outside the kernel.
+- Finite semantic repository categories: `INVALID_ARGUMENT`, `NOT_FOUND`, `ALREADY_EXISTS`, `VERSION_CONFLICT`, `STATE_CONFLICT`, `CLOCK_INVALID`, `INVARIANT_VIOLATION`. Rendering contains category only. `StorageError` remains the underlying kernel error and may propagate unchanged.
+- Required strings are NUL-free and schema-bound; nullable values follow ADR-0018. `last_error_class` is a sanitized ASCII identifier using letters/digits plus `_ . : -`, length 1..128.
+- Injected repository clock returns non-bool integer epoch ms >=0; exception/invalid result => `CLOCK_INVALID`, redacted. Updates persist `max(clock_now, previous.updated_at_ms)`.
+- Versioned records start at 0 and every successful mutation increments exactly by 1. Stale expected version => `VERSION_CONFLICT`; no merge/retry.
 
-### Async transaction ownership
-- Async storage operations submit synchronous callbacks to the dedicated DB worker.
-- Read transaction: explicit `BEGIN DEFERRED`.
-- Write transaction: explicit `BEGIN IMMEDIATE`.
-- Success commits. Callback/DB failure rolls back before propagation/normalization.
-- Once work is submitted to the DB worker, repeated public coroutine cancellation does not detach/cancel that exact DB operation. The same invocation remains attached until the exact commit/rollback result is known.
-- No auto retry.
-- Close is idempotent, rejects new operations once close ownership begins, waits for owned work, closes on the DB worker, releases `flock`, and cannot leave an unknown live connection because its caller is cancelled.
-- Connection/cursor objects must not escape the worker callback API.
+### controller_runtime repository
+- P2.2 exposes only `get` + durable `begin_boot(fleet_version)` semantics. Control epoch/mode mutation is P2.3.
+- First boot inserts singleton with epoch 0, historical requested mode SLEEP, boot generation 1 and supplied fleet version.
+- Later boot preserves `last_control_epoch` and historical `requested_mode`, increments boot generation exactly once, replaces fleet version and advances timestamp.
+- Returned boot result always has `effective_mode=SLEEP`, even when the persisted historical requested mode is ACTIVE. Restart never restores ACTIVE.
 
-### Storage errors
-Finite safe storage categories are equivalent to: `INVALID_PATH`, `INSECURE_PATH`, `LOCKED`, `OPEN_FAILED`, `SCHEMA_UNSUPPORTED`, `SCHEMA_INVALID`, `CLOSED`, `TRANSACTION_FAILED`. Generic rendering contains category only; no path, SQL, parameter/content, exception body, environment or secret.
+### settings repository
+- Materialized record: nullable profile/model/effort + optimistic version/timestamps.
+- `initialize_settings_if_absent(...)` inserts version 0 only when absent; an existing durable row wins over new config fallback values and is returned unchanged, with created/not-created outcome.
+- `replace_settings(expected_version, profile_id, model_id, reasoning_effort)` replaces the full validated selection, increments version once and advances time. Missing => NOT_FOUND; stale => VERSION_CONFLICT.
+- Product eligibility/state rules for profile/model/effort remain P3; repository does not query Codex/model catalog.
 
-### Schema/migration authority
-- `SCHEMA_VERSION=1`; migration ID is exactly `0001_initial_state`.
-- Durable `schema_migrations(version, migration_id, ddl_sha256, applied_at_ms)` plus `PRAGMA user_version`.
-- Canonical migration hash is SHA-256 of the implementation's one canonical UTF-8 v1 DDL constant containing exactly ADR-0018's statements in the frozen order.
-- Version 0 is accepted only for an empty/new DB. A non-empty unversioned DB fails `SCHEMA_INVALID`.
-- Future/newer `user_version` fails `SCHEMA_UNSUPPORTED`.
-- Existing v1 verifies exact migration ID/hash and the exact ADR-0018 user-table/explicit-index sets. P2.1 does not auto-repair/drop unknown schema state.
-- Bootstrap is one explicit migration transaction; `user_version=1` only after v1 DDL/history row succeeds.
-- Migration timestamp comes from an injected/testable millisecond clock.
+### dialogue create-intent repository
+- `DialogueState` materializes all ADR-0018 states, but P2.2 writes only `CREATING`, `IDLE`, `CREATE_UNKNOWN`, `ERROR`.
+- `get_live_dialogue()` returns the sole retained row or None.
+- `create_dialogue_intent(dialogue_id, server_id, profile_id)` requires no retained dialogue and inserts CREATING/version0/thread NULL/error NULL. Any retained row => ALREADY_EXISTS. It is not silently idempotent.
+- `confirm_dialogue_created(dialogue_id, expected_version, thread_id)`: exact CREATING row with NULL thread, set thread once, IDLE, clear error, version+1.
+- `mark_dialogue_create_unknown(...)`: only CREATING+NULL thread, state CREATE_UNKNOWN, sanitized error, version+1.
+- `mark_dialogue_create_error(...)`: only CREATING+NULL thread, state ERROR, sanitized error, version+1.
+- Missing => NOT_FOUND; stale version => VERSION_CONFLICT; wrong state/thread precondition => STATE_CONFLICT. Server/profile identity is immutable. No generic state mutation and no dialogue deletion.
 
-### Schema-v1 content boundary
-- At most one retained/live dialogue row is enforced by the constant unique `live_slot` defined in ADR-0018; `NO_DIALOGUE` is row absence.
-- Long-lived tables do not add prompt/response/raw Telegram JSON/command-output/auth columns.
-- Transient content is isolated in `transient_payloads.content` BLOB.
-- Exact approval wire request type is stored without making the reusable wire ID globally unique.
-- Deletion tombstones use hashed thread identity.
-- P2.1 creates no seed business rows and exposes no repository method that performs purge or state transition.
-
-### P2.1 forbidden scope
-No controller/settings/dialogue repository APIs; no legal state-transition methods; no ingress/callback dedupe logic; no job claims; no retention cleaner; no approval repository orchestration; no delete finalization; no crash/restart harness; no P3 application service; no Telegram; no deployment; no production DB.
+### P2.2 forbidden scope
+No control-message epoch acceptance, ACTIVE/SLEEP routing update, Telegram ingress dedupe, callback claims, turn-job/transient/delivery/approval repositories, retention, error fingerprints, deletion tombstones/local purge, turn/interrupt/delete dialogue transitions, crash/restart orchestration, P3 service, Telegram or production deployment.
 
 ## Execution authority
 Codex must not self-start work from this document.
 
-Only **P2.1 — SQLite storage kernel + schema-v1 bootstrap/migration + process lock + transaction primitive** is eligible for the next explicit implementation prompt.
+Only **P2.2 — controller/settings/dialogue core repositories + optimistic versions + create-intent claims** is eligible for the next explicit implementation prompt.
