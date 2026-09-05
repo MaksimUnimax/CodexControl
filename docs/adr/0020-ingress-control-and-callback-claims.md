@@ -85,7 +85,9 @@ Persisted callback materialization is canonical only when:
 - token hash is lower-case SHA-256 hex;
 - identifiers/IDs/version satisfy the same public bounds;
 - `created_at_ms` and `expires_at_ms` are non-negative signed-64 integers with `expires_at_ms > created_at_ms`;
-- `consumed_at_ms` is either NULL or a signed-64 integer satisfying `created_at_ms <= consumed_at_ms < expires_at_ms`.
+- `consumed_at_ms` is either NULL or a signed-64 integer satisfying `created_at_ms <= consumed_at_ms <= expires_at_ms`.
+
+A consumed timestamp strictly below expiry represents a successful fresh claim. `consumed_at_ms == expires_at_ms` is the canonical durable terminal marker for an authorized claim that first observed the action expired. Values above expiry are noncanonical and fail `INVARIANT_VIOLATION`.
 
 Any schema-valid but repository-noncanonical callback row fails `INVARIANT_VIOLATION` without raw stored values.
 
@@ -110,17 +112,19 @@ Claim order inside one write transaction:
 3. authorized user/chat mismatch => `UNAUTHORIZED`, no clock and no action metadata;
 4. already-consumed row => `ALREADY_CONSUMED`, no clock and no action metadata;
 5. call clock; effective claim time is `max(clock_now, created_at_ms)`;
-6. if effective claim time >= `expires_at_ms` => `EXPIRED`, no mutation/action metadata;
-7. otherwise set `consumed_at_ms` exactly once with `WHERE token_hash_sha256=? AND consumed_at_ms IS NULL`; row-count mismatch after the precheck is `INVARIANT_VIOLATION`;
+6. if effective claim time >= `expires_at_ms`, atomically terminalize the token with `consumed_at_ms = expires_at_ms` using `WHERE token_hash_sha256=? AND consumed_at_ms IS NULL`, then return `EXPIRED` with `record=None`; row-count mismatch after the precheck is `INVARIANT_VIOLATION`;
+7. otherwise set `consumed_at_ms = effective_claim_time` exactly once with the same unconsumed CAS; row-count mismatch after the precheck is `INVARIANT_VIOLATION`;
 8. return `CLAIMED` with the immutable consumed record.
 
-No retry. Double/concurrent claims have exactly one `CLAIMED`; every later authorized claim is `ALREADY_CONSUMED`. Claim survives public coroutine cancellation according to P2.1 owned-transaction semantics.
+Expiry terminalization is deliberate. Once an authorized claim has observed a token expired, later wall-clock rollback or restart can never make it fresh again; subsequent authorized claims see non-NULL `consumed_at_ms` and return `ALREADY_CONSUMED`.
 
-The callback record's bound `action/subject/version/state` metadata is returned only after successful one-time claim. P2.3 itself performs NO external effect and does not implement subject-specific state mutation. Later application/storage slices must complete any required subject claim before external effect; a standalone P2.3 claim is never evidence that the subject mutation/effect occurred.
+No retry. Double/concurrent fresh claims have exactly one `CLAIMED`; every later authorized claim is `ALREADY_CONSUMED`. Concurrent expired claims have exactly one `EXPIRED` terminalization and later authorized claims are `ALREADY_CONSUMED`. Claim survives public coroutine cancellation according to P2.1 owned-transaction semantics.
+
+The callback record's bound `action/subject/version/state` metadata is returned only after successful one-time `CLAIMED`. P2.3 itself performs NO external effect and does not implement subject-specific state mutation. Later application/storage slices must complete any required subject claim before external effect; a standalone P2.3 claim is never evidence that the subject mutation/effect occurred.
 
 ## Restart and retention
 
-Ingress dedupe, control epoch and callback consumed state are durable across storage close/reopen. Unconsumed callback expiry is evaluated against the injected clock after restart. P2.3 does not delete old ingress/callback rows; bounded retention is a later architect-owned slice.
+Ingress dedupe, control epoch and callback terminal/consumed state are durable across storage close/reopen. Unconsumed callback expiry is evaluated against the injected clock after restart. P2.3 does not delete old ingress/callback rows; bounded retention is a later architect-owned slice.
 
 ## Out of scope
 
