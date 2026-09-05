@@ -37,6 +37,21 @@ from .idempotency_repositories import (
     ControlIngressRepository,
     CallbackActionRepository,
 )
+from .turn_job_records import (
+    TurnExecutionClaimResult,
+    TurnIngressClaimResult,
+    TurnIngressClaimStatus,
+    TurnJobFinishResult,
+    TurnJobRecord,
+    TurnJobState,
+    TurnTerminalOutcome,
+)
+from .transient_payloads import (
+    MAX_TRANSIENT_PAYLOAD_BYTES,
+    TransientPayloadKind,
+    TransientPayloadRecord,
+)
+from .turn_job_repositories import TurnJobRepository, TransientPayloadRepository
 from .repository_errors import RepositoryError, RepositoryErrorCategory
 
 __all__ = [
@@ -70,4 +85,16 @@ __all__ = [
     "CallbackActionRecord",
     "CallbackClaimStatus",
     "CallbackClaimResult",
+    "TurnJobState",
+    "TurnJobRecord",
+    "TurnIngressClaimStatus",
+    "TurnIngressClaimResult",
+    "TurnExecutionClaimResult",
+    "TurnTerminalOutcome",
+    "TurnJobFinishResult",
+    "TransientPayloadKind",
+    "TransientPayloadRecord",
+    "MAX_TRANSIENT_PAYLOAD_BYTES",
+    "TurnJobRepository",
+    "TransientPayloadRepository",
 ]
