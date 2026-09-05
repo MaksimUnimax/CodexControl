@@ -22,6 +22,21 @@ from .records import (
     SettingsInitializeResult,
     SettingsRecord,
 )
+from .idempotency_records import (
+    IngressClaimResult,
+    IngressDispositionKind,
+    IngressUpdateRecord,
+    ControlClaimStatus,
+    ControlClaimResult,
+    CallbackActionRecord,
+    CallbackClaimStatus,
+    CallbackClaimResult,
+)
+from .idempotency_repositories import (
+    IngressUpdateRepository,
+    ControlIngressRepository,
+    CallbackActionRepository,
+)
 from .repository_errors import RepositoryError, RepositoryErrorCategory
 
 __all__ = [
@@ -44,4 +59,15 @@ __all__ = [
     "ControllerRuntimeRepository",
     "SettingsRepository",
     "DialogueRepository",
+    "IngressUpdateRepository",
+    "ControlIngressRepository",
+    "CallbackActionRepository",
+    "IngressDispositionKind",
+    "IngressUpdateRecord",
+    "IngressClaimResult",
+    "ControlClaimStatus",
+    "ControlClaimResult",
+    "CallbackActionRecord",
+    "CallbackClaimStatus",
+    "CallbackClaimResult",
 ]
