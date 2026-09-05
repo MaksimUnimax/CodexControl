@@ -18,8 +18,8 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P1.6 turn start + ordered completed-agent-message projection + terminal handling. Accepted implementation after two repair reviews: `de36b3ef3657a464b29ff2d17692fce5fc2b2388`.
 - [DONE] P1.7 bidirectional server-request envelope + approval request/response port using fake operator. Accepted implementation/proof HEAD after iterative repair review: `bbd7445087dfb59185d49787d562637e282ba5aa`.
 - [DONE] P1.8 exact active-turn interrupt + terminal reconciliation through the existing P1.6 collector. Accepted implementation after one recovered repair: `6d8a07b5b95ef377cf60762f4475128bdf810b22`.
-- [NEXT] P1.9 exact thread/delete + ambiguity-safe external deletion authority.
-- [PLANNED] P1.10 T0/T1/T2 acceptance; no real production conversation.
+- [DONE] P1.9 exact thread/delete + ambiguity-safe external deletion authority. Accepted implementation: `95b2a42e47aaddae6ec9bcbaf9f0f879362d993e`.
+- [NEXT] P1.10 T0/T1/T2 adapter acceptance; no real production conversation.
 
 ## P2 — Durable local state/idempotency
 SQLite schema/repos/transactions; ingress dedupe/control epoch/callback tokens; dialogue/job/outbox/delete state machines; transient retention/sanitizer; crash/restart harness.
