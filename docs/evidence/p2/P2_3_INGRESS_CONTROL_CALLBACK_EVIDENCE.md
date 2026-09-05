@@ -5,7 +5,7 @@
 - issue: `#13`
 - ADR-0020 reference: implemented in `src/codex_control/storage/idempotency_records.py`, `src/codex_control/storage/idempotency_repositories.py`, and tests.
 - accepted P2.1 head: `61301fd25ff7253693f367664ce99e13dfc88446`
-- accepted P2.2 head: `5187c080a7188a59989013fdefe7d07075662d007`
+- accepted P2.2 head: `5187c080a7188a59989013defe7d07075662d007`
 
 ## Source Files
 
