@@ -28,7 +28,11 @@ Materialization rules:
 
 - exact `CONTROL`, `IGNORED_SLEEP`, `IGNORED_UNAUTHORIZED` => corresponding kind and `job_id=None`;
 - `JOB:<id>` => kind `JOB` and a non-empty/NUL-free job ID of length <=128;
+- `received_at_ms` is a non-negative signed-64 integer;
+- nullable `completed_at_ms`, when present, is a non-negative signed-64 integer and must be >= `received_at_ms`;
 - any other persisted disposition, invalid timestamp/type or invalid JOB suffix => `INVARIANT_VIOLATION`.
+
+`IngressClaimResult` contains the materialized record plus `duplicate: bool`.
 
 P2.3 exposes `IngressUpdateRepository.get(update_id)` and `claim_ignored(update_id, disposition)`.
 
@@ -50,12 +54,12 @@ This separate class is deliberate: accepted P2.2 `ControllerRuntimeRepository` r
 
 `ControlClaimStatus` is exactly: `APPLIED`, `STALE`, `DUPLICATE`.
 
-`ControlClaimResult` contains: status, exact ingress record, and nullable controller record. It intentionally contains no `effective_mode` field.
+`ControlClaimResult` contains: status, exact ingress record, and nullable controller record. It intentionally contains no `effective_mode` field. On `DUPLICATE`, `controller` is exactly `None`. On `STALE` and `APPLIED`, `controller` is the exact current/updated materialized `ControllerRuntimeRecord`.
 
 Transaction semantics:
 
 1. Validate arguments before SQL.
-2. If `ingress_updates.update_id` already exists, materialize it and return `DUPLICATE`; do not call the clock, do not mutate controller mode/epoch, and return no newly-authoritative effective mode.
+2. If `ingress_updates.update_id` already exists, materialize it and return `DUPLICATE`; do not call the clock, do not mutate controller mode/epoch, and return `controller=None`.
 3. Otherwise require the `controller_runtime` singleton to exist and materialize canonically. Missing row => `NOT_FOUND`, no ingress record, no clock.
 4. Call the repository clock exactly once for this new control update.
 5. If `control_epoch <= last_control_epoch`, insert a terminal `CONTROL` ingress record with received/completed timestamps, leave controller row byte-semantically unchanged, and return `STALE` plus the current controller record.
@@ -76,7 +80,16 @@ P2.3 never accepts or stores callback token plaintext. Its API accepts only a ca
 
 `action`, `subject_type` and `expected_state` are sanitized identifiers using ASCII letters/digits plus `_ . : -` within their schema bounds. `subject_id` is non-empty/NUL-free and <=128. `expected_version` is non-negative signed-64. User/chat IDs follow the common numeric rules above.
 
-`CallbackActionRepository` exposes only semantic create/claim operations and no generic arbitrary update/delete API.
+Persisted callback materialization is canonical only when:
+
+- token hash is lower-case SHA-256 hex;
+- identifiers/IDs/version satisfy the same public bounds;
+- `created_at_ms` and `expires_at_ms` are non-negative signed-64 integers with `expires_at_ms > created_at_ms`;
+- `consumed_at_ms` is either NULL or a signed-64 integer satisfying `created_at_ms <= consumed_at_ms < expires_at_ms`.
+
+Any schema-valid but repository-noncanonical callback row fails `INVARIANT_VIOLATION` without raw stored values.
+
+`CallbackActionRepository` exposes only semantic `create` and `claim` operations and no generic arbitrary update/delete/get-by-token API.
 
 Create semantics:
 
@@ -88,7 +101,7 @@ Create semantics:
 
 `CallbackClaimStatus` is exactly: `CLAIMED`, `NOT_FOUND`, `UNAUTHORIZED`, `EXPIRED`, `ALREADY_CONSUMED`.
 
-`CallbackClaimResult` contains the status and an optional `CallbackActionRecord`. Only `CLAIMED` exposes the action record; all non-claimed statuses return no action metadata.
+`CallbackClaimResult` contains the status and an optional `CallbackActionRecord`. Only `CLAIMED` exposes the action record; all non-claimed statuses return `record=None` and therefore no action/subject/version/state metadata.
 
 Claim order inside one write transaction:
 
