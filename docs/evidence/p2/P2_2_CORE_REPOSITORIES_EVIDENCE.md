@@ -133,3 +133,26 @@ material was added; only explicit fake redaction sentinels occur in temporary te
 - Runtime dependency added: no
 - Architecture/ADR files changed: no
 - P2.3 or later work started: no
+
+## Architect first proof repair pass
+
+Candidate entering this proof repair pass: `be2d2f527ad6160cd6ac1bfbbe10cdf79be1e8cf`.
+This remains implementation evidence only and does not claim architect acceptance.
+
+- Production P2.2 code changed: no. The repair changed only the P2.2 unit/integration tests and this evidence file.
+- All-ten-state materialization: PASS. A table-driven integration proof inserts each exact ADR-0018 dialogue state through the low-level test seam and verifies enum state, identities, thread/error nullability or values, version, and timestamps through `get_live()`.
+- Actual raising-clock mutation: PASS. Absent-row controller boot, settings initialization, and dialogue create intent each invoke a clock raising `RuntimeError("PRIVATE_REPOSITORY_CLOCK_MUST_NOT_LEAK")`; each returns `CLOCK_INVALID`, redacts the sentinel, calls once, leaves no row, and leaves storage usable.
+- Invalid clock matrix: PASS. `True`, `False`, `"123"`, `1.5`, `-1`, and `9223372036854775808` are rejected as `CLOCK_INVALID` with no controller row; `0` and `9223372036854775807` are accepted at valid timestamp boundaries.
+- Exact API-surface proof: PASS. Committed unit inspection of class-defined public callables binds controller to `get`/`begin_boot`, settings to `get`/`initialize_if_absent`/`replace`, and dialogue to `get_live`/the four create-intent methods; no control mutation, generic transition, or delete method is present.
+- Settings version overflow: PASS. A low-level version-maximum seed makes `replace` return `INVARIANT_VIOLATION` before the injected failing clock; the complete record remains unchanged.
+- Dialogue version overflow: PASS. A valid CREATING/null-thread row at version maximum makes a terminal create claim return `INVARIANT_VIOLATION` before the clock; the complete record remains unchanged.
+- Exact input boundary matrix: PASS. Required ID/fleet bounds prove 128 accepted and 129/empty/NUL rejected; model 256/257, effort 64/65, thread 512/513, and sanitized error-class length/character boundaries are covered. Expected version proves 0 accepted, maximum semantically reaches overflow handling, and bool/negative/overflow/float values return `INVALID_ARGUMENT` before mutation.
+- Controller corruption proof: PASS. Schema-valid `boot_generation=1.5` fails materialization as `INVARIANT_VIOLATION` without the raw value in the error.
+- Dialogue corruption proof: PASS. Schema-valid raw-prose `last_error_class` and numeric `version=1.5` each fail `get_live()` as `INVARIANT_VIOLATION` without raw values in the error.
+- Exact restart-record equality: PASS. A newly instantiated repository after close/reopen returns the exact captured controller, settings, and confirmed dialogue records, including all dialogue identity/state/version/timestamp/error fields.
+- Repository error/repr proof: PASS. Every finite repository category has exact content-free `str`/`repr`; unknown constructor text maps to `INVALID_ARGUMENT`; retry fields are absent; repository reprs redact the temporary DB path/sentinel.
+- Final focused counts: P2.2 unit `6`; P2.2 integration `20`.
+- Final full count: `313`, matching `287 + 6 + 20`.
+- P2.1 regressions: schema/unit `8`; storage/integration `31`; DDL SHA-256 remains `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+- P1.10 counts: T0 `6`; T1 `1`; T2 `4`. All required P1 regression suites passed.
+- Compile/import and `git diff --check`: passed. The known P1.6 pending-task warning was observed and remains unchanged; it was not introduced by this repair.
