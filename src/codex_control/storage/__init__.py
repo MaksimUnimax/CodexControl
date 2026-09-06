@@ -76,6 +76,11 @@ from .deletion_records import DeletionFinalizeResult, DeletionTombstoneRecord
 from .deletion_repositories import DeletionRepository
 from .error_records import ErrorFingerprintRecord
 from .error_repositories import ErrorFingerprintRepository
+from .metadata_retention import (
+    METADATA_RETENTION_MS,
+    MetadataRetentionRepository,
+    MetadataRetentionSweepResult,
+)
 from .repository_errors import RepositoryError, RepositoryErrorCategory
 
 __all__ = [
@@ -143,4 +148,7 @@ __all__ = [
     "DeletionRepository",
     "ErrorFingerprintRecord",
     "ErrorFingerprintRepository",
+    "METADATA_RETENTION_MS",
+    "MetadataRetentionRepository",
+    "MetadataRetentionSweepResult",
 ]
