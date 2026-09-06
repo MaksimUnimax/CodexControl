@@ -10,13 +10,12 @@ from .approval_repositories import _approval_select, _materialize_approval
 from .core_repositories import _default_clock, _materialize_dialogue, _validate_clock
 from .deletion_repositories import _materialize_tombstone, _tombstone_select
 from .delivery_repositories import _load_segments, _validate_delivery_coherence
-from .error_repositories import _lookup_error_rows, _materialize_error, _error_select
+from .error_repositories import _materialize_error, _error_select
 from .idempotency_repositories import _materialize_callback, _materialize_ingress
 from .repository_errors import RepositoryError, RepositoryErrorCategory
 from .sqlite import SqliteStorage
 from .turn_job_repositories import (
     _dialogue_row,
-    _job_row,
     _job_select,
     _materialize_job,
     _materialize_payload,
@@ -66,7 +65,7 @@ def _required_job_ingress(connection: Any, job: Any) -> Any:
     expected_disposition = f"JOB:{job.job_id}"
     rows = connection.execute(
         "SELECT update_id, received_at_ms, completed_at_ms, disposition "
-        "FROM ingress_updates WHERE disposition = ? ORDER BY update_id",
+        "FROM ingress_updates WHERE disposition = ? ORDER BY update_id LIMIT 2",
         (expected_disposition,),
     ).fetchall()
     if len(rows) != 1:
@@ -88,7 +87,9 @@ def _job_children(connection: Any, job: Any) -> tuple[int, int, int, bool]:
     ).fetchall()
     for row in payload_rows:
         payload = _materialize_payload(connection, row)
-        if payload.job_id != job.job_id or payload.dialogue_id != job.dialogue_id:
+        if payload.job_id != job.job_id:
+            raise _invariant()
+        if payload.dialogue_id is not None and payload.dialogue_id != job.dialogue_id:
             raise _invariant()
 
     segments = _load_segments(connection, job)
@@ -109,11 +110,41 @@ def _job_children(connection: Any, job: Any) -> tuple[int, int, int, bool]:
 
 
 def _old_terminal_jobs(connection: Any, cutoff: int, limit: int) -> list[tuple[Any, int, int, int, Any]]:
+    # Missing, duplicated, incomplete, or identity-incoherent JOB ingress is
+    # corruption, not an ineligible root that may be hidden by LIMIT.  This
+    # probe returns only one root and does not materialize any record.
+    offending = connection.execute(
+        "SELECT j.job_id FROM turn_jobs AS j "
+        "WHERE j.state IN ('DELIVERED', 'FAILED') AND j.updated_at_ms <= ? "
+        "AND ("
+        "NOT EXISTS (SELECT 1 FROM ingress_updates AS i "
+        "WHERE i.disposition = 'JOB:' || j.job_id) "
+        "OR (SELECT COUNT(*) FROM ingress_updates AS i "
+        "WHERE i.disposition = 'JOB:' || j.job_id) > 1 "
+        "OR EXISTS (SELECT 1 FROM ingress_updates AS i "
+        "WHERE i.disposition = 'JOB:' || j.job_id AND i.completed_at_ms IS NULL) "
+        "OR EXISTS (SELECT 1 FROM ingress_updates AS i "
+        "WHERE i.disposition = 'JOB:' || j.job_id AND i.update_id <> j.telegram_update_id) "
+        "OR NOT EXISTS (SELECT 1 FROM ingress_updates AS i "
+        "WHERE i.update_id = j.telegram_update_id "
+        "AND i.disposition = 'JOB:' || j.job_id)"
+        ") LIMIT 1",
+        (cutoff,),
+    ).fetchone()
+    if offending is not None:
+        raise _invariant()
+
     rows = connection.execute(
         _job_select()
-        + " WHERE state IN ('DELIVERED', 'FAILED') AND updated_at_ms <= ?"
-        + " ORDER BY updated_at_ms, job_id",
-        (cutoff,),
+        + " AS j WHERE j.state IN ('DELIVERED', 'FAILED') AND j.updated_at_ms <= ?"
+        + " AND NOT EXISTS (SELECT 1 FROM approvals AS a "
+        "WHERE a.job_id = j.job_id AND a.state = 'PENDING')"
+        + " AND EXISTS (SELECT 1 FROM ingress_updates AS i "
+        "WHERE i.update_id = j.telegram_update_id "
+        "AND i.disposition = 'JOB:' || j.job_id "
+        "AND i.completed_at_ms IS NOT NULL AND i.completed_at_ms <= ?)"
+        + " ORDER BY j.updated_at_ms, j.job_id LIMIT ?",
+        (cutoff, cutoff, limit),
     ).fetchall()
     eligible: list[tuple[Any, int, int, int, Any]] = []
     for row in rows:
@@ -121,60 +152,52 @@ def _old_terminal_jobs(connection: Any, cutoff: int, limit: int) -> list[tuple[A
         _job_dialogue(connection, job)
         payload_count, segment_count, approval_count, pending = _job_children(connection, job)
         ingress = _required_job_ingress(connection, job)
-        if pending or ingress.completed_at_ms > cutoff:
+        if pending or ingress.completed_at_ms is None or ingress.completed_at_ms > cutoff:
             continue
         eligible.append((job, payload_count, segment_count, approval_count, ingress))
-        if len(eligible) == limit:
-            # Remaining roots are still materialized below so corrupt old
-            # terminal history cannot be silently hidden by the bound.
-            continue
-    return eligible[:limit]
+    return eligible
 
 
 def _standalone_ingress(connection: Any, cutoff: int, limit: int) -> list[Any]:
+    offending = connection.execute(
+        "SELECT i.update_id FROM ingress_updates AS i "
+        "WHERE i.completed_at_ms IS NOT NULL AND i.completed_at_ms <= ? AND ("
+        "(i.disposition LIKE 'JOB:%' AND ("
+        "EXISTS (SELECT 1 FROM turn_jobs AS suffix_job "
+        "WHERE suffix_job.job_id = substr(i.disposition, 5) "
+        "AND suffix_job.telegram_update_id <> i.update_id) "
+        "OR EXISTS (SELECT 1 FROM turn_jobs AS update_job "
+        "WHERE update_job.telegram_update_id = i.update_id "
+        "AND update_job.job_id <> substr(i.disposition, 5))"
+        ")) "
+        "OR (i.disposition NOT LIKE 'JOB:%' AND EXISTS ("
+        "SELECT 1 FROM turn_jobs AS update_job "
+        "WHERE update_job.telegram_update_id = i.update_id))"
+        ") LIMIT 1",
+        (cutoff,),
+    ).fetchone()
+    if offending is not None:
+        raise _invariant()
+
     rows = connection.execute(
         "SELECT update_id, received_at_ms, completed_at_ms, disposition "
-        "FROM ingress_updates WHERE completed_at_ms IS NOT NULL AND completed_at_ms <= ?"
-        " ORDER BY completed_at_ms, update_id",
-        (cutoff,),
+        "FROM ingress_updates AS i WHERE i.completed_at_ms IS NOT NULL AND i.completed_at_ms <= ?"
+        " AND (i.disposition IN ('CONTROL', 'IGNORED_SLEEP', 'IGNORED_UNAUTHORIZED')"
+        " OR (i.disposition LIKE 'JOB:%'"
+        " AND NOT EXISTS (SELECT 1 FROM turn_jobs AS suffix_job "
+        "WHERE suffix_job.job_id = substr(i.disposition, 5))"
+        " AND NOT EXISTS (SELECT 1 FROM turn_jobs AS update_job "
+        "WHERE update_job.telegram_update_id = i.update_id)))"
+        " ORDER BY i.completed_at_ms, i.update_id LIMIT ?",
+        (cutoff, limit),
     ).fetchall()
     eligible: list[Any] = []
     for row in rows:
         ingress = _materialize_ingress(row)
         if ingress.completed_at_ms is None:
-            continue
-        update_job_row = connection.execute(
-            _job_select() + " WHERE telegram_update_id = ?", (ingress.update_id,)
-        ).fetchone()
-        if ingress.disposition.value == "JOB":
-            assert ingress.job_id is not None
-            suffix_row = _job_row(connection, ingress.job_id)
-            if suffix_row is not None:
-                job = _materialize_job(suffix_row)
-                if (
-                    job.job_id != ingress.job_id
-                    or job.telegram_update_id != ingress.update_id
-                ):
-                    raise _invariant()
-                if update_job_row is None:
-                    raise _invariant()
-                update_job = _materialize_job(update_job_row)
-                if update_job.job_id != ingress.job_id:
-                    raise _invariant()
-                continue
-            if update_job_row is not None:
-                # The update identity belongs to a different existing job.
-                raise _invariant()
-        elif update_job_row is not None:
-            # A completed non-JOB disposition cannot share an update identity
-            # with a durable job; fail closed instead of deleting recovery
-            # authority.
-            _materialize_job(update_job_row)
             raise _invariant()
         eligible.append(ingress)
-        if len(eligible) == limit:
-            continue
-    return eligible[:limit]
+    return eligible
 
 
 def _old_callbacks(connection: Any, cutoff: int, limit: int) -> list[Any]:
@@ -182,8 +205,8 @@ def _old_callbacks(connection: Any, cutoff: int, limit: int) -> list[Any]:
         "SELECT token_hash_sha256, action, subject_type, subject_id, expected_version, "
         "expected_state, authorized_user_id, authorized_chat_id, created_at_ms, "
         "expires_at_ms, consumed_at_ms FROM callback_actions "
-        "WHERE expires_at_ms <= ? ORDER BY expires_at_ms, token_hash_sha256",
-        (cutoff,),
+        "WHERE expires_at_ms <= ? ORDER BY expires_at_ms, token_hash_sha256 LIMIT ?",
+        (cutoff, limit),
     ).fetchall()
     eligible: list[Any] = []
     for row in rows:
@@ -192,7 +215,7 @@ def _old_callbacks(connection: Any, cutoff: int, limit: int) -> list[Any]:
             "SELECT token_hash_sha256, action, subject_type, subject_id, expected_version, "
             "expected_state, authorized_user_id, authorized_chat_id, created_at_ms, "
             "expires_at_ms, consumed_at_ms FROM callback_actions "
-            "WHERE lower(token_hash_sha256) = ? ORDER BY token_hash_sha256",
+            "WHERE lower(token_hash_sha256) = ? ORDER BY token_hash_sha256 LIMIT 2",
             (callback.token_hash_sha256,),
         ).fetchall()
         if len(aliases) != 1:
@@ -201,15 +224,14 @@ def _old_callbacks(connection: Any, cutoff: int, limit: int) -> list[Any]:
         # an uppercase-only or dual-case semantic callback row.
         if aliases[0][0] != callback.token_hash_sha256:
             raise _invariant()
-        if len(eligible) < limit:
-            eligible.append(callback)
+        eligible.append(callback)
     return eligible
 
 
 def _expired_tombstones(connection: Any, now: int, limit: int) -> list[Any]:
     rows = connection.execute(
-        _tombstone_select() + " WHERE expires_at_ms <= ? ORDER BY expires_at_ms, dialogue_id",
-        (now,),
+        _tombstone_select() + " WHERE expires_at_ms <= ? ORDER BY expires_at_ms, dialogue_id LIMIT ?",
+        (now, limit),
     ).fetchall()
     eligible: list[Any] = []
     for row in rows:
@@ -218,24 +240,26 @@ def _expired_tombstones(connection: Any, now: int, limit: int) -> list[Any]:
         if dialogue_row is not None:
             _materialize_dialogue(dialogue_row)
             raise _invariant()
-        if len(eligible) < limit:
-            eligible.append(tombstone)
+        eligible.append(tombstone)
     return eligible
 
 
 def _old_errors(connection: Any, cutoff: int, limit: int) -> list[Any]:
     rows = connection.execute(
-        _error_select() + " WHERE last_seen_at_ms <= ? ORDER BY last_seen_at_ms, fingerprint_sha256",
-        (cutoff,),
+        _error_select() + " WHERE last_seen_at_ms <= ? ORDER BY last_seen_at_ms, fingerprint_sha256 LIMIT ?",
+        (cutoff, limit),
     ).fetchall()
     eligible: list[Any] = []
     for row in rows:
         error = _materialize_error(connection, row)
-        aliases = _lookup_error_rows(connection, error.fingerprint_sha256)
+        aliases = connection.execute(
+            _error_select()
+            + " WHERE lower(fingerprint_sha256) = ? ORDER BY fingerprint_sha256 LIMIT 2",
+            (error.fingerprint_sha256,),
+        ).fetchall()
         if len(aliases) != 1 or aliases[0][0] != error.fingerprint_sha256:
             raise _invariant()
-        if len(eligible) < limit:
-            eligible.append(error)
+        eligible.append(error)
     return eligible
 
 

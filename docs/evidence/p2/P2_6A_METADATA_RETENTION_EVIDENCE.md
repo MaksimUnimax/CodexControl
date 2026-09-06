@@ -104,3 +104,82 @@ databases. No schema/DDL, accepted prior production repository, architecture
 authority file, Telegram/Codex effect, network call, service, deployment,
 production DB/state, credential, token, prompt/response, raw event, traceback,
 stdout/stderr or environment dump was added. P2.6b is NOT STARTED.
+
+## Architect first repair pass
+
+This is factual repair evidence only. P2.6a is not architect-accepted. This
+section does not close Issue #17 and does not start or recommend P2.6b.
+
+Rejected candidate repaired: `c01f9b4316ab0a507b15854b6dea1d7ab437ac4b`.
+Repair parent: `c01f9b4316ab0a507b15854b6dea1d7ab437ac4b`.
+
+Repair implementation and proof coverage:
+
+- Canonical generic job-owned payloads may be owned by the job alone. Job
+  cleanup now requires the exact `payload.job_id` and only requires a dialogue
+  owner when `payload.dialogue_id` is non-NULL. INPUT payloads retain the
+  accepted P2.4a two-owner/hash contract. A public
+  `TransientPayloadRepository.create()` job-only DISPLAY fixture proves the
+  input and generic rows cascade and are counted exactly once.
+- Every root selector now applies ordinary age, protection and identity
+  eligibility in SQL before its deterministic root `LIMIT`: terminal jobs,
+  standalone ingress, callbacks, tombstones and errors. Only bounded selected
+  roots are materialized; child rows of selected terminal jobs remain fully
+  materialized for exact cascade counts.
+- Terminal-job SQL excludes PENDING approvals and requires the exact old JOB
+  ingress before the root limit. Narrow SQL probes return at most one
+  offending old terminal root for missing, duplicated, incomplete or
+  identity-incoherent JOB ingress. `_required_job_ingress()` uses `LIMIT 2`.
+- Standalone ingress SQL selects only completed old CONTROL/ignored/orphan-JOB
+  roots, with a bounded identity-corruption probe. Incomplete ingress is never
+  selected. Callback and error semantic alias probes use `LIMIT 2` and inspect
+  aliases without an expiry-age predicate.
+- Private materializer wrappers prove limit=1 does not materialize a 20-root
+  population for terminal jobs, standalone ingress, callbacks, errors or
+  tombstones.
+- Added delivery-owned FAILED `C*FP*` cleanup proof with a required DISPLAY
+  payload; accepted P2.5 hard-delete finalization proof leaves an orphan JOB
+  ingress that P2.6a removes while the unexpired tombstone remains.
+- Added old completed JOB-ingress identity corruption rollback, incomplete
+  ingress protection, missing exact JOB-ingress invariant, active/recovery
+  job-state matrix, callback consumed/recent-expired/unexpired horizon,
+  callback replay NOT_FOUND, dual-case callback invariant, corrupt-tombstone
+  whole-sweep rollback, deterministic oldest-first progress, independent
+  category limits, and controller/settings/live-dialogue equality proofs.
+- Cancellation now starts with an eligible deletion and proves one owned
+  result and one physical cleanup after repeated cancellation. Empty and
+  multi-category successful sweeps each prove exactly one retention-clock call;
+  raising-clock behavior remains finite/redacted and leaves eligible data.
+
+Validation results for this repair pass:
+
+- P2.6a unit: `4`.
+- P2.6a integration: `28`.
+- P2.5 unit/integration: `4 / 18`.
+- P2.4b unit/integration: `6 / 25`.
+- P2.4a unit/integration: `8 / 31`.
+- P2.3 unit/integration: `7 / 28`.
+- P2.2 unit/integration: `6 / 20`.
+- P2.1 unit/integration: `8 / 31`.
+- P1.10 T0/T1/T2: `6 / 1 / 4`.
+- `BASE_ACCEPTED_FULL_TESTS=440`.
+- `EXPECTED_FULL_TESTS=440 + 4 + 28 = 472`.
+- `OBSERVED_FULL_TESTS=472`, all passing.
+- Compileall, public import, frozen DDL SHA, `git diff --check`, mandatory
+  prior-slice regressions, P1.10 and focused P1 suites passed.
+- The known pre-existing P1.6 pending-task warning was observed in the
+  focused P1 run. It was not introduced by P2.6a.
+
+Security and scope facts:
+
+- Production implementation repair changes are limited to
+  `metadata_retention.py`; test and factual evidence files were expanded.
+  No accepted prior production repository, schema/DDL, ADR, roadmap,
+  current-work or architecture file was changed.
+- Tests used temporary SQLite databases only. No production DB/state root,
+  service, deployment, scheduler, Codex call, Telegram call, credential,
+  token, prompt/response, raw callback token, traceback, stdout/stderr or
+  environment dump was added.
+- This repair remains subject to independent architect review; no acceptance
+  is claimed and P2.6b/P3/Telegram/Codex integration/deployment work remains
+  out of scope.
