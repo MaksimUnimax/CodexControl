@@ -3,209 +3,332 @@
 Date: 2026-09-06
 
 ## Accepted facts
+
 - Repository: `MaksimUnimax/CodexControl`.
 - Installed server-80 Codex authority: `codex-cli 0.144.6`; app-server schema SHA-256 `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`.
 - P1 is complete through accepted P1.10 T0/T1/T2; real-Codex T3 remains deferred to P7.
-- P2 historical final acceptance: `9db97f0dda109b4d0c0ecfa5f167733905df2766`; P2.C1 retention-compatible replay correction accepted at `4b6d226ce647fbf38a6ada7b82947be7ad3e30c2`.
+- P2 historical final acceptance: `9db97f0dda109b4d0c0ecfa5f167733905df2766`; P2.C1 accepted at `4b6d226ce647fbf38a6ada7b82947be7ad3e30c2`.
 - Frozen schema-v1 DDL SHA-256 remains `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
-- P3.1 existing-dialogue application service is architect-accepted at `9e0a86b311bb63d6a36a4641cb588321987e1550`; final full suite 543.
-- P3.2 lazy first-dialogue/first-turn service is architect-accepted after one production repair at `c484c56db007569170363b3d08c24766148c3e30`; final full suite 566.
-- P3.2 acceptance authority: `docs/evidence/p3/P3_2_ARCHITECT_ACCEPTANCE_2026-09-06.md`.
-- ADR-0026, ADR-0027 and ADR-0028 remain binding accepted P3.1/P3.2 authority.
-- ADR-0029 is binding P3.3 authority.
+- P3.1 accepted at `9e0a86b311bb63d6a36a4641cb588321987e1550`; full suite 543.
+- P3.2 accepted at `c484c56db007569170363b3d08c24766148c3e30`; full suite 566.
+- P3.3 settings selection/dialogue linearization is architect-accepted after one repair at `66a37d8b8065ecd31e17351e8062f9ebf1ee8828`; full suite 596.
+- P3.3 acceptance authority: `docs/evidence/p3/P3_3_ARCHITECT_ACCEPTANCE_2026-09-06.md`.
+- ADR-0026/0027/0028/0029 remain binding accepted P3.1–P3.3 authority.
+- ADR-0030 is binding P3.4 authority.
 
-## Accepted P3.1/P3.2 application boundary
+The exact P3.3 architect base was `fc0d57e665f0aad8044934b24396de7d07ee56ef`. Any textual report spelling with an extra trailing character is not authority.
 
-The accepted higher-level prompt path now supports both an existing canonical dialogue and lazy first-dialogue creation.
+## Accepted P3 application boundary
 
-Existing dialogue:
+Existing dialogue prompt:
 
-`duplicate/static -> existing-dialogue preflight -> claim_ingress -> claim_turn -> CODEX_STARTING -> turn/start -> CODEX_RUNNING -> wait -> finish_codex`
+`duplicate/static -> existing-dialogue preflight -> claim_ingress -> claim_turn -> CODEX_STARTING -> P1 turn/start -> CODEX_RUNNING -> P1 wait -> finish_codex`
 
-No dialogue:
+No-dialogue first prompt:
 
-`duplicate/static -> no-dialogue preflight -> tombstone guard -> CREATING -> first JOB/RECEIVED/INPUT -> thread/start -> confirm IDLE -> same admitted job -> accepted turn runner`
+`duplicate/static -> settings/model/workdir preflight -> tombstone guard -> guarded CREATING -> first JOB/RECEIVED/INPUT -> thread/start -> confirm IDLE -> same admitted job -> accepted turn runner`
 
-P3.2 recovery converts any pre-existing CREATING dialogue to CREATE_UNKNOWN without repeating thread/start.
+P3.2 first-dialogue create is atomically bound to the exact P3.3 settings snapshot. Stale selection yields `BLOCKED / SETTINGS_CHANGED`, with no delayed execution.
 
-Different-update losers of the first-dialogue race are finite no-effect BUSY/BLOCKED results and never execute later as queued work.
+P3.3 profile mutation is legal only with no live dialogue. Model/reasoning real mutation is legal only with no dialogue or an exact matching IDLE dialogue. Already-admitted job snapshots remain immutable.
 
-## P3.3 objective
+## P3.4 objective
 
-P3.3 adds a Telegram-agnostic profile/model/reasoning settings application service for later private management UI.
+P3.4 adds durable operator interrupt orchestration over accepted P1.8.
 
-It must enforce the frozen rules:
+It must establish durable `INTERRUPTING` authority before the external interrupt effect, preserve the exact in-memory P1 `TurnBinding` object required by P1.8 identity checks, reconcile interrupt and natural-terminal races, and define startup recovery for pre-existing `INTERRUPTING` without repeating interrupt.
 
-- configured profiles come only from explicit configuration;
-- profile is immutable for the lifetime of a live dialogue;
-- profile mutation is legal only with NO_DIALOGUE;
-- model/reasoning mutation is legal with NO_DIALOGUE or exact IDLE dialogue only;
-- model/reasoning choices require authenticated model-list validation for the exact profile;
-- every admitted job keeps its immutable captured profile/model/effort;
-- expected settings version is optimistic concurrency authority;
-- no retry/merge/queue exists.
+P3.4 must not weaken accepted P1.8 or P2.4a behavior.
 
-## P3.3 public application additions
+## P1.8 dependency authority
 
-Add `SettingsSelectionService` with exact public callable surface:
+Accepted P1.8 at `6d8a07b5b95ef377cf60762f4475128bdf810b22` owns exact `turn/interrupt` semantics.
 
-- `get_view(*, refresh=False)`;
-- `select_profile(profile_id, *, expected_version)`;
-- `select_model(model_id, *, expected_version)`;
-- `select_reasoning_effort(reasoning_effort, *, expected_version)`.
+Important P1.8 facts:
 
-Add the frozen public records/enums defined by ADR-0029:
+- interrupt accepts only the exact active `TurnBinding` object retained by the adapter;
+- reconstructed equal-looking bindings are rejected before dispatch;
+- exactly one interrupt RPC is sent; no retry;
+- the existing P1.6 collector is the sole terminal evidence consumer;
+- `interrupt_turn` may return `CONFIRMED`, `RECONCILED`, `REJECTED`, or `UNKNOWN`;
+- CONFIRMED/RECONCILED can carry the exact definitive terminal result;
+- caller cancellation after dispatch remains owned;
+- ambiguous interrupt plus definitive collector terminal can reconcile;
+- ambiguous/no definitive terminal remains UNKNOWN.
 
-- `SettingsProfileOption(profile_id, display_name)`;
-- `SettingsModelOption(model_id, display_name, supported_reasoning_efforts, default_reasoning_effort, is_default)`;
-- `SettingsSelectionView(settings, dialogue_state, dialogue_profile_id, profiles, models, catalog_available)`;
-- `SettingsMutationStatus = UPDATED | NO_CHANGE | BLOCKED | CONFLICT`;
-- `SettingsMutationReason = SETTINGS_MISSING | PROFILE_NOT_CONFIGURED | PROFILE_LOCKED | DIALOGUE_NOT_IDLE | MODEL_NOT_CONFIGURED | MODEL_UNAVAILABLE | REASONING_EFFORT_UNSUPPORTED | STALE_SETTINGS`;
-- `SettingsMutationResult(status, settings, reason)`;
-- finite payload-free `SettingsSelectionError = INVALID_ARGUMENT | STORAGE | INVARIANT`.
+P3.4 must consume this contract rather than duplicate protocol behavior.
 
-Public settings projection must not contain CODEX_HOME, thread ID, wire model, raw catalog/runtime errors, credentials or content.
+## P3.4 public application additions
 
-## Read/view authority
+Add `DialogueInterruptService` with exact public callable surface:
 
-Profile options are explicit configured profile ID/display-name pairs only, preserving configuration order.
+- `interrupt(request)`;
+- `recover_preexisting_interrupt()`.
 
-Effective profile for model discovery:
+Add frozen:
 
-- live dialogue profile if a live dialogue exists;
-- otherwise durable settings profile;
-- otherwise none.
+`DialogueInterruptRequest(dialogue_id, job_id, expected_dialogue_version, expected_job_version)`.
 
-Authenticated model catalog is used only for an explicitly configured effective profile. Exact visible logical descriptors become safe model options. Catalog failure/profile mismatch/malformed catalog returns `catalog_available=False` and an empty model list without raw error leakage.
+Caller input deliberately contains no thread or turn ID.
 
-P3.3 does not initialize missing settings. Missing durable settings is a finite blocked mutation state; P2.2 startup bootstrap remains authority.
+Add `DialogueInterruptStatus` exactly:
 
-## Profile mutation authority
+- `CONFIRMED`;
+- `RECONCILED`;
+- `REJECTED`;
+- `UNKNOWN`;
+- `BLOCKED`;
+- `CONFLICT`.
 
-Unknown profile -> `BLOCKED / PROFILE_NOT_CONFIGURED`.
+Add `DialogueInterruptReason` exactly:
 
-Exact same current profile + exact expected settings version -> `NO_CHANGE`; preserve model/reasoning.
+- `NO_DIALOGUE`;
+- `DIALOGUE_NOT_RUNNING`;
+- `JOB_NOT_RUNNING`;
+- `ACTIVE_BINDING_UNAVAILABLE`;
+- `INTERRUPT_IN_PROGRESS`;
+- `STALE_REQUEST`.
 
-A real profile change requires NO_DIALOGUE at the exact SQLite mutation point.
+Add frozen:
 
-Successful profile change writes:
+`DialogueInterruptResult(status, job, dialogue, output_payload, reason)`.
 
-- requested profile;
-- `model_id = NULL`;
-- `reasoning_effort = NULL`;
-- settings version +1 exactly once.
+Add `InterruptRecoveryStatus` exactly:
 
-Any live dialogue in any state -> `BLOCKED / PROFILE_LOCKED`.
+- `NO_ACTION`;
+- `MARKED_UNKNOWN`.
 
-No profile change deletes/migrates/resumes a dialogue.
+Add frozen:
 
-## Model/reasoning mutation authority
+`InterruptRecoveryResult(status, job, dialogue)`.
 
-Both require the durable settings profile to be explicit configured authority and an authenticated refreshed catalog for that exact profile.
+Add finite payload-free `DialogueInterruptError` with exact categories:
 
-Model selection requires exact visible logical model and resets reasoning to that model's exact authenticated default effort.
+- `INVALID_ARGUMENT`;
+- `STORAGE`;
+- `INVARIANT`.
 
-Reasoning selection requires a current model and an exact concrete advertised effort.
+No thread/turn identity, CODEX_HOME, DB path, prompt/output content, raw adapter/repository errors or credentials may appear in generic request/error rendering.
 
-Mutation is legal only at an atomic commit point with:
+## Exact active TurnBinding registry
 
-- NO_DIALOGUE; or
-- exact IDLE live dialogue whose server/profile match this controller/settings profile.
+P1.8 object-identity authority means a `TurnBinding` may not be reconstructed from SQLite for interrupt.
 
-Every other live state -> `BLOCKED / DIALOGUE_NOT_IDLE`.
+P3.4 adds a shared in-memory `ActiveTurnRegistry` keyed by durable job ID.
 
-Live dialogue/settings profile mismatch -> fail closed INVARIANT.
+Requirements:
 
-Same resulting tuple -> NO_CHANGE; actual update -> one version increment/one mutation clock.
+- store the exact `TurnBinding` object returned by P1 `start_turn`;
+- publish it after exact start confirmation and before durable CODEX_RUNNING becomes externally usable;
+- lookup returns the same object identity;
+- retire only the exact owned entry;
+- stale cleanup cannot remove a replacement;
+- no profile/thread/turn values in registry repr;
+- registry is empty after restart.
 
-No thread/start, turn/start, resume or other Codex side effect is part of settings mutation.
+The admitted-turn runner must accept/integrate an optional registry. Existing P3.1/P3.2 service callable surfaces and default behavior remain unchanged.
 
-## Optimistic conflict authority
+Future runtime composition must inject the same registry instance into prompt execution and interrupt service.
 
-Every settings mutation requires the caller's exact expected durable settings version.
+A durable running job without the exact registry binding is `BLOCKED / ACTIVE_BINDING_UNAVAILABLE`; P3.4 never fabricates a replacement binding.
 
-Stale version -> `CONFLICT / STALE_SETTINGS`.
+## Interrupt request authority
 
-No automatic reread-and-retry, merge or second write.
+`DialogueInterruptRequest` binds the operator action to exact durable job/dialogue IDs and versions.
 
-## Atomic SQLite settings/dialogue guard
+A stale request must never target a newer turn.
 
-P2.2 `SettingsRepository.replace` and `DialogueRepository.create_intent` remain accepted and semantically unchanged.
+Required semantic precedence after static validation:
 
-P3.3 may add one new narrow repository/module under `src/codex_control/storage/` using the accepted `SqliteStorage.write` transaction and the existing schema only.
+1. no live dialogue -> `BLOCKED / NO_DIALOGUE`;
+2. dialogue ID or expected dialogue version mismatch -> `CONFLICT / STALE_REQUEST`;
+3. dialogue already INTERRUPTING -> `BLOCKED / INTERRUPT_IN_PROGRESS`;
+4. dialogue not TURN_RUNNING -> `BLOCKED / DIALOGUE_NOT_RUNNING`;
+5. missing/non-running referenced job -> `BLOCKED / JOB_NOT_RUNNING` unless persisted shape is corrupt;
+6. job version mismatch -> `CONFLICT / STALE_REQUEST`;
+7. job must be exact CODEX_RUNNING and match dialogue server/profile/thread with non-null codex turn ID;
+8. exact registry binding must exist and match durable profile/thread/turn;
+9. absent registry -> `BLOCKED / ACTIVE_BINDING_UNAVAILABLE`;
+10. registry/durable mismatch -> application INVARIANT.
 
-It provides semantic operations equivalent to:
+No P1 interrupt occurs before durable interrupt claim.
 
-1. `replace_profile_no_dialogue` — exact settings/version, any live dialogue blocks, atomically change profile and clear model/effort;
-2. `replace_selection_idle_or_no_dialogue` — exact settings/version/profile, allow no dialogue or exact matching IDLE only, atomically update model/effort;
-3. `create_dialogue_if_settings_current` — exact settings version/profile/model/stored-effort snapshot and empty live slot must all still hold before atomically inserting canonical CREATING.
+## Ownership boundary
 
-Expected repository conflict mapping follows ADR-0029. No DDL/schema/background lock/retry is authorized.
+Preflight is effect-free and caller cancellation may propagate.
 
-## P3.2 compatibility hardening required by P3.3
+After exact eligibility/registry binding is established, create one owned task before the durable interrupt claim. From that point caller cancellation is deferred through:
 
-P3.3 introduces profile mutation, so P3.2 first-dialogue creation must now linearize against it.
+`claim INTERRUPTING -> P1 interrupt/reconciliation -> durable restore/terminal result`.
 
-During P3.2 lazy preflight retain the exact settings version/profile/model/stored reasoning value used for selection.
+Repeated cancellation must not cause duplicate interrupt RPCs.
 
-The owned first create must use the new guarded create primitive rather than an unguarded insert.
+## Atomic interrupt storage authority
 
-Race authority:
+P3.4 may add one narrow storage module/repository using existing `SqliteStorage.write` and schema-v1 only.
 
-- guarded P3.2 create wins first -> concurrent different-profile mutation sees live dialogue and returns PROFILE_LOCKED;
-- profile/settings mutation wins first -> stale P3.2 create returns no-effect `BLOCKED / SETTINGS_CHANGED` before dialogue/job/ingress/INPUT/P1 effect.
+Do not modify the semantics of accepted `TurnJobRepository.finish_codex`.
 
-Add `SETTINGS_CHANGED` as one additive `ExistingDialogueTurnReason` member for this exact P3.2 compatibility result.
+### claim_interrupt
 
-No retry/queue. Accepted P3.2 ALREADY_EXISTS no-queue reconstruction remains unchanged.
+Semantic method equivalent to:
 
-## Existing-dialogue prompt versus model/reasoning mutation
+`claim_interrupt(dialogue_id, job_id, expected_dialogue_version, expected_job_version)`.
 
-An already-running application invocation may have read its settings snapshot immediately before a concurrent model/reasoning update. It may continue to admission using that captured selection; once admitted, the durable job snapshot is immutable and remains the authority for that invocation.
+One transaction must materialize exact dialogue/job, enforce IDs/versions, require dialogue TURN_RUNNING + job CODEX_RUNNING + exact server/profile/thread/turn ownership, then:
 
-The new mutation affects subsequent selection only and never rewrites an existing job.
+- dialogue -> INTERRUPTING;
+- dialogue version +1;
+- job unchanged;
+- one mutation clock after all guards.
 
-Profile mutation is different: it can never commit while the live dialogue exists.
+### restore_rejected_interrupt
 
-## Required P3.3 acceptance focus
+For a definitive P1 REJECTED result where the exact job is still running:
 
-Tests must materially prove:
+- require exact claimed INTERRUPTING shape;
+- dialogue -> TURN_RUNNING;
+- dialogue version +1;
+- job unchanged;
+- no retry.
 
-- exact public callable/type surfaces and frozen records;
-- CODEX_HOME/wire-model/thread-ID/raw-error redaction;
-- explicit profile options and authenticated visible model options;
-- catalog unavailable fail-closed view/mutation behavior;
-- expected-version conflict and no retry;
-- no-change paths do not write/increment/clock;
-- profile change clears model/effort and is blocked by every live dialogue state;
-- model/reasoning allowed at NO_DIALOGUE and exact IDLE only;
-- all create/run/interrupt/delete/unknown/error states block model/reasoning;
-- settings/dialogue profile mismatch fails closed;
-- model selection resets to authenticated default effort;
-- unsupported effort is blocked;
-- same-version concurrent settings mutation has one winner;
-- deterministic model/reasoning mutation vs turn claim preserves immutable job snapshot;
-- deterministic P3.2/profile-mutation race in both orders;
-- stale settings can never create a live dialogue on an old profile;
-- live-dialogue creation can never be followed by profile mutation;
-- accepted P3.2 no-queue repair remains green;
-- schema-v1 DDL is unchanged;
-- full P1/P2/P3.1/P3.2 regression remains green.
+If natural terminal already won, reconstruct terminal state rather than restoring.
+
+### terminal reconciliation
+
+P3.4 needs additive race-safe terminal coordination. Accepted P2.4a normal `finish_codex` stays first authority for ordinary TURN_RUNNING completion.
+
+Only when normal finish conflicts because the exact interrupt transition raced may the shared turn runner invoke the P3.4 reconciliation primitive.
+
+The coordinator must recognize only exact interrupt-induced version/state shapes, not arbitrary drift.
+
+Conceptual base: runner dialogue version V, job K.
+
+- interrupt claim: INTERRUPTING V+1, job K;
+- rejected restore: TURN_RUNNING V+2, job K;
+- interrupt terminalization: job K+1, dialogue terminal V+2;
+- natural terminal after restore: job K+1, dialogue terminal V+3.
+
+Canonical already-terminal state for the same job/binding may be reconstructed idempotently. Incompatible shape is INVARIANT/conflict, not normalization.
+
+## Terminal mapping after interrupt claim
+
+From durable INTERRUPTING:
+
+- definitive P1 terminal COMPLETED -> job CODEX_COMPLETED, dialogue IDLE;
+- definitive P1 terminal FAILED -> job FAILED with `CODEX_TURN_FAILED`, dialogue IDLE;
+- unprovable terminal -> job UNKNOWN, dialogue TURN_UNKNOWN, `CODEX_AMBIGUOUS`.
+
+Definitive FAILED returns dialogue IDLE because the accepted state machine says `INTERRUPTING -> IDLE` for definitive terminal/reconciled interrupt. Ordinary non-interrupt failure from TURN_RUNNING still uses accepted P2.4a mapping to dialogue ERROR.
+
+Reuse accepted P3 terminal message projection/output limits and retention. Do not create a second projection contract. Empty projected output creates no OUTPUT payload or ID.
+
+## P1 interrupt result mapping
+
+### CONFIRMED / RECONCILED
+
+Require exact `TurnInterruptResult`, exact same binding identity and exact definitive terminal result. Persist/reconstruct terminal state. Return matching application status.
+
+Malformed/mismatched result is uncertainty, not success.
+
+### REJECTED
+
+If exact running state remains, restore INTERRUPTING -> TURN_RUNNING and return REJECTED. No retry.
+
+If natural terminal already won, reconstruct it and return RECONCILED.
+
+### UNKNOWN / uncertain exception
+
+Never redispatch interrupt.
+
+Use the exact same registry binding to call `wait_turn(binding)` once where collector authority remains available.
+
+Definitive exact COMPLETED/FAILED -> durable reconcile and application RECONCILED.
+
+Otherwise -> job UNKNOWN + dialogue TURN_UNKNOWN and application UNKNOWN.
+
+### Local interrupt errors
+
+`TURN_INTERRUPT_NOT_ACTIVE` and `TURN_INTERRUPT_BUSY` are never retry triggers. Reconcile the exact collector once; definitive terminal -> RECONCILED, otherwise UNKNOWN.
+
+Other impossible/local mismatch paths fail closed. No raw adapter text.
+
+## Natural terminal race
+
+The shared admitted-turn runner remains the owner of ordinary natural terminal capture.
+
+It must publish the exact binding registry object during the active turn and retire it on exact terminal ownership completion.
+
+Normal finish calls existing `TurnJobRepository.finish_codex` first.
+
+If P3.4 has already changed the exact dialogue to INTERRUPTING/restored-turn shape, a narrowly-scoped interrupt-race fallback may finalize/reconstruct through the new coordinator.
+
+This must preserve normal P3.1/P3.2 behavior when no interrupt occurs.
+
+## Restart recovery
+
+`recover_preexisting_interrupt()` is startup-only and makes zero P1 calls.
+
+No live dialogue or non-INTERRUPTING -> `NO_ACTION`, no mutation.
+
+Canonical pre-existing INTERRUPTING must have one exact owning CODEX_RUNNING job. Atomically:
+
+- job -> UNKNOWN;
+- dialogue -> TURN_UNKNOWN;
+- `CODEX_AMBIGUOUS`;
+- preserve durable thread/turn/job/ingress/input evidence;
+- return `MARKED_UNKNOWN`.
+
+Registry is empty after restart, therefore never repeat the old interrupt.
+
+Repeated recovery is idempotent.
+
+P3.4 does not auto-recover a generic pre-existing TURN_RUNNING state.
+
+## Approval boundary
+
+No approval storage redesign is required. Existing callback authority requires job CODEX_RUNNING and dialogue TURN_RUNNING; after interrupt claim/terminalization old callbacks fail stale/closed.
+
+Do not add Telegram approval UX in P3.4.
+
+## P3.4 acceptance focus
+
+Tests must prove at minimum:
+
+- exact public surfaces/frozen records/error redaction;
+- exact binding object identity registry;
+- registry stale-cleanup safety;
+- durable INTERRUPTING before P1 dispatch;
+- stale request cannot interrupt newer turn;
+- one interrupt effect maximum;
+- post-claim repeated cancellation ownership;
+- CONFIRMED, RECONCILED, REJECTED, UNKNOWN mappings;
+- malformed/mismatched P1 result fail-closed;
+- rejection restore and no retry;
+- natural terminal before interrupt claim and after claim;
+- terminal/interrupt/restore race orderings;
+- no duplicate job/output terminalization;
+- output projection/retention remains accepted;
+- startup INTERRUPTING recovery is no-P1, idempotent, preserves evidence;
+- settings mutation remains blocked in INTERRUPTING;
+- stale approval callbacks do not become valid;
+- P3.1/P3.2/P3.3 no-interrupt behavior remains unchanged;
+- DDL/schema unchanged and full prior regressions green.
 
 ## P3 split
 
-- **P3.1** — DONE, accepted existing-dialogue execution.
-- **P3.2** — DONE, accepted lazy thread/start + first-turn orchestration/recovery.
-- **P3.3** — NEXT, settings selection + authenticated catalog validation + atomic dialogue locks.
-- **P3.4** — planned durable interrupt orchestration/recovery.
+- **P3.1** — DONE.
+- **P3.2** — DONE.
+- **P3.3** — DONE.
+- **P3.4** — NEXT, durable interrupt orchestration/recovery under ADR-0030.
 - **P3.5** — planned hard-delete orchestration + final P3 recovery/application acceptance.
 
-## Out of scope for P3.3
+## Out of scope for P3.4
 
-No Telegram UI/callback wiring, ACTIVE/SLEEP routing, profile filesystem scanning, credential copy/mutation, thread resume, CREATE_UNKNOWN reset/retry, interrupt, hard delete, delivery, real Codex side effect, production state or deployment.
+No Telegram UI/callback wiring, group routing, hard-delete/thread-delete orchestration, CREATE_UNKNOWN reset, generic TURN_RUNNING restart scanner, delivery, real Codex acceptance, production state or deployment.
 
 ## Execution authority
 
 Codex must not self-start work from this document.
 
-Only **P3.3 — settings selection service + atomic dialogue/settings guards under ADR-0029** may be implemented from the next explicit architect prompt.
+Only P3.4 may be implemented from the next explicit architect prompt.
