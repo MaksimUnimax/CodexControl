@@ -34,8 +34,8 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 
 ## P3 — Dialogue application service
 - [DONE] P3.1 existing-dialogue prompt admission + immutable authenticated selection + one-turn Codex orchestration + terminal capture. Accepted after corrected P2.C1 base plus one proof-only repair: `9e0a86b311bb63d6a36a4641cb588321987e1550`; final full suite 543.
-- [NEXT] P3.2 lazy `thread/start` + first-turn orchestration and fail-closed create/restart boundary under ADR-0028.
-- [PLANNED] P3.3 profile/model/reasoning application settings service with authenticated catalog validation and dialogue locks.
+- [DONE] P3.2 lazy `thread/start` + first-turn orchestration and fail-closed create/restart boundary under ADR-0028. Accepted after one production repair: `c484c56db007569170363b3d08c24766148c3e30`; final full suite 566.
+- [NEXT] P3.3 profile/model/reasoning application settings service with authenticated catalog validation and dialogue locks.
 - [PLANNED] P3.4 durable interrupt orchestration over P1.8 plus application-owned `INTERRUPTING` transition/recovery authority.
 - [PLANNED] P3.5 hard-delete orchestration over P1.9 + final P3 recovery/application acceptance.
 
