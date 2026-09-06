@@ -180,13 +180,13 @@ class SettingsSelectionService:
     ) -> SettingsMutationResult:
         _validate_string(profile_id, MAX_SERVICE_STRING_CHARS)
         _validate_version(expected_version)
-        if profile_id not in self._profile_ids:
-            return _blocked(None, SettingsMutationReason.PROFILE_NOT_CONFIGURED)
         settings = await self._settings()
         if settings is None:
             return _blocked(None, SettingsMutationReason.SETTINGS_MISSING)
         if settings.version != expected_version:
             return _conflict()
+        if profile_id not in self._profile_ids:
+            return _blocked(settings, SettingsMutationReason.PROFILE_NOT_CONFIGURED)
         if profile_id == settings.profile_id:
             dialogue = await self._dialogue()
             if dialogue is not None and (

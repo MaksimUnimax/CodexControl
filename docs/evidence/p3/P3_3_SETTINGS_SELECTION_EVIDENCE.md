@@ -69,3 +69,32 @@ P3.3 itself calls no thread, turn, interrupt, delete, resume, Telegram, network,
 The P3.2 integration patch boundary was moved from the old unguarded `DialogueRepository.create_intent` boundary to the new guarded-create boundary. The accepted P3.1 enum assertion was updated only to include the required additive `SETTINGS_CHANGED` value; existing P3.1 behavior and count remain unchanged.
 
 Scope is limited to the P3.3 application/storage implementation, the required P3.2 compatibility path, focused tests, and this evidence file. Telegram UI and all later roadmap work remain out of scope.
+
+## Architect first repair
+
+This section records the first repair pass requested after independent architect review. It does not claim architect acceptance.
+
+- Rejected candidate: `7c9d6147ea7b5776dd2fceda880867bef9bc7045`.
+- Architect review comment: `5559001043`.
+- Corrected `select_profile` precedence: after static validation it now establishes durable settings existence and exact version authority before checking configured profile availability. Missing settings returns `SETTINGS_MISSING`, stale versions return `CONFLICT / STALE_SETTINGS`, and only a current settings row permits `PROFILE_NOT_CONFIGURED`.
+- Corrected corrupt-dialogue masking in both `replace_profile_no_dialogue` and `create_dialogue_if_settings_current`: an existing row is materialized before `STATE_CONFLICT` or `ALREADY_EXISTS`; noncanonical rows return `INVARIANT_VIOLATION`. The existing selection guard's materialization behavior is preserved.
+- Added direct corrupt-settings proof through a guard method. Corrupt settings and dialogue values produce finite invariant errors without mutation, clock calls or raw-value leakage.
+- Added an independent real reasoning mutation matrix for all nine non-IDLE live dialogue states, a real IDLE reasoning update, and same-model reset from non-default effort to the authenticated default plus already-default `NO_CHANGE`.
+- Added valid zero/signed-64-maximum clock proofs, invalid clock matrix proof, monotonic timestamp proof, and settings-version signed-64 overflow fail-closed proof.
+- Strengthened the profile-mutation-wins P3.2 race proof with direct durable INPUT absence, zero thread/start/turn-start/wait effects and no remaining delayed task.
+- Added arbitrary `SettingsSelectionError` constructor redaction and individual public-record repr proofs for profile/model options, view and mutation result.
+- The exact one-line P3.1 `SETTINGS_CHANGED` enum assertion adaptation remains the architect-authorized P3.1 scope clarification; no other P3.1 test file was changed.
+
+Repair verification counts:
+
+- P3.3 focused tests: 5 unit and 25 integration.
+- P3.2 regression: 2 unit and 21 integration.
+- P3.1 regression: 11 unit and 26 integration.
+- P2.C1: 5 integration and 1 acceptance.
+- P2.6b historical suites: 5 contract, 12 restart, 8 replay and 3 abrupt.
+- P1.10: 6 T0, 1 T1 and 4 T2.
+- Accepted pre-P3.3 full suite: 566; formula: `566 + 5 + 25 = 596`; observed full discovery: 596.
+- DDL SHA-256 remains `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`; schema/DDL is unchanged.
+- Tests use temporary SQLite and fake catalog/thread/turn/workdir ports. No real Codex, Telegram, production database/state root, credentials or network business effect was used.
+
+The P3.3 first repair is implementation evidence only. Issue #25 remains open and P3.4 was not started.

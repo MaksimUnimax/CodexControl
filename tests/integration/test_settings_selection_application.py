@@ -29,6 +29,7 @@ from codex_control.storage import (
     SqliteStorage,
     TurnJobRepository,
 )
+from codex_control.storage.core_repositories import MAX_SQLITE_INT
 
 
 class _Clock:
@@ -186,6 +187,52 @@ class SettingsSelectionApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         self.assertEqual(("profile-b", None, None, 1), (result.settings.profile_id, result.settings.model_id, result.settings.reasoning_effort, result.settings.version))
         self.assertEqual(1, self.clock.calls)
 
+    async def test_profile_precedence_establishes_settings_authority_first(self):
+        async def wipe():
+            await self.storage.write(lambda c: (
+                c.execute("DELETE FROM turn_jobs"),
+                c.execute("DELETE FROM transient_payloads"),
+                c.execute("DELETE FROM ingress_updates"),
+                c.execute("DELETE FROM dialogues"),
+                c.execute("DELETE FROM settings"),
+                None,
+            )[-1])
+
+        await wipe()
+        self.clock.calls = 0
+        self.catalog.calls.clear()
+        configured_missing = await self.service().select_profile("profile-b", expected_version=0)
+        unknown_missing = await self.service().select_profile("unknown-profile", expected_version=0)
+        self.assertEqual((SettingsMutationStatus.BLOCKED, SettingsMutationReason.SETTINGS_MISSING),
+                         (configured_missing.status, configured_missing.reason))
+        self.assertEqual((SettingsMutationStatus.BLOCKED, SettingsMutationReason.SETTINGS_MISSING),
+                         (unknown_missing.status, unknown_missing.reason))
+        self.assertEqual(0, self.clock.calls)
+        self.assertEqual([], self.catalog.calls)
+        self.assertIsNone(await DialogueRepository(self.storage).get_live())
+
+        current = await self.settings()
+        self.clock.calls = 0
+        self.catalog.calls.clear()
+        configured_stale = await self.service().select_profile("profile-b", expected_version=9)
+        unknown_stale = await self.service().select_profile("unknown-profile", expected_version=9)
+        for result in (configured_stale, unknown_stale):
+            self.assertEqual((SettingsMutationStatus.CONFLICT, SettingsMutationReason.STALE_SETTINGS),
+                             (result.status, result.reason))
+        self.assertEqual(0, self.clock.calls)
+        self.assertEqual([], self.catalog.calls)
+        self.assertEqual(current.record, await SettingsRepository(self.storage).get())
+
+        self.clock.calls = 0
+        self.catalog.calls.clear()
+        unknown_current = await self.service().select_profile("unknown-profile", expected_version=0)
+        self.assertEqual((SettingsMutationStatus.BLOCKED, SettingsMutationReason.PROFILE_NOT_CONFIGURED),
+                         (unknown_current.status, unknown_current.reason))
+        self.assertEqual(current.record, unknown_current.settings)
+        self.assertEqual(0, self.clock.calls)
+        self.assertEqual([], self.catalog.calls)
+        self.assertIsNone(await DialogueRepository(self.storage).get_live())
+
     async def test_profile_change_is_locked_by_every_live_state(self):
         states = (
             DialogueState.CREATING, DialogueState.IDLE, DialogueState.CREATE_UNKNOWN, DialogueState.ERROR,
@@ -230,6 +277,54 @@ class SettingsSelectionApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         self.assertEqual(SettingsMutationStatus.UPDATED, result.status)
         result = await self.service().select_reasoning_effort("low", expected_version=1)
         self.assertEqual(SettingsMutationStatus.NO_CHANGE, result.status)
+
+    async def test_reasoning_non_idle_matrix_is_an_independent_real_mutation_check(self):
+        states = (
+            DialogueState.CREATING, DialogueState.CREATE_UNKNOWN, DialogueState.ERROR,
+            DialogueState.TURN_RUNNING, DialogueState.INTERRUPTING, DialogueState.TURN_UNKNOWN,
+            DialogueState.DELETE_PENDING, DialogueState.DELETING, DialogueState.DELETE_UNKNOWN,
+        )
+        for state in states:
+            await self.clear(model="model-a", effort="high")
+            await self.put_dialogue_state(state)
+            before_settings = await SettingsRepository(self.storage).get()
+            before_dialogue = await DialogueRepository(self.storage).get_live()
+            self.clock.calls = 0
+            result = await self.service().select_reasoning_effort("low", expected_version=0)
+            self.assertEqual(
+                (SettingsMutationStatus.BLOCKED, SettingsMutationReason.DIALOGUE_NOT_IDLE),
+                (result.status, result.reason), state,
+            )
+            self.assertEqual(before_settings, await SettingsRepository(self.storage).get())
+            self.assertEqual(before_dialogue, await DialogueRepository(self.storage).get_live())
+            self.assertEqual(0, self.clock.calls)
+
+    async def test_idle_reasoning_selection_is_a_real_mutation_and_preserves_dialogue(self):
+        await self.settings(model="model-a", effort="high")
+        dialogue = await self.put_dialogue_state(DialogueState.IDLE)
+        self.clock.calls = 0
+        result = await self.service().select_reasoning_effort("low", expected_version=0)
+        self.assertEqual((SettingsMutationStatus.UPDATED, "model-a", "low", 1),
+                         (result.status, result.settings.model_id, result.settings.reasoning_effort, result.settings.version))
+        self.assertEqual(dialogue, await DialogueRepository(self.storage).get_live())
+        self.assertEqual(1, self.clock.calls)
+        self.assertEqual([("profile-a", True)], self.catalog.calls[-1:])
+
+    async def test_same_model_non_default_effort_resets_and_default_is_no_change(self):
+        await self.settings(model="model-a", effort="low")
+        dialogue = await self.put_dialogue_state(DialogueState.IDLE)
+        self.clock.calls = 0
+        result = await self.service().select_model("model-a", expected_version=0)
+        self.assertEqual((SettingsMutationStatus.UPDATED, "model-a", "high", 1),
+                         (result.status, result.settings.model_id, result.settings.reasoning_effort, result.settings.version))
+        self.assertEqual([("profile-a", True)], self.catalog.calls[-1:])
+        self.assertEqual(1, self.clock.calls)
+        self.assertEqual(dialogue, await DialogueRepository(self.storage).get_live())
+
+        self.clock.calls = 0
+        result = await self.service().select_model("model-a", expected_version=1)
+        self.assertEqual(SettingsMutationStatus.NO_CHANGE, result.status)
+        self.assertEqual(0, self.clock.calls)
 
     async def test_reasoning_validation_missing_model_unsupported_and_success(self):
         await self.clear(model=None, effort=None)
@@ -276,6 +371,67 @@ class SettingsSelectionApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         self.storage = await SqliteStorage.open(self.path, now_ms=lambda: 1)
         self.assertEqual("profile-b", (await SettingsRepository(self.storage).get()).profile_id)
 
+    async def test_profile_guard_materializes_corrupt_dialogue_before_lock_result(self):
+        before = await self.settings()
+        await self.put_dialogue_state(DialogueState.IDLE)
+        await self.storage.write(lambda c: (
+            c.execute(
+                "UPDATE dialogues SET thread_id = NULL, state = 'DELETE_PENDING', "
+                "last_error_class = ? WHERE dialogue_id = 'dialogue'",
+                ("PRIVATE_CORRUPT_DIALOGUE_MUST_NOT_LEAK",),
+            ), None,
+        )[-1])
+        self.clock.calls = 0
+        with self.assertRaises(RepositoryError) as raised:
+            await SettingsDialogueGuardRepository(self.storage, now_ms=self.clock).replace_profile_no_dialogue(
+                expected_version=0, profile_id="profile-b"
+            )
+        self.assertEqual(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+        self.assertNotIn("PRIVATE_CORRUPT_DIALOGUE_MUST_NOT_LEAK", str(raised.exception) + repr(raised.exception))
+        self.assertEqual(before.record, await SettingsRepository(self.storage).get())
+        self.assertEqual(0, self.clock.calls)
+
+    async def test_create_guard_materializes_corrupt_dialogue_before_already_exists(self):
+        before = await self.settings()
+        await self.put_dialogue_state(DialogueState.IDLE)
+        await self.storage.write(lambda c: (
+            c.execute(
+                "UPDATE dialogues SET thread_id = NULL, state = 'DELETE_PENDING', "
+                "last_error_class = ? WHERE dialogue_id = 'dialogue'",
+                ("PRIVATE_CORRUPT_DIALOGUE_MUST_NOT_LEAK",),
+            ), None,
+        )[-1])
+        self.clock.calls = 0
+        with self.assertRaises(RepositoryError) as raised:
+            await SettingsDialogueGuardRepository(self.storage, now_ms=self.clock).create_dialogue_if_settings_current(
+                dialogue_id="new-dialogue", server_id="server", profile_id="profile-a",
+                expected_settings_version=0, expected_model_id="model-a", expected_reasoning_effort="high",
+            )
+        self.assertEqual(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+        self.assertNotIn("PRIVATE_CORRUPT_DIALOGUE_MUST_NOT_LEAK", str(raised.exception) + repr(raised.exception))
+        self.assertEqual(before.record, await SettingsRepository(self.storage).get())
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM dialogues").fetchone()[0]))
+        self.assertEqual(0, self.clock.calls)
+
+    async def test_guard_materializes_corrupt_settings_as_invariant(self):
+        await self.settings()
+        corrupt = "PRIVATE_CORRUPT_SETTINGS_VALUE\x00MUST_NOT_LEAK"
+        await self.storage.write(lambda c: (
+            c.execute("UPDATE settings SET profile_id = ?", (corrupt,)), None
+        )[-1])
+        self.clock.calls = 0
+        with self.assertRaises(RepositoryError) as raised:
+            await SettingsDialogueGuardRepository(self.storage, now_ms=self.clock).replace_profile_no_dialogue(
+                expected_version=0, profile_id="profile-b"
+            )
+        self.assertEqual(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+        self.assertNotIn(corrupt, str(raised.exception) + repr(raised.exception))
+        stored = await self.storage.read(lambda c: tuple(c.execute(
+            "SELECT profile_id, version FROM settings"
+        ).fetchone()))
+        self.assertEqual((corrupt, 0), stored)
+        self.assertEqual(0, self.clock.calls)
+
     async def test_guard_corruption_categories_are_redacted(self):
         await self.settings()
         with self.assertRaises(RepositoryError) as raised:
@@ -288,13 +444,45 @@ class SettingsSelectionApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
 
     async def test_clock_failures_are_finite_and_do_not_commit(self):
         await self.settings()
-        for value in (True, -1, 2**63, 1.0, RuntimeError("PRIVATE_CLOCK_SENTINEL")):
+        for value in (True, False, -1, 2**63, 1.0, "not-an-int", RuntimeError("PRIVATE_CLOCK_SENTINEL")):
             clock = _Clock(value)
             with self.subTest(value=repr(value)), self.assertRaises(SettingsSelectionError) as raised:
                 await self.service(clock=clock).select_profile("profile-b", expected_version=0)
             self.assertEqual(SettingsSelectionErrorCategory.STORAGE, raised.exception.category)
             self.assertNotIn("PRIVATE_CLOCK_SENTINEL", repr(raised.exception))
             self.assertEqual(0, (await SettingsRepository(self.storage).get()).version)
+
+    async def test_clock_zero_and_signed_64_max_are_valid_and_monotonic(self):
+        await self.settings(model="model-a", effort="high")
+        self.clock.value = 0
+        self.clock.calls = 0
+        zero = await self.service().select_reasoning_effort("low", expected_version=0)
+        self.assertEqual(SettingsMutationStatus.UPDATED, zero.status)
+        self.assertEqual(10, zero.settings.updated_at_ms)
+        self.assertEqual(1, self.clock.calls)
+
+        await self.clear(model="model-a", effort="high")
+        self.clock.value = MAX_SQLITE_INT
+        self.clock.calls = 0
+        maximum = await self.service().select_profile("profile-b", expected_version=0)
+        self.assertEqual(SettingsMutationStatus.UPDATED, maximum.status)
+        self.assertEqual(MAX_SQLITE_INT, maximum.settings.updated_at_ms)
+        self.assertEqual(1, self.clock.calls)
+
+    async def test_settings_version_max_fails_closed_without_wrap_or_clock(self):
+        await self.settings()
+        await self.storage.write(lambda c: (
+            c.execute("UPDATE settings SET version = ?", (MAX_SQLITE_INT,)), None
+        )[-1])
+        self.clock.calls = 0
+        with self.assertRaises(SettingsSelectionError) as raised:
+            await self.service().select_profile("profile-b", expected_version=MAX_SQLITE_INT)
+        self.assertEqual(SettingsSelectionErrorCategory.INVARIANT, raised.exception.category)
+        current = await self.storage.read(lambda c: tuple(c.execute(
+            "SELECT profile_id, model_id, reasoning_effort, version FROM settings"
+        ).fetchone()))
+        self.assertEqual(("profile-a", "model-a", "high", MAX_SQLITE_INT), current)
+        self.assertEqual(0, self.clock.calls)
 
     async def test_profile_mutation_wins_p3_2_race_has_no_effects(self):
         await self.settings()
@@ -323,8 +511,11 @@ class SettingsSelectionApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         self.assertIsNone(await DialogueRepository(self.storage).get_live())
         self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]))
         self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM ingress_updates").fetchone()[0]))
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM transient_payloads WHERE kind = 'INPUT'").fetchone()[0]))
         self.assertEqual([], thread.calls)
         self.assertEqual([], turns.start_calls)
+        self.assertEqual([], turns.wait_calls)
+        self.assertEqual([], [item for item in asyncio.all_tasks() if item is not asyncio.current_task() and not item.done()])
 
     async def test_p3_2_create_wins_profile_is_locked_then_completes(self):
         await self.settings()

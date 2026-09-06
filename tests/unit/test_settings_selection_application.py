@@ -90,14 +90,35 @@ class SettingsSelectionApplicationUnitTests(unittest.IsolatedAsyncioTestCase):
             profile_id="profile", model_id="model", reasoning_effort="high"
         )
         view = await self.service().get_view()
+        profile_option = view.profiles[0]
+        model_option = view.models[0]
         self.assertEqual((SettingsProfileOption("profile", "Profile"),), view.profiles)
         self.assertEqual(("model",), tuple(option.model_id for option in view.models))
-        self.assertNotIn("PRIVATE/CODEX_HOME/MUST_NOT_LEAK", repr(view))
+        self.assertNotIn("/PRIVATE/CODEX_HOME/MUST_NOT_LEAK", repr(profile_option))
+        self.assertNotIn("PRIVATE_WIRE_MODEL_MUST_NOT_LEAK", repr(model_option))
+        self.assertNotIn("/PRIVATE/CODEX_HOME/MUST_NOT_LEAK", repr(view))
         self.assertNotIn("PRIVATE_WIRE_MODEL_MUST_NOT_LEAK", repr(view))
         self.assertNotIn("thread_id", repr(view))
         self.assertNotIn("PRIVATE_CATALOG_ERROR_MUST_NOT_LEAK", repr(view))
+        mutation = SettingsMutationResult(SettingsMutationStatus.NO_CHANGE, view.settings, None)
+        self.assertNotIn("/PRIVATE/CODEX_HOME/MUST_NOT_LEAK", repr(mutation))
+        self.assertNotIn("PRIVATE_WIRE_MODEL_MUST_NOT_LEAK", repr(mutation))
         with self.assertRaises(FrozenInstanceError):
             view.models = ()
+
+    def test_public_error_constructor_and_individual_record_redaction(self):
+        error = SettingsSelectionError("PRIVATE_SETTINGS_ERROR_MUST_NOT_LEAK")
+        self.assertEqual(SettingsSelectionErrorCategory.INVARIANT, error.category)
+        self.assertNotIn("PRIVATE_SETTINGS_ERROR_MUST_NOT_LEAK", str(error) + repr(error))
+        profile_option = SettingsProfileOption("profile", "Profile")
+        model_option = SettingsModelOption("model", "Model", ("high",), "high", True)
+        view = SettingsSelectionView(None, None, None, (profile_option,), (model_option,), True)
+        mutation = SettingsMutationResult(SettingsMutationStatus.BLOCKED, None, SettingsMutationReason.SETTINGS_MISSING)
+        for record in (profile_option, model_option, view, mutation):
+            with self.subTest(record=type(record).__name__):
+                self.assertNotIn("/PRIVATE/CODEX_HOME/MUST_NOT_LEAK", repr(record))
+                self.assertNotIn("PRIVATE_WIRE_MODEL_MUST_NOT_LEAK", repr(record))
+                self.assertNotIn("PRIVATE_SETTINGS_ERROR_MUST_NOT_LEAK", repr(record))
 
     async def test_mutation_contract_when_settings_are_missing(self):
         service = self.service()

@@ -86,7 +86,9 @@ class SettingsDialogueGuardRepository:
             current = _materialize_settings(row)
             if current.version != expected_version:
                 raise RepositoryError(RepositoryErrorCategory.VERSION_CONFLICT)
-            if _dialogue_row(connection) is not None:
+            dialogue_row = _dialogue_row(connection)
+            if dialogue_row is not None:
+                _materialize_dialogue(dialogue_row)
                 raise RepositoryError(RepositoryErrorCategory.STATE_CONFLICT)
             version = _next_version(current.version)
             now = _validate_clock(self._clock)
@@ -183,7 +185,9 @@ class SettingsDialogueGuardRepository:
                 or settings.reasoning_effort != expected_reasoning_effort
             ):
                 raise _invariant()
-            if _dialogue_row(connection) is not None:
+            dialogue_row = _dialogue_row(connection)
+            if dialogue_row is not None:
+                _materialize_dialogue(dialogue_row)
                 raise RepositoryError(RepositoryErrorCategory.ALREADY_EXISTS)
             now = _validate_clock(self._clock)
             connection.execute(
