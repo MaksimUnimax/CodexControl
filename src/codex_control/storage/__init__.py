@@ -72,6 +72,10 @@ from .approval_records import (
 )
 from .approval_repositories import ApprovalRepository
 from .retention import RetentionRepository, RetentionSweepResult
+from .deletion_records import DeletionFinalizeResult, DeletionTombstoneRecord
+from .deletion_repositories import DeletionRepository
+from .error_records import ErrorFingerprintRecord
+from .error_repositories import ErrorFingerprintRepository
 from .repository_errors import RepositoryError, RepositoryErrorCategory
 
 __all__ = [
@@ -134,4 +138,9 @@ __all__ = [
     "ApprovalRepository",
     "RetentionRepository",
     "RetentionSweepResult",
+    "DeletionTombstoneRecord",
+    "DeletionFinalizeResult",
+    "DeletionRepository",
+    "ErrorFingerprintRecord",
+    "ErrorFingerprintRepository",
 ]

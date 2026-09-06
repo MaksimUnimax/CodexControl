@@ -329,7 +329,9 @@ class CoreStateRepositoryTests(unittest.IsolatedAsyncioTestCase):
                     storage = await self.open()
                     dialogue_id = f"dialogue-{index}"
                     thread_id = None if state == "CREATING" else f"thread-{index}"
-                    last_error = None if state == "CREATING" else f"ERR:{index}"
+                    last_error = None if state in (
+                        "CREATING", "DELETE_PENDING", "DELETING"
+                    ) else f"ERR:{index}"
                     await storage.write(lambda c, values=(
                         dialogue_id, "server-materialized", "profile-materialized", thread_id,
                         state, 7, 100, 200, last_error,
