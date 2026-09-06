@@ -419,7 +419,7 @@ class TurnJobsAndPayloadsTests(unittest.IsolatedAsyncioTestCase):
                 TurnJobState.DELIVERY_PENDING: ("thread", "turn", None),
                 TurnJobState.DELIVERING: ("thread", "turn", None),
                 TurnJobState.DELIVERED: ("thread", "turn", None),
-                TurnJobState.DELIVERY_UNKNOWN: ("thread", "turn", None),
+                TurnJobState.DELIVERY_UNKNOWN: ("thread", "turn", "TELEGRAM_NETWORK_AMBIGUOUS"),
             }
             for state, (thread, codex_turn, error) in canonical.items():
                 await storage.write(lambda c, s=state, t=thread, ct=codex_turn, e=error: update_shape(c, s, t, ct, e))

@@ -11,9 +11,7 @@ from .approval_records import ApprovalState
 from .core_repositories import _default_clock, _validate_clock
 from .repository_errors import RepositoryError, RepositoryErrorCategory
 from .sqlite import SqliteStorage
-from .transient_payloads import TransientPayloadKind
-from .turn_job_records import TurnJobState
-from .turn_job_repositories import _materialize_payload, _payload_select, _payload_row
+from .turn_job_repositories import _materialize_payload, _payload_select
 
 
 @dataclass(frozen=True)
@@ -57,15 +55,33 @@ class RetentionRepository:
                 if changed != 1:
                     raise RepositoryError(RepositoryErrorCategory.INVARIANT_VIOLATION)
 
+            # Apply every protection predicate in SQL before LIMIT. This keeps
+            # an old protected row from hiding later eligible content forever.
             candidates = connection.execute(
-                _payload_select() + " WHERE expires_at_ms <= ? ORDER BY expires_at_ms, payload_id LIMIT ?",
+                _payload_select().replace(
+                    "FROM transient_payloads", "FROM transient_payloads AS p"
+                )
+                + " WHERE p.expires_at_ms <= ?"
+                + " AND NOT EXISTS ("
+                + "SELECT 1 FROM delivery_segments AS ds "
+                + "WHERE ds.payload_id = p.payload_id "
+                + "AND ds.state IN ('PENDING', 'SENDING', 'UNKNOWN'))"
+                + " AND NOT EXISTS ("
+                + "SELECT 1 FROM approvals AS a "
+                + "WHERE a.display_payload_id = p.payload_id AND a.state = 'PENDING')"
+                + " AND NOT EXISTS ("
+                + "SELECT 1 FROM turn_jobs AS j WHERE j.job_id = p.job_id AND ("
+                + "(p.kind = 'INPUT' AND j.state IN "
+                + "('RECEIVED', 'CLAIMED', 'CODEX_STARTING', 'CODEX_RUNNING'))"
+                + " OR (p.kind = 'OUTPUT' AND j.state IN "
+                + "('CODEX_COMPLETED', 'DELIVERY_PENDING', 'DELIVERING', 'DELIVERY_UNKNOWN'))"
+                + "))"
+                + " ORDER BY p.expires_at_ms, p.payload_id LIMIT ?",
                 (now, limit),
             ).fetchall()
+            selected = tuple(_materialize_payload(connection, row) for row in candidates)
             deleted = 0
-            for row in candidates:
-                payload = _materialize_payload(connection, row)
-                if _protected(connection, payload.payload_id, payload.kind, payload.job_id):
-                    continue
+            for payload in selected:
                 changed = connection.execute(
                     "DELETE FROM transient_payloads WHERE payload_id = ?", (payload.payload_id,)
                 ).rowcount
@@ -75,30 +91,3 @@ class RetentionRepository:
             return RetentionSweepResult(len(due), deleted)
 
         return await self._storage.write(write)
-
-
-def _protected(connection: Any, payload_id: str, kind: TransientPayloadKind,
-               job_id: str | None) -> bool:
-    if connection.execute(
-        "SELECT 1 FROM delivery_segments WHERE payload_id = ? "
-        "AND state IN ('PENDING', 'SENDING', 'UNKNOWN') LIMIT 1", (payload_id,)
-    ).fetchone() is not None:
-        return True
-    if connection.execute(
-        "SELECT 1 FROM approvals WHERE display_payload_id = ? AND state = 'PENDING' LIMIT 1",
-        (payload_id,),
-    ).fetchone() is not None:
-        return True
-    if job_id is None:
-        return False
-    if kind is TransientPayloadKind.INPUT:
-        protected_states = ("RECEIVED", "CLAIMED", "CODEX_STARTING", "CODEX_RUNNING")
-    elif kind is TransientPayloadKind.OUTPUT:
-        protected_states = ("CODEX_COMPLETED", "DELIVERY_PENDING", "DELIVERING", "DELIVERY_UNKNOWN")
-    else:
-        return False
-    placeholders = ", ".join("?" for _ in protected_states)
-    return connection.execute(
-        f"SELECT 1 FROM turn_jobs WHERE job_id = ? AND state IN ({placeholders}) LIMIT 1",
-        (job_id, *protected_states),
-    ).fetchone() is not None

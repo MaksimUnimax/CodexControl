@@ -228,7 +228,11 @@ def _materialize_segment(
     )
     payload = _payload_for_segment(
         connection, segment, job,
-        required=state in (DeliverySegmentState.PENDING, DeliverySegmentState.SENDING),
+        required=state in (
+            DeliverySegmentState.PENDING,
+            DeliverySegmentState.SENDING,
+            DeliverySegmentState.UNKNOWN,
+        ),
     )
     return segment, payload
 
@@ -277,6 +281,76 @@ def _validate_delivery_dialogue(connection: Any, job: TurnJobRecord) -> None:
         or dialogue.thread_id != job.thread_id
     ):
         raise _invariant()
+
+
+def _validate_delivery_coherence(
+    connection: Any,
+    job: TurnJobRecord,
+    segments: list[tuple[DeliverySegmentRecord, TransientPayloadRecord | None]],
+) -> None:
+    """Validate the durable job phase against its complete delivery plan."""
+    states = [segment.state for segment, _ in segments]
+    delivery_states = (
+        TurnJobState.DELIVERY_PENDING,
+        TurnJobState.DELIVERING,
+        TurnJobState.DELIVERED,
+        TurnJobState.DELIVERY_UNKNOWN,
+    )
+    if not segments:
+        if job.state in delivery_states:
+            raise _invariant()
+        return
+
+    if job.state not in delivery_states and job.state is not TurnJobState.FAILED:
+        raise _invariant()
+    _validate_delivery_dialogue(connection, job)
+
+    if job.state is TurnJobState.DELIVERY_PENDING:
+        if any(state is not DeliverySegmentState.PENDING for state in states):
+            raise _invariant()
+        return
+    if job.state is TurnJobState.DELIVERED:
+        if any(state is not DeliverySegmentState.CONFIRMED for state in states):
+            raise _invariant()
+        return
+    if job.state is TurnJobState.DELIVERY_UNKNOWN:
+        if DeliverySegmentState.UNKNOWN not in states or any(
+            state in (DeliverySegmentState.SENDING, DeliverySegmentState.FAILED)
+            for state in states
+        ):
+            raise _invariant()
+        return
+    if job.state is TurnJobState.FAILED:
+        if job.codex_turn_id is None or states.count(DeliverySegmentState.FAILED) != 1 or any(
+            state in (DeliverySegmentState.SENDING, DeliverySegmentState.UNKNOWN)
+            for state in states
+        ):
+            raise _invariant()
+        return
+
+    # DELIVERING is C* (S)? P*. A confirmed segment can never follow work
+    # that is still pending or being sent, and there is at most one SENDING.
+    if DeliverySegmentState.UNKNOWN in states or DeliverySegmentState.FAILED in states:
+        raise _invariant()
+    sending_count = states.count(DeliverySegmentState.SENDING)
+    if sending_count > 1 or all(state is DeliverySegmentState.CONFIRMED for state in states):
+        raise _invariant()
+    phase = "CONFIRMED"
+    for state in states:
+        if phase == "CONFIRMED":
+            if state is DeliverySegmentState.SENDING:
+                phase = "SENDING"
+            elif state is DeliverySegmentState.PENDING:
+                phase = "PENDING"
+            elif state is not DeliverySegmentState.CONFIRMED:
+                raise _invariant()
+        elif phase == "SENDING":
+            if state is DeliverySegmentState.PENDING:
+                phase = "PENDING"
+            else:
+                raise _invariant()
+        elif state is not DeliverySegmentState.PENDING:
+            raise _invariant()
 class _RepositoryBase:
     def __init__(self, storage: SqliteStorage, *, now_ms: Callable[[], int] | None = None) -> None:
         if not isinstance(storage, SqliteStorage) or (now_ms is not None and not callable(now_ms)):
@@ -296,16 +370,18 @@ class DeliverySegmentRepository(_RepositoryBase):
             raise _invalid()
 
         def read(connection: Any) -> DeliverySegmentRecord | None:
-            row = _segment_row(connection, job_id, sequence)
-            if row is None:
-                return None
             job_row = _job_row(connection, job_id)
             if job_row is None:
-                raise _invariant()
-            job = _materialize_job(job_row, delivery_shapes=True)
-            _validate_delivery_job_shape(job)
-            _validate_delivery_dialogue(connection, job)
-            return _materialize_segment(connection, row, job=job)[0]
+                if _segment_row(connection, job_id, sequence) is not None:
+                    raise _invariant()
+                return None
+            job = _materialize_job(job_row)
+            segments = _load_segments(connection, job)
+            _validate_delivery_coherence(connection, job, segments)
+            for segment, _ in segments:
+                if segment.sequence == sequence:
+                    return segment
+            return None
 
         return await self._storage.read(read)
 
@@ -316,10 +392,10 @@ class DeliverySegmentRepository(_RepositoryBase):
             job_row = _job_row(connection, job_id)
             if job_row is None:
                 raise _not_found()
-            job = _materialize_job(job_row, delivery_shapes=True)
-            _validate_delivery_job_shape(job)
-            _validate_delivery_dialogue(connection, job)
-            return tuple(segment for segment, _ in _load_segments(connection, job))
+            job = _materialize_job(job_row)
+            segments = _load_segments(connection, job)
+            _validate_delivery_coherence(connection, job, segments)
+            return tuple(segment for segment, _ in segments)
 
         return await self._storage.read(read)
 
@@ -351,7 +427,7 @@ class DeliverySegmentRepository(_RepositoryBase):
             job_row = _job_row(connection, job_id)
             if job_row is None:
                 raise _not_found()
-            job = _materialize_job(job_row, delivery_shapes=True)
+            job = _materialize_job(job_row)
             _validate_delivery_job_shape(job)
             if job.version != expected_job_version:
                 raise RepositoryError(RepositoryErrorCategory.VERSION_CONFLICT)
@@ -425,7 +501,7 @@ class DeliverySegmentRepository(_RepositoryBase):
             row = _job_row(connection, job_id)
             if row is None:
                 raise _not_found()
-            job = _materialize_job(row, delivery_shapes=True)
+            job = _materialize_job(row)
             _validate_delivery_job_shape(job)
             _validate_delivery_dialogue(connection, job)
             if job.version != expected_job_version:
@@ -433,6 +509,7 @@ class DeliverySegmentRepository(_RepositoryBase):
             if job.state not in (TurnJobState.DELIVERY_PENDING, TurnJobState.DELIVERING):
                 raise _state_conflict()
             segments = _load_segments(connection, job)
+            _validate_delivery_coherence(connection, job, segments)
             if not segments:
                 raise _state_conflict()
             if any(segment.state in (DeliverySegmentState.SENDING,
@@ -516,13 +593,15 @@ class DeliverySegmentRepository(_RepositoryBase):
             job_row = _job_row(connection, job_id)
             if job_row is None:
                 raise _not_found()
-            job = _materialize_job(job_row, delivery_shapes=True)
+            job = _materialize_job(job_row)
             _validate_delivery_job_shape(job)
             _validate_delivery_dialogue(connection, job)
             if job.version != expected_job_version:
                 raise RepositoryError(RepositoryErrorCategory.VERSION_CONFLICT)
             if job.state is not TurnJobState.DELIVERING:
                 raise _state_conflict()
+            segments = _load_segments(connection, job)
+            _validate_delivery_coherence(connection, job, segments)
             row = _segment_row(connection, job.job_id, sequence)
             if row is None:
                 raise _not_found()

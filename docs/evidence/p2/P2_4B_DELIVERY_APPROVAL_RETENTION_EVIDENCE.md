@@ -123,3 +123,79 @@ file was otherwise changed.
   output; P2.4b introduced no warning.
 - The final implementation commit SHA and push result are reported separately
   in the executor report after commit/push.
+
+## Architect first repair pass
+
+Rejected candidate: `e52bd9c4eb6a7c87ecd7fbb1b84297e4421ddf29`.
+
+This is factual repair evidence only. P2.4b remains subject to independent
+architect review and acceptance; this section does not claim acceptance and
+does not start or recommend P2.5.
+
+Repair and proof coverage:
+
+- Global delivery job-shape repair: `_materialize_job()` now enforces the
+  ADR-0022 shapes for every materialization, including ordinary
+  `TurnJobRepository.get()` and approval/retention consumers. P2.4a-owned
+  states retain their prior shape rules. The deferred DELIVERY_UNKNOWN fixture
+  in `test_turn_jobs_payloads.py` was updated only to include its canonical
+  sanitized error class.
+- UNKNOWN payload invariant: PENDING, SENDING and UNKNOWN delivery segments
+  require a canonical DISPLAY payload with exact job/dialogue ownership and
+  hash. CONFIRMED and FAILED remain the only delivery terminal states that may
+  retain a NULL payload reference after safe deletion.
+- Delivery job/segment state coherence: public segment reads and delivery
+  mutation claims validate the complete ordered plan. Canonical pre-delivery
+  CODEX_RUNNING/CODEX_COMPLETED jobs with no plan return `()`, while delivery
+  rows require coherent DELIVERY_PENDING, DELIVERING, DELIVERED,
+  DELIVERY_UNKNOWN or delivery-FAILED state relationships.
+- Approval corruption classification: create_pending first materializes the
+  selected payload canonically. Corrupt content/hash/owner failures remain
+  `INVARIANT_VIOLATION`; a canonical DISPLAY payload or canonical payload for
+  another job/dialogue returns `STATE_CONFLICT`. Failed preconditions do not
+  call the clock.
+- Retention starvation repair: the sweep query applies delivery, approval and
+  active-job protection predicates before deterministic `LIMIT`, orders by
+  `expires_at_ms, payload_id`, and materializes all selected rows before any
+  delete. Protected expired rows therefore cannot indefinitely hide eligible
+  rows.
+- Retention protection matrix: deterministic table-driven tests cover active
+  INPUT in RECEIVED/CLAIMED/CODEX_STARTING/CODEX_RUNNING, recovery-relevant
+  OUTPUT in CODEX_COMPLETED/DELIVERY_PENDING/DELIVERING/DELIVERY_UNKNOWN,
+  DISPLAY referenced by PENDING/SENDING/UNKNOWN, APPROVAL referenced by
+  PENDING, and terminal-safe DISPLAY/APPROVAL/OUTPUT deletion with FK
+  references set NULL while jobs, delivery rows and approval rows remain.
+- Approval proofs: live INTEGER and STRING wire duplicates are blocked while
+  PENDING; signed-64 and string-length/NUL boundaries are covered; fresh DENY,
+  callback expiry with and without due approval, privacy precedence for wrong
+  user/chat over consumed/expired/stale subjects, and persisted payload
+  corruption are covered.
+- Delivery terminal/no-retry proofs: actual delivery FAILED captures the
+  sanitized error, attempt 1 and IDLE dialogue; later claim is a conflict.
+  EDIT confirmation mismatch is rejected without clock/mutation; version
+  overflow and failed preconditions are checked before clock; UNKNOWN remains
+  terminal and its payload is retained.
+- Cancellation ownership: delivery claim, atomic approval callback claim and
+  retention sweep use blocking-clock cancellation proofs. Repeated task
+  cancellation does not escape the submitted DB operation, and each durable
+  mutation occurs once.
+
+Validation results for this repair pass:
+
+- P2.4b unit: `6`.
+- P2.4b integration: `23`.
+- P2.4a unit/integration: `8 / 31`.
+- P2.3 unit/integration: `7 / 28`.
+- P2.2 unit/integration: `6 / 20`.
+- P2.1 unit/integration: `8 / 31`.
+- P1.10 T0/T1/T2: `6 / 1 / 4`.
+- `BASE_ACCEPTED_FULL_TESTS=387`.
+- `EXPECTED_FULL_TESTS=387 + 6 + 23 = 416`.
+- `OBSERVED_FULL_TESTS=416`, all passing.
+- Compileall, required import, DDL SHA, `git diff --check`, prior-slice
+  regressions, T0/T1/T2 and existing focused P1 suites passed.
+- The known P1.6 pending-task warning was not observed in this repair pass;
+  no P2.4b warning was introduced.
+- Tests used temporary SQLite databases only. No production state root,
+  production DB, service, Telegram call, Codex call, secret or runtime
+  dependency was touched.

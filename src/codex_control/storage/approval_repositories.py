@@ -277,14 +277,17 @@ class ApprovalRepository(_RepositoryBase):
                 payload_row = _payload_row(connection, display_payload_id)
                 if payload_row is None:
                     raise _not_found()
-                try:
-                    _validate_approval_display(
-                        connection, payload_row, job_id=job.job_id, dialogue_id=dialogue.dialogue_id,
-                    )
-                except RepositoryError as error:
-                    if error.category is RepositoryErrorCategory.INVARIANT_VIOLATION:
-                        raise _error(RepositoryErrorCategory.STATE_CONFLICT) from None
-                    raise
+                # First establish that the persisted payload is canonical. A
+                # canonical payload selected with the wrong kind or owner is a
+                # caller state conflict; corrupt payload bytes/hash/ownership
+                # remain invariant failures from materialization.
+                payload = _materialize_payload(connection, payload_row)
+                if (
+                    payload.kind is not TransientPayloadKind.APPROVAL
+                    or payload.job_id != job.job_id
+                    or payload.dialogue_id != dialogue.dialogue_id
+                ):
+                    raise _error(RepositoryErrorCategory.STATE_CONFLICT)
             if wire_type == "INTEGER":
                 rows = connection.execute(
                     _approval_select() + " WHERE profile_id = ? AND wire_request_id_type = 'INTEGER' "
