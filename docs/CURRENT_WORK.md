@@ -14,79 +14,58 @@ Date: 2026-09-06
 - P2.5 accepted: `87ef37cf245d79f6d20b507b13c0f36014c1580f`.
 - P2.6a accepted: `e6f59739b3091d00894d3434abb5a99e2af72885`.
 - P2.6b historical final-P2 acceptance: `9db97f0dda109b4d0c0ecfa5f167733905df2766`; historical full suite 500.
-- Frozen schema-v1 DDL SHA-256: `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
-- ADR-0017..0026 remain factual accepted/historical authority except where explicitly superseded by ADR-0027.
-- ADR-0027 is binding current authority for the narrow retention-compatible JOB duplicate replay correction.
+- P2.C1 accepted correction: `4b6d226ce647fbf38a6ada7b82947be7ad3e30c2`; corrected full suite 506.
+- `docs/evidence/p2/P2_C1_ARCHITECT_ACCEPTANCE_2026-09-06.md` is the architect correction acceptance record.
+- Frozen schema-v1 DDL SHA-256 remains `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+- ADR-0017..0026 remain accepted/historical authority except where ADR-0027 explicitly corrects duplicate replay semantics.
+- ADR-0026 + ADR-0027 are binding together for resumed P3.1.
 
-## Why final P2 replay authority is narrowly reopened
-Independent architect review of P3.1 candidate `05a268781b4b7189271b64f55a3b21f30c259269` found a deterministic cross-slice defect:
+## P2.C1 accepted correction
+The accepted duplicate authority is now retention-compatible:
 
-1. P2.4a duplicate JOB replay requires exactly one INPUT payload and treats missing INPUT as `INVARIANT_VIOLATION`.
-2. P2.4b retention intentionally permits expired INPUT deletion after a job leaves `RECEIVED|CLAIMED|CODEX_STARTING|CODEX_RUNNING`.
-3. P2.6a intentionally keeps terminal job + JOB-ingress metadata for up to seven days.
-4. Therefore a canonical retained duplicate may have job+ingress but no INPUT. Same-update replay must remain a no-effect duplicate rather than fail as corruption.
+- INPUT is required for retained JOB duplicate reconstruction only in `RECEIVED`, `CLAIMED`, `CODEX_STARTING`, `CODEX_RUNNING`.
+- Missing INPUT is canonical after legal transient retention in `CODEX_COMPLETED`, `FAILED`, `UNKNOWN`, `DELIVERY_PENDING`, `DELIVERING`, `DELIVERED`, `DELIVERY_UNKNOWN`.
+- `TurnJobRepository.claim_ingress()` returns the exact durable `DUPLICATE` job/ingress with `input_payload=None` for those optional states; no clock, mutation, content reconstruction or second job.
+- Any retained INPUT still must be exactly one canonical owner/hash match.
+- `TransientPayloadRepository.get_input_for_job()` remains strict and returns `NOT_FOUND` when content has been legally retained away.
+- `claim_turn()` remains strict: `RECEIVED` without INPUT is invariant.
 
-This is an accepted dependency defect, not a P3 workaround opportunity. P3.1 is paused until the correction is implemented and architect-accepted.
+## P3.1 review status
+Rejected candidate:
 
-## P2.C1 exact architect authority
-Binding source: `docs/adr/0027-retention-compatible-job-replay.md` plus accepted ADR-0021/0022/0024 and final P2 evidence.
+`05a268781b4b7189271b64f55a3b21f30c259269`
 
-### INPUT-required states
-Missing INPUT remains `INVARIANT_VIOLATION` for:
-- RECEIVED
-- CLAIMED
-- CODEX_STARTING
-- CODEX_RUNNING
+Issue: #19.
 
-These are exactly the job states whose INPUT is protected by accepted P2.4b retention.
+That candidate is reference material only and MUST NOT be merged/rebased onto corrected main. P3.1 must be reapplied from a fresh architect branch based on the corrected authority.
 
-### Retention-compatible INPUT-optional states
-Zero retained INPUT rows is canonical for duplicate replay when the exact retained job is:
-- CODEX_COMPLETED
-- FAILED
-- UNKNOWN
-- DELIVERY_PENDING
-- DELIVERING
-- DELIVERED
-- DELIVERY_UNKNOWN
+Confirmed issues to repair from the rejected candidate:
 
-If an INPUT row exists in any state, it must remain exactly one canonical row with exact owners/hash. Multiple/corrupt/mismatched INPUT is always invariant.
+1. Existing JOB duplicate handling incorrectly required `get_input_for_job()` success even after legal P2.C1 retention. P3.1 must allow missing INPUT only for the exact ADR-0027 optional states, while retained corrupt/multiple INPUT remains fail-closed.
+2. The atomic `claim_ingress()` race duplicate path must likewise accept `input_payload=None` only for the exact optional states.
+3. Authenticated model selection must explicitly call/validate the selected catalog descriptor and reject `descriptor.hidden == True` as `BLOCKED / MODEL_UNAVAILABLE`; merely validating reasoning effort is insufficient.
+4. The rejected test suite materially under-proved several reported PASS claims. Resumed P3.1 must add deterministic coverage for the full blocked-state matrix, same-update concurrency, start local/unexpected errors, wait failure, empty output, output TTL/bounds, clock/ID failures, retained-INPUT duplicate replay, and deterministic no-queue winner accounting.
+5. Concurrency tests must not assume a fixed update ID loses the race; they must derive the admitted/rejected request from actual results and verify only the admitted request has durable ingress/job/effect.
 
-### Repository correction
-`TurnJobRepository.claim_ingress(...)` duplicate path may return:
+## P3 split
+- **P3.1** — existing-dialogue prompt execution and terminal capture.
+- **P3.2** — lazy `thread/start` + first-turn orchestration and create-failure/recovery boundary.
+- **P3.3** — profile/model/reasoning settings service with authenticated catalog validation and dialogue locks.
+- **P3.4** — durable interrupt orchestration over P1.8 plus required `INTERRUPTING` transition/recovery authority.
+- **P3.5** — hard-delete orchestration over P1.9 + final P3 recovery/application acceptance.
 
-`TurnIngressClaimResult(status=DUPLICATE, ingress=exact, job=exact, input_payload=None)`
+Only P3.1 is eligible next.
 
-only for the retention-compatible states above when INPUT has already been legally deleted.
+## Resumed P3.1 binding authority
+Binding source: `docs/adr/0026-existing-dialogue-turn-application-service.md` as corrected by ADR-0027, accepted P1/P2 authority, product/state/security/retention contracts, and this current-work record.
 
-No clock. No mutation. No reconstruction of content. No second job.
+P3.1 remains Telegram-agnostic and existing-dialogue-only. New-effect order remains:
 
-`TransientPayloadRepository.get_input_for_job()` remains unchanged: job exists + no INPUT => NOT_FOUND.
+`static request validation -> ingress duplicate-first -> new-update preflight -> claim_ingress -> reread dialogue -> claim_turn -> mark_codex_starting -> P1 start_turn -> mark_codex_running -> P1 wait_turn -> finish_codex`
 
-`claim_turn()` remains unchanged: RECEIVED + missing INPUT is invariant.
-
-### Acceptance
-The correction must prove real public-path sequence:
-
-terminal/non-turn-active job + exact JOB ingress + INPUT -> accepted `RetentionRepository.sweep` deletes expired INPUT -> job/ingress remain -> same-update `claim_ingress` returns DUPLICATE with exact job and `input_payload=None`.
-
-It must also prove active missing INPUT still fails invariant and existing corrupt/multiple/mismatched INPUT never becomes a legal duplicate.
-
-DDL/schema and all unrelated accepted P1/P2 behavior remain unchanged.
-
-## P3.1 status
-P3.1 candidate `05a268781b4b7189271b64f55a3b21f30c259269` is REJECTED / BLOCKED, not merged.
-
-After P2.C1 acceptance, P3.1 must be reapplied/repaired on the corrected architect base. At minimum the P3.1 repair must:
-- consume retention-compatible duplicate semantics without recreating prompt content/effects;
-- allow duplicate JOB with `input_payload=None` only in ADR-0027 optional states;
-- keep active missing INPUT fail-closed;
-- explicitly reject a selected catalog descriptor with `hidden=True` as `BLOCKED / MODEL_UNAVAILABLE`;
-- close the remaining proof gaps from Issue #19 review before architect acceptance.
-
-P3.2 remains NOT STARTED.
+No lazy thread creation, settings mutation, interrupt, hard-delete orchestration, restart scanner, Telegram, real Codex or production state.
 
 ## Execution authority
 Codex must not self-start work from this document.
 
-Only **P2.C1 — retention-compatible JOB duplicate replay correction** may be implemented from the next explicit architect prompt.
+Only **P3.1 — corrected existing-dialogue prompt application service** may be implemented from the next explicit architect prompt.
