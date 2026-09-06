@@ -47,6 +47,26 @@ _ERROR_CLASS_LENGTH = 128
 _ERROR_CLASS_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
+_INPUT_REQUIRED_STATES = frozenset(
+    (
+        TurnJobState.RECEIVED,
+        TurnJobState.CLAIMED,
+        TurnJobState.CODEX_STARTING,
+        TurnJobState.CODEX_RUNNING,
+    )
+)
+_INPUT_OPTIONAL_STATES = frozenset(
+    (
+        TurnJobState.CODEX_COMPLETED,
+        TurnJobState.FAILED,
+        TurnJobState.UNKNOWN,
+        TurnJobState.DELIVERY_PENDING,
+        TurnJobState.DELIVERING,
+        TurnJobState.DELIVERED,
+        TurnJobState.DELIVERY_UNKNOWN,
+    )
+)
+
 
 def _error(category: RepositoryErrorCategory) -> RepositoryError:
     return RepositoryError(category)
@@ -342,6 +362,31 @@ def _input_for_job(
     return payload
 
 
+def _duplicate_input_for_job(
+    connection: Any, job: TurnJobRecord
+) -> TransientPayloadRecord | None:
+    rows = connection.execute(
+        _payload_select() + " WHERE job_id = ? AND kind = 'INPUT'", (job.job_id,)
+    ).fetchall()
+    if len(rows) > 1:
+        raise _invariant()
+    if len(rows) == 1:
+        payload = _materialize_payload(connection, rows[0])
+        if (
+            payload.kind is not TransientPayloadKind.INPUT
+            or payload.job_id != job.job_id
+            or payload.dialogue_id != job.dialogue_id
+            or payload.content_sha256 != job.input_sha256
+        ):
+            raise _invariant()
+        return payload
+    if job.state in _INPUT_REQUIRED_STATES:
+        raise _invariant()
+    if job.state in _INPUT_OPTIONAL_STATES:
+        return None
+    raise _invariant()
+
+
 class _RepositoryBase:
     def __init__(self, storage: SqliteStorage, *, now_ms: Callable[[], int] | None = None) -> None:
         if not isinstance(storage, SqliteStorage) or (now_ms is not None and not callable(now_ms)):
@@ -492,10 +537,7 @@ class TurnJobRepository(_RepositoryBase):
                     job = _materialize_job(job_row)
                     if job.telegram_update_id != update_id or job.job_id != ingress.job_id:
                         raise _invariant()
-                    payload = _input_for_job(
-                        connection, job,
-                        missing_category=RepositoryErrorCategory.INVARIANT_VIOLATION,
-                    )
+                    payload = _duplicate_input_for_job(connection, job)
                     return TurnIngressClaimResult(
                         TurnIngressClaimStatus.DUPLICATE, ingress, job, payload
                     )
