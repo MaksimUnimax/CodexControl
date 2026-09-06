@@ -164,6 +164,39 @@ class ExistingDialogueApplicationUnitTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(raised.exception.category, DialogueApplicationErrorCategory.STORAGE)
             self.assertNotIn("PRIVATE_P3_CLOCK", repr(raised.exception))
 
+    async def test_generated_input_id_validation_is_independent_of_job_id(self):
+        from codex_control.storage import DialogueRepository, IngressUpdateRepository, SettingsRepository
+
+        await DialogueRepository(self.storage, now_ms=lambda: 1).create_intent(
+            dialogue_id="d", server_id="server", profile_id="profile"
+        )
+        await DialogueRepository(self.storage, now_ms=lambda: 1).confirm_created(
+            dialogue_id="d", expected_version=0, thread_id="t"
+        )
+        await SettingsRepository(self.storage, now_ms=lambda: 1).initialize_if_absent(
+            profile_id="profile", model_id="m", reasoning_effort="high"
+        )
+        invalid_inputs = ("", "input\x00id", "i" * 129, 42)
+        for offset, invalid_input in enumerate(invalid_inputs):
+            calls = []
+
+            def ids(kind, *, invalid_input=invalid_input, offset=offset):
+                calls.append(kind)
+                return f"job-{offset}" if kind == "job" else invalid_input
+
+            with self.subTest(invalid_input=repr(invalid_input)), self.assertRaises(DialogueApplicationError) as raised:
+                await self.service(
+                    model_catalog=_ValidCatalog(),
+                    working_directory_resolver=_ValidWorkdir(),
+                    id_factory=ids,
+                ).execute(ExistingDialoguePromptRequest(30 + offset, -1, 1, "x"))
+            self.assertIs(raised.exception.category, DialogueApplicationErrorCategory.INVARIANT)
+            self.assertEqual(["job", "input"], calls)
+            self.assertIsNone(await IngressUpdateRepository(self.storage).get(30 + offset))
+            self.assertEqual(0, await self.storage.read(
+                lambda connection: connection.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]
+            ))
+
 
 if __name__ == "__main__":
     unittest.main()

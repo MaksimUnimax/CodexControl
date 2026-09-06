@@ -118,3 +118,40 @@ run and the full suite. It is pre-existing adapter-test behavior; no P3.1
 resource leak or warning introduction was established.
 
 P3.2 is not started. No architect acceptance is claimed.
+
+## Architect first proof repair
+
+This section records the first proof repair on corrected candidate parent
+`395e9d4874c40a657cfb044299ec5412482b8be7`, against architect review comment
+`5558212256`. It is factual executor evidence only; P3.1 remains not architect-
+accepted, Issue #19 remains open, and P3.2 is not started.
+
+The strengthened tests close these deterministic proof boundaries:
+
+- a real atomic same-update race reaches `_admission_duplicate()` after an
+  accepted P2 actor reaches `CODEX_COMPLETED`, legal `RetentionRepository.sweep`
+  removes INPUT, and the result is the exact durable job with
+  `input_payload=None` and no P1 effect;
+- the corresponding atomic race with an active `RECEIVED` job and test-only
+  missing INPUT fails `INVARIANT` with no P1 effect;
+- an orphan JOB with a live dialogue fails `INVARIANT`, while an orphan JOB
+  after dialogue deletion returns `DUPLICATE_ORPHAN_JOB` with zero configured
+  or P1 dependencies;
+- generated INPUT IDs are independently tested for empty, NUL, over-length and
+  non-string values; an existing legal transient payload proves INPUT-ID
+  collision fails without retry or mutation;
+- non-JOB duplicate replay proves zero catalog, workdir, clock, ID and turn
+  dependency calls;
+- blocked/preflight representatives explicitly prove no ingress, job, INPUT or
+  start effect for NO_DIALOGUE, TURN_RUNNING, non-IDLE, settings/profile/model,
+  hidden/unavailable/unsupported model and workdir cases;
+- a normal completed result exposes the expected OUTPUT bytes through its
+  payload while redacting them from both result and payload repr; empty output
+  proves no OUTPUT ID is generated.
+
+Final focused P3.1 counts are 11 unit tests and 26 integration tests. With the
+accepted corrected pre-P3.1 baseline of 506, the exact full-suite arithmetic is
+`506 + 11 + 26 = 543`.
+
+The repair delta contains no production files: production repair delta is
+`NONE`. No architect acceptance is claimed.

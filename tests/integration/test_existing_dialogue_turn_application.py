@@ -31,7 +31,10 @@ from codex_control.storage import (
     RetentionRepository,
     SettingsRepository,
     SqliteStorage,
+    TransientPayloadKind,
     TransientPayloadRepository,
+    TurnIngressClaimStatus,
+    TurnTerminalOutcome,
     TurnJobRepository,
     TurnJobState,
 )
@@ -136,6 +139,27 @@ class ExistingDialogueApplicationIntegrationTests(unittest.IsolatedAsyncioTestCa
             id_factory=ids or (lambda kind: f"{kind}-{next(sequence)}"),
         )
 
+    async def assert_no_admission(self, update_id, turns):
+        self.assertIsNone(await IngressUpdateRepository(self.storage).get(update_id))
+        self.assertEqual(0, await self.storage.read(
+            lambda connection: connection.execute(
+                "SELECT COUNT(*) FROM turn_jobs WHERE telegram_update_id = ?", (update_id,)
+            ).fetchone()[0]
+        ))
+        self.assertEqual(0, await self.storage.read(
+            lambda connection: connection.execute(
+                "SELECT COUNT(*) FROM transient_payloads WHERE kind = 'INPUT'"
+            ).fetchone()[0]
+        ))
+        self.assertEqual(0, len(turns.start_calls))
+
+    async def test_no_dialogue_blocks_with_no_admission(self):
+        await self.storage.write(lambda connection: (connection.execute("DELETE FROM dialogues"), None)[1])
+        turns = FakeTurns()
+        result = await self.service(turns=turns).execute(ExistingDialoguePromptRequest(3, -1, 3, "x"))
+        self.assertEqual((ExistingDialogueTurnStatus.BLOCKED, ExistingDialogueTurnReason.NO_DIALOGUE), (result.status, result.reason))
+        await self.assert_no_admission(3, turns)
+
     async def test_happy_path_order_snapshot_and_output(self):
         class OrderedTurns(FakeTurns):
             async def start_turn(inner, **kwargs):
@@ -145,10 +169,12 @@ class ExistingDialogueApplicationIntegrationTests(unittest.IsolatedAsyncioTestCa
                 self.assertEqual(TurnJobState.CODEX_STARTING, job.state)
                 self.assertEqual(DialogueState.TURN_RUNNING, dialogue.state)
                 return await super(OrderedTurns, inner).start_turn(**kwargs)
-        turns = OrderedTurns(messages=(AgentMessageCompleted(1, "a", "first"), AgentMessageCompleted(2, "b", "second")))
+        turns = OrderedTurns(messages=(AgentMessageCompleted(1, "a", "PRIVATE_OUTPUT_P3_1"), AgentMessageCompleted(2, "b", "second")))
         result = await self.service(turns=turns).execute(ExistingDialoguePromptRequest(1, -100, 2, "PRIVATE_PROMPT_P3_1"))
         self.assertEqual(ExistingDialogueTurnStatus.COMPLETED, result.status)
-        self.assertEqual(b"first\n\nsecond", result.output_payload.content)
+        self.assertEqual(b"PRIVATE_OUTPUT_P3_1\n\nsecond", result.output_payload.content)
+        self.assertNotIn("PRIVATE_OUTPUT_P3_1", repr(result))
+        self.assertNotIn("PRIVATE_OUTPUT_P3_1", repr(result.output_payload))
         self.assertEqual(("model", "high"), (result.job.model_id, result.job.reasoning_effort))
         self.assertEqual(1, len(turns.start_calls))
         self.assertEqual([TurnBinding("profile", "thread", "turn")], turns.wait_calls)
@@ -173,8 +199,7 @@ class ExistingDialogueApplicationIntegrationTests(unittest.IsolatedAsyncioTestCa
             turns = FakeTurns()
             result = await self.service(catalog=catalog, turns=turns).execute(ExistingDialoguePromptRequest(index, -1, index, "x"))
             self.assertEqual((ExistingDialogueTurnStatus.BLOCKED, ExistingDialogueTurnReason.MODEL_UNAVAILABLE), (result.status, result.reason))
-            self.assertEqual([], turns.start_calls)
-            self.assertIsNone(await IngressUpdateRepository(self.storage).get(index))
+            await self.assert_no_admission(index, turns)
 
     async def test_full_non_idle_and_preflight_block_matrix(self):
         states = (DialogueState.CREATING, DialogueState.CREATE_UNKNOWN, DialogueState.ERROR, DialogueState.INTERRUPTING, DialogueState.TURN_UNKNOWN, DialogueState.DELETE_PENDING, DialogueState.DELETING, DialogueState.DELETE_UNKNOWN)
@@ -184,32 +209,37 @@ class ExistingDialogueApplicationIntegrationTests(unittest.IsolatedAsyncioTestCa
             turns = FakeTurns()
             result = await self.service(turns=turns).execute(ExistingDialoguePromptRequest(index, -1, index, "x"))
             self.assertEqual((ExistingDialogueTurnStatus.BLOCKED, ExistingDialogueTurnReason.DIALOGUE_NOT_READY), (result.status, result.reason))
-            self.assertEqual([], turns.start_calls)
-            self.assertIsNone(await IngressUpdateRepository(self.storage).get(index))
+            await self.assert_no_admission(index, turns)
 
     async def test_turn_running_is_busy_and_no_queue(self):
         await self._set_dialogue_state(DialogueState.TURN_RUNNING)
         turns = FakeTurns()
         result = await self.service(turns=turns).execute(ExistingDialoguePromptRequest(50, -1, 50, "x"))
         self.assertEqual((ExistingDialogueTurnStatus.BUSY, None), (result.status, result.reason))
-        self.assertEqual([], turns.start_calls)
+        await self.assert_no_admission(50, turns)
 
     async def test_settings_profile_and_workdir_matrix(self):
         await self.storage.write(lambda c: (c.execute("DELETE FROM settings"), None)[1])
-        result = await self.service().execute(ExistingDialoguePromptRequest(60, -1, 60, "x"))
+        turns = FakeTurns()
+        result = await self.service(turns=turns).execute(ExistingDialoguePromptRequest(60, -1, 60, "x"))
         self.assertEqual(ExistingDialogueTurnReason.SETTINGS_MISSING, result.reason)
+        await self.assert_no_admission(60, turns)
         await SettingsRepository(self.storage, now_ms=lambda: 10).initialize_if_absent(profile_id=None, model_id="model", reasoning_effort="high")
-        result = await self.service().execute(ExistingDialoguePromptRequest(61, -1, 61, "x"))
+        turns = FakeTurns()
+        result = await self.service(turns=turns).execute(ExistingDialoguePromptRequest(61, -1, 61, "x"))
         self.assertEqual(ExistingDialogueTurnReason.SETTINGS_PROFILE_MISMATCH, result.reason)
+        await self.assert_no_admission(61, turns)
         await SettingsRepository(self.storage).replace(expected_version=0, profile_id="other", model_id="model", reasoning_effort="high")
-        result = await self.service().execute(ExistingDialoguePromptRequest(62, -1, 62, "x"))
+        turns = FakeTurns()
+        result = await self.service(turns=turns).execute(ExistingDialoguePromptRequest(62, -1, 62, "x"))
         self.assertEqual(ExistingDialogueTurnReason.SETTINGS_PROFILE_MISMATCH, result.reason)
+        await self.assert_no_admission(62, turns)
         await SettingsRepository(self.storage).replace(expected_version=1, profile_id="profile", model_id="model", reasoning_effort="high")
         workdir = FakeWorkdir(error=RuntimeError("PRIVATE_WORKDIR_ERROR"))
         turns = FakeTurns()
         result = await self.service(workdir=workdir, turns=turns).execute(ExistingDialoguePromptRequest(63, -1, 63, "x"))
         self.assertEqual(ExistingDialogueTurnReason.WORKING_DIRECTORY_UNAVAILABLE, result.reason)
-        self.assertEqual([], turns.start_calls)
+        await self.assert_no_admission(63, turns)
 
     async def test_profile_not_configured_model_not_configured_and_invalid_workdir_block(self):
         no_profile_service = ExistingDialogueTurnService(
@@ -218,16 +248,18 @@ class ExistingDialogueApplicationIntegrationTests(unittest.IsolatedAsyncioTestCa
         )
         result = await no_profile_service.execute(ExistingDialoguePromptRequest(64, -1, 64, "x"))
         self.assertEqual(ExistingDialogueTurnReason.PROFILE_NOT_CONFIGURED, result.reason)
+        await self.assert_no_admission(64, no_profile_service._turn_lifecycle)
         await self._reset()
         await SettingsRepository(self.storage).replace(expected_version=0, profile_id="profile", model_id=None, reasoning_effort="high")
         turns = FakeTurns()
         result = await self.service(turns=turns).execute(ExistingDialoguePromptRequest(65, -1, 65, "x"))
         self.assertEqual(ExistingDialogueTurnReason.MODEL_NOT_CONFIGURED, result.reason)
+        await self.assert_no_admission(65, turns)
         await self._reset()
         workdir = FakeWorkdir(value=object())
         result = await self.service(workdir=workdir, turns=turns).execute(ExistingDialoguePromptRequest(66, -1, 66, "x"))
         self.assertEqual(ExistingDialogueTurnReason.WORKING_DIRECTORY_UNAVAILABLE, result.reason)
-        self.assertIsNone(await IngressUpdateRepository(self.storage).get(66))
+        await self.assert_no_admission(66, turns)
 
     async def test_duplicate_first_retained_input_has_zero_configuration_effect_calls(self):
         turns = FakeTurns()
@@ -290,8 +322,64 @@ class ExistingDialogueApplicationIntegrationTests(unittest.IsolatedAsyncioTestCa
         self.assertEqual((ExistingDialogueTurnStatus.DUPLICATE, ExistingDialogueTurnReason.DUPLICATE_NON_JOB), (result.status, result.reason))
         original = await self.service().execute(ExistingDialoguePromptRequest(81, -1, 1, "x"))
         await self.storage.write(lambda c: (c.execute("DELETE FROM turn_jobs WHERE job_id = ?", (original.job.job_id,)), c.execute("DELETE FROM dialogues"), None)[2])
-        result = await self.service(turns=FakeTurns()).execute(ExistingDialoguePromptRequest(81, -1, 1, "x"))
+        catalog = FakeCatalog(error=AssertionError("catalog"))
+        workdir = FakeWorkdir(error=AssertionError("workdir"))
+        turns = FakeTurns(start_error=AssertionError("start"), wait_error=AssertionError("wait"))
+        result = await self.service(
+            catalog=catalog,
+            workdir=workdir,
+            turns=turns,
+            clock=lambda: (_ for _ in ()).throw(AssertionError("clock")),
+            ids=lambda kind: (_ for _ in ()).throw(AssertionError("id")),
+        ).execute(ExistingDialoguePromptRequest(81, -1, 1, "x"))
         self.assertEqual((ExistingDialogueTurnStatus.DUPLICATE, ExistingDialogueTurnReason.DUPLICATE_ORPHAN_JOB), (result.status, result.reason))
+        self.assertEqual((0, 0, [], []), (catalog.calls, workdir.calls, turns.start_calls, turns.wait_calls))
+
+    async def test_non_job_duplicate_has_zero_configuration_and_effect_dependencies(self):
+        from codex_control.storage import IngressDispositionKind
+
+        await IngressUpdateRepository(self.storage, now_ms=lambda: 1).claim_ignored(
+            update_id=160, disposition=IngressDispositionKind.IGNORED_UNAUTHORIZED
+        )
+        catalog = FakeCatalog(error=AssertionError("catalog"))
+        workdir = FakeWorkdir(error=AssertionError("workdir"))
+        turns = FakeTurns(start_error=AssertionError("start"), wait_error=AssertionError("wait"))
+        result = await self.service(
+            catalog=catalog,
+            workdir=workdir,
+            turns=turns,
+            clock=lambda: (_ for _ in ()).throw(AssertionError("clock")),
+            ids=lambda kind: (_ for _ in ()).throw(AssertionError("id")),
+        ).execute(ExistingDialoguePromptRequest(160, -1, 1, "x"))
+        self.assertEqual(ExistingDialogueTurnStatus.DUPLICATE, result.status)
+        self.assertIsNone(result.job)
+        self.assertEqual(ExistingDialogueTurnReason.DUPLICATE_NON_JOB, result.reason)
+        self.assertEqual(0, catalog.calls)
+        self.assertEqual(0, workdir.calls)
+        self.assertEqual([], turns.start_calls)
+        self.assertEqual([], turns.wait_calls)
+
+    async def test_orphan_job_with_live_dialogue_is_invariant_with_zero_dependencies(self):
+        original = await self.service().execute(ExistingDialoguePromptRequest(161, -1, 1, "x"))
+        await self.storage.write(lambda connection: (connection.execute(
+            "DELETE FROM turn_jobs WHERE job_id = ?", (original.job.job_id,)
+        ), None)[1])
+        catalog = FakeCatalog(error=AssertionError("catalog"))
+        workdir = FakeWorkdir(error=AssertionError("workdir"))
+        turns = FakeTurns(start_error=AssertionError("start"), wait_error=AssertionError("wait"))
+        with self.assertRaises(DialogueApplicationError) as raised:
+            await self.service(
+                catalog=catalog,
+                workdir=workdir,
+                turns=turns,
+                clock=lambda: (_ for _ in ()).throw(AssertionError("clock")),
+                ids=lambda kind: (_ for _ in ()).throw(AssertionError("id")),
+            ).execute(ExistingDialoguePromptRequest(161, -1, 1, "x"))
+        self.assertIs(DialogueApplicationErrorCategory.INVARIANT, raised.exception.category)
+        self.assertEqual(0, catalog.calls)
+        self.assertEqual(0, workdir.calls)
+        self.assertEqual([], turns.start_calls)
+        self.assertEqual([], turns.wait_calls)
 
     async def test_start_result_matrix_and_local_errors(self):
         cases = ((TurnStartStatus.REJECTED, ExistingDialogueTurnStatus.FAILED), (TurnStartStatus.UNKNOWN, ExistingDialogueTurnStatus.UNKNOWN))
@@ -347,8 +435,15 @@ class ExistingDialogueApplicationIntegrationTests(unittest.IsolatedAsyncioTestCa
             self.assertEqual(1000 + ttl, result.output_payload.expires_at_ms)
         await self._reset()
         turns = FakeTurns(messages=(AgentMessageCompleted(1, "i", ""),))
-        result = await self.service(turns=turns).execute(ExistingDialoguePromptRequest(113, -1, 1, "x"))
+        id_calls = []
+        def ids(kind):
+            id_calls.append(kind)
+            if kind == "output":
+                raise AssertionError("empty output generated an OUTPUT ID")
+            return f"{kind}-empty"
+        result = await self.service(turns=turns, ids=ids).execute(ExistingDialoguePromptRequest(113, -1, 1, "x"))
         self.assertIsNone(result.output_payload)
+        self.assertEqual(["job", "input"], id_calls)
 
     async def test_same_update_concurrency_has_one_job_and_effect(self):
         barrier = asyncio.Event()
@@ -367,6 +462,94 @@ class ExistingDialogueApplicationIntegrationTests(unittest.IsolatedAsyncioTestCa
         self.assertEqual(1, len(turns.start_calls))
         self.assertEqual(1, await self._all_jobs())
         self.assertIn(ExistingDialogueTurnStatus.DUPLICATE, {results[0].status, results[1].status})
+
+    async def test_atomic_race_duplicate_after_input_retention_is_optional(self):
+        preflight = asyncio.Event()
+        release = asyncio.Event()
+
+        async def gate(number):
+            preflight.set()
+            await release.wait()
+
+        turns = FakeTurns()
+        task = asyncio.create_task(self.service(catalog=FakeCatalog(gate=gate), turns=turns).execute(
+            ExistingDialoguePromptRequest(150, -1, 1, "race")
+        ))
+        await asyncio.wait_for(asyncio.shield(preflight.wait()), 1)
+        self.assertIsNone(await IngressUpdateRepository(self.storage).get(150))
+
+        jobs = TurnJobRepository(self.storage, now_ms=lambda: self.clock_value)
+        admitted = await jobs.claim_ingress(
+            update_id=150, job_id="race-job", source_chat_id=-1, source_message_id=1,
+            dialogue_id="dialogue", server_id="server", profile_id="profile", thread_id="thread",
+            model_id="model", reasoning_effort="high", input_payload_id="race-input",
+            input_content=b"race", input_expires_at_ms=3_601_000,
+        )
+        self.assertIs(TurnIngressClaimStatus.CREATED, admitted.status)
+        dialogue = await DialogueRepository(self.storage).get_live()
+        claimed = await jobs.claim_turn(
+            job_id="race-job", expected_job_version=admitted.job.version,
+            expected_dialogue_version=dialogue.version, thread_id="thread",
+        )
+        starting = await jobs.mark_codex_starting(job_id="race-job", expected_version=claimed.job.version)
+        running = await jobs.mark_codex_running(job_id="race-job", expected_version=starting.version, codex_turn_id="race-turn")
+        completed = await jobs.finish_codex(
+            job_id="race-job", expected_job_version=running.version,
+            expected_dialogue_version=claimed.dialogue.version, outcome=TurnTerminalOutcome.COMPLETED,
+        )
+        await self.storage.write(lambda connection: (connection.execute(
+            "UPDATE transient_payloads SET created_at_ms = 1, expires_at_ms = 2 WHERE payload_id = 'race-input'"
+        ), None)[1])
+        sweep = await RetentionRepository(self.storage, now_ms=lambda: 10).sweep(100)
+        self.assertEqual(1, sweep.payloads_deleted)
+        self.assertIsNone(await TransientPayloadRepository(self.storage).get("race-input"))
+        self.assertEqual("race-job", (await TurnJobRepository(self.storage).get("race-job")).job_id)
+        self.assertEqual(TurnJobState.CODEX_COMPLETED, (await TurnJobRepository(self.storage).get("race-job")).state)
+        race_ingress = await IngressUpdateRepository(self.storage).get(150)
+        self.assertEqual("race-job", race_ingress.job_id)
+
+        release.set()
+        result = await asyncio.wait_for(task, 1)
+        self.assertEqual(ExistingDialogueTurnStatus.DUPLICATE, result.status)
+        self.assertEqual(completed.job, result.job)
+        self.assertIsNone(result.reason)
+        self.assertEqual([], turns.start_calls)
+        self.assertEqual([], turns.wait_calls)
+
+    async def test_atomic_race_active_missing_input_is_invariant_without_effect(self):
+        preflight = asyncio.Event()
+        release = asyncio.Event()
+
+        async def gate(number):
+            preflight.set()
+            await release.wait()
+
+        turns = FakeTurns()
+        task = asyncio.create_task(self.service(catalog=FakeCatalog(gate=gate), turns=turns).execute(
+            ExistingDialoguePromptRequest(151, -1, 1, "race")
+        ))
+        await asyncio.wait_for(asyncio.shield(preflight.wait()), 1)
+        self.assertIsNone(await IngressUpdateRepository(self.storage).get(151))
+        jobs = TurnJobRepository(self.storage, now_ms=lambda: self.clock_value)
+        admitted = await jobs.claim_ingress(
+            update_id=151, job_id="active-race-job", source_chat_id=-1, source_message_id=1,
+            dialogue_id="dialogue", server_id="server", profile_id="profile", thread_id="thread",
+            model_id="model", reasoning_effort="high", input_payload_id="active-race-input",
+            input_content=b"race", input_expires_at_ms=3_601_000,
+        )
+        await self.storage.write(lambda connection: (connection.execute(
+            "DELETE FROM transient_payloads WHERE payload_id = 'active-race-input'"
+        ), None)[1])
+        release.set()
+        with self.assertRaises(DialogueApplicationError) as raised:
+            await asyncio.wait_for(task, 1)
+        self.assertIs(DialogueApplicationErrorCategory.INVARIANT, raised.exception.category)
+        self.assertEqual([], turns.start_calls)
+        self.assertEqual([], turns.wait_calls)
+        self.assertEqual(admitted.job, await TurnJobRepository(self.storage).get("active-race-job"))
+        self.assertEqual(admitted.ingress, await IngressUpdateRepository(self.storage).get(151))
+        self.assertIsNone(await TransientPayloadRepository(self.storage).get("active-race-input"))
+        self.assertEqual(1, await self._all_jobs())
 
     async def test_different_update_no_queue_and_winner_accounting(self):
         barrier = asyncio.Event()
@@ -432,6 +615,28 @@ class ExistingDialogueApplicationIntegrationTests(unittest.IsolatedAsyncioTestCa
         self.assertEqual(DialogueApplicationErrorCategory.INVARIANT, raised.exception.category)
         self.assertIsNone(await IngressUpdateRepository(self.storage).get(145))
         self.assertEqual(1, await self._all_jobs())
+
+    async def test_input_payload_id_collision_is_invariant_without_retry(self):
+        existing = await TransientPayloadRepository(self.storage, now_ms=lambda: 1).create(
+            payload_id="collision-payload", dialogue_id="dialogue", kind=TransientPayloadKind.DISPLAY,
+            content=b"existing", expires_at_ms=100,
+        )
+        calls = []
+
+        def ids(kind):
+            calls.append(kind)
+            return "new-job" if kind == "job" else "collision-payload"
+
+        turns = FakeTurns()
+        with self.assertRaises(DialogueApplicationError) as raised:
+            await self.service(turns=turns, ids=ids).execute(ExistingDialoguePromptRequest(144, -1, 1, "x"))
+        self.assertIs(DialogueApplicationErrorCategory.INVARIANT, raised.exception.category)
+        self.assertEqual(["job", "input"], calls)
+        self.assertIsNone(await IngressUpdateRepository(self.storage).get(144))
+        self.assertEqual(0, await self._all_jobs())
+        self.assertEqual(existing, await TransientPayloadRepository(self.storage).get("collision-payload"))
+        self.assertEqual([], turns.start_calls)
+        self.assertEqual([], turns.wait_calls)
 
     async def _release_wait(self, turns, other):
         turns.wait_gate.set()
