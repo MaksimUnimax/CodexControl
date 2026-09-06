@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -27,6 +28,7 @@ from codex_control.application import (
     DialogueTurnService,
     ExistingDialoguePromptRequest,
     ExistingDialogueTurnReason,
+    ExistingDialogueTurnResult,
     ExistingDialogueTurnStatus,
 )
 from codex_control.domain import CodexProfile
@@ -175,6 +177,31 @@ class LazyDialogueTurnIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], thread.calls)
         self.assertEqual(1, len(turns.start_calls))
 
+    async def test_existing_durable_duplicate_delegation_is_no_effect(self):
+        dialogue = await DialogueRepository(self.storage, now_ms=lambda: 10).create_intent(
+            dialogue_id="duplicate-dialogue", server_id="server", profile_id="profile"
+        )
+        dialogue = await DialogueRepository(self.storage, now_ms=lambda: 10).confirm_created(
+            dialogue_id=dialogue.dialogue_id, expected_version=0, thread_id="duplicate-thread"
+        )
+        admitted = await TurnJobRepository(self.storage, now_ms=lambda: 10).claim_ingress(
+            update_id=3, job_id="duplicate-job", source_chat_id=-1, source_message_id=1,
+            dialogue_id=dialogue.dialogue_id, server_id="server", profile_id="profile",
+            thread_id=dialogue.thread_id, model_id="model", reasoning_effort="high",
+            input_payload_id="duplicate-input", input_content=b"original", input_expires_at_ms=10000,
+        )
+        thread, turns = Thread(self.storage), Turns()
+        result = await self.service(thread=thread, turns=turns).execute(
+            ExistingDialoguePromptRequest(3, -1, 99, "changed caller text")
+        )
+        self.assertEqual(ExistingDialogueTurnStatus.DUPLICATE, result.status)
+        self.assertEqual(admitted.job, result.job)
+        self.assertEqual([], thread.calls)
+        self.assertEqual([], turns.start_calls)
+        self.assertEqual([], turns.wait_calls)
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]))
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM transient_payloads WHERE kind = 'INPUT'").fetchone()[0]))
+
     async def test_preflight_matrix_has_no_local_state_or_external_effect(self):
         cases = (
             (None, ExistingDialogueTurnReason.SETTINGS_MISSING, None),
@@ -205,16 +232,118 @@ class LazyDialogueTurnIntegrationTests(unittest.IsolatedAsyncioTestCase):
             (20, ThreadLifecycleError("thread_request_invalid"), ExistingDialogueTurnStatus.FAILED),
             (21, ThreadLifecycleError("thread_precondition_changed"), ExistingDialogueTurnStatus.FAILED),
             (22, ThreadLifecycleError("thread_operation_busy"), ExistingDialogueTurnStatus.FAILED),
-            (23, ThreadLifecycleError("thread_start_unknown"), ExistingDialogueTurnStatus.UNKNOWN),
-            (24, RuntimeError("PRIVATE_THREAD_ERROR_P3_2"), ExistingDialogueTurnStatus.UNKNOWN),
+            (23, None, ExistingDialogueTurnStatus.FAILED),
+            (24, None, ExistingDialogueTurnStatus.UNKNOWN),
+            (25, ThreadLifecycleError("thread_start_unknown"), ExistingDialogueTurnStatus.UNKNOWN),
+            (26, RuntimeError("PRIVATE_THREAD_ERROR_P3_2"), ExistingDialogueTurnStatus.UNKNOWN),
         ):
-            thread = Thread(self.storage, error=error)
+            result = None
+            if index == 23:
+                result = ThreadOperationResult(ThreadOperationStatus.START_REJECTED)
+            elif index == 24:
+                result = ThreadOperationResult(ThreadOperationStatus.START_UNKNOWN)
+            thread = Thread(self.storage, result=result, error=error)
             turns = Turns()
             result = await self.service(thread=thread, turns=turns).execute(ExistingDialoguePromptRequest(index, -1, index, "x"))
             self.assertEqual(expected, result.status)
+            self.assertEqual(1, len(thread.calls))
             self.assertEqual([], turns.start_calls)
-            self.assertEqual("CODEX_PROCESS" if expected is ExistingDialogueTurnStatus.FAILED else "CODEX_AMBIGUOUS", result.dialogue.last_error_class)
+            self.assertEqual([], turns.wait_calls)
+            expected_error = "CODEX_THREAD_FAILED" if index == 23 else (
+                "CODEX_PROCESS" if expected is ExistingDialogueTurnStatus.FAILED else "CODEX_AMBIGUOUS"
+            )
+            self.assertEqual(expected_error, result.dialogue.last_error_class)
+            self.assertEqual(TurnJobState.RECEIVED, (await TurnJobRepository(self.storage).get(result.job.job_id)).state)
             await self.storage.write(lambda c: (c.execute("DELETE FROM turn_jobs"), c.execute("DELETE FROM ingress_updates"), c.execute("DELETE FROM transient_payloads"), c.execute("DELETE FROM dialogues"), None)[4])
+
+    async def test_malformed_or_mismatched_confirmed_thread_is_ambiguous_once(self):
+        cases = (
+            ThreadOperationResult(ThreadOperationStatus.START_CONFIRMED),
+            ThreadOperationResult(ThreadOperationStatus.START_CONFIRMED, binding="wrong-binding"),
+            ThreadOperationResult(
+                ThreadOperationStatus.START_CONFIRMED,
+                ThreadBinding("other-profile", "thread-new"), model_id="model", reasoning_effort="high",
+            ),
+            ThreadOperationResult(
+                ThreadOperationStatus.START_CONFIRMED,
+                ThreadBinding("profile", "thread-new"), model_id="other-model", reasoning_effort="high",
+            ),
+            ThreadOperationResult(
+                ThreadOperationStatus.START_CONFIRMED,
+                ThreadBinding("profile", "thread-new"), model_id="model", reasoning_effort="low",
+            ),
+        )
+        for index, start_result in enumerate(cases, 80):
+            thread = Thread(self.storage, result=start_result)
+            turns = Turns()
+            result = await self.service(thread=thread, turns=turns).execute(
+                ExistingDialoguePromptRequest(index, -1, index, "x")
+            )
+            self.assertEqual(ExistingDialogueTurnStatus.UNKNOWN, result.status)
+            self.assertEqual(DialogueState.CREATE_UNKNOWN, result.dialogue.state)
+            self.assertEqual("CODEX_AMBIGUOUS", result.dialogue.last_error_class)
+            self.assertEqual(1, len(thread.calls))
+            self.assertEqual([], turns.start_calls)
+            self.assertEqual([], turns.wait_calls)
+            await self.storage.write(lambda c: (c.execute("DELETE FROM turn_jobs"), c.execute("DELETE FROM ingress_updates"), c.execute("DELETE FROM transient_payloads"), c.execute("DELETE FROM dialogues"), None)[4])
+
+    async def test_create_race_loss_state_matrix_is_read_only(self):
+        for index, state in enumerate(("IDLE", "TURN_RUNNING", "CREATING", "CREATE_UNKNOWN", "ERROR", "NONE"), 90):
+            await self.storage.write(lambda c: (c.execute("DELETE FROM turn_jobs"), c.execute("DELETE FROM ingress_updates"), c.execute("DELETE FROM transient_payloads"), c.execute("DELETE FROM dialogues"), None)[4])
+            dialogue = None
+            if state != "NONE":
+                dialogue = await DialogueRepository(self.storage, now_ms=lambda: 10).create_intent(
+                    dialogue_id=f"matrix-{index}", server_id="server", profile_id="profile"
+                )
+                if state == "IDLE":
+                    dialogue = await DialogueRepository(self.storage, now_ms=lambda: 10).confirm_created(
+                        dialogue_id=dialogue.dialogue_id, expected_version=0, thread_id="matrix-thread"
+                    )
+                elif state == "TURN_RUNNING":
+                    dialogue = await DialogueRepository(self.storage, now_ms=lambda: 10).confirm_created(
+                        dialogue_id=dialogue.dialogue_id, expected_version=0, thread_id="matrix-thread"
+                    )
+                    admitted = await TurnJobRepository(self.storage, now_ms=lambda: 10).claim_ingress(
+                        update_id=index, job_id=f"matrix-job-{index}", source_chat_id=-1, source_message_id=1,
+                        dialogue_id=dialogue.dialogue_id, server_id="server", profile_id="profile",
+                        thread_id="matrix-thread", model_id="model", reasoning_effort="high",
+                        input_payload_id=f"matrix-input-{index}", input_content=b"x", input_expires_at_ms=10000,
+                    )
+                    claim = await TurnJobRepository(self.storage, now_ms=lambda: 10).claim_turn(
+                        job_id=admitted.job.job_id, expected_job_version=0, expected_dialogue_version=1,
+                        thread_id="matrix-thread"
+                    )
+                    await TurnJobRepository(self.storage, now_ms=lambda: 10).mark_codex_starting(
+                        job_id=claim.job.job_id, expected_version=claim.job.version
+                    )
+                elif state == "CREATE_UNKNOWN":
+                    dialogue = await DialogueRepository(self.storage, now_ms=lambda: 10).mark_create_unknown(
+                        dialogue_id=dialogue.dialogue_id, expected_version=0, error_class="CODEX_AMBIGUOUS"
+                    )
+                elif state == "ERROR":
+                    dialogue = await DialogueRepository(self.storage, now_ms=lambda: 10).mark_create_error(
+                        dialogue_id=dialogue.dialogue_id, expected_version=0, error_class="CODEX_PROCESS"
+                    )
+
+            service = self.service(thread=Thread(self.storage), turns=Turns(), ids=lambda kind: f"matrix-new-{kind}")
+            no_dialogue = ExistingDialogueTurnResult(
+                ExistingDialogueTurnStatus.BLOCKED, None, None, None, ExistingDialogueTurnReason.NO_DIALOGUE
+            )
+            async def initial(_request, no_dialogue=no_dialogue):
+                return no_dialogue
+            service._existing.execute = initial
+            async def lose(repo, **kwargs):
+                raise RepositoryError(RepositoryErrorCategory.ALREADY_EXISTS)
+            with patch.object(DialogueRepository, "create_intent", lose):
+                result = await service.execute(ExistingDialoguePromptRequest(index + 1000, -1, index, "x"))
+            expected = ExistingDialogueTurnStatus.BUSY if state in ("IDLE", "TURN_RUNNING") else ExistingDialogueTurnStatus.BLOCKED
+            self.assertEqual(expected, result.status)
+            if expected is ExistingDialogueTurnStatus.BLOCKED:
+                self.assertEqual(ExistingDialogueTurnReason.NO_DIALOGUE if state == "NONE" else ExistingDialogueTurnReason.DIALOGUE_NOT_READY, result.reason)
+            self.assertIsNone(await IngressUpdateRepository(self.storage).get(index + 1000))
+            self.assertEqual([], service._thread_lifecycle.calls)
+            self.assertEqual([], service._turn_lifecycle.start_calls)
+
 
     async def test_recovery_marks_only_preexisting_creating_and_is_idempotent(self):
         dialogue = await DialogueRepository(self.storage, now_ms=lambda: 10).create_intent(dialogue_id="recover", server_id="server", profile_id="profile")
@@ -228,6 +357,40 @@ class LazyDialogueTurnIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.dialogue, second.dialogue)
         self.assertEqual(0, len(thread.calls))
         self.assertEqual(0, len(turns.start_calls))
+
+    async def test_recovery_without_dialogue_is_no_action(self):
+        thread, turns = Thread(self.storage), Turns()
+        service = self.service(thread=thread, turns=turns)
+        result = await service.recover_preexisting_creation()
+        self.assertEqual(CreationRecoveryStatus.NO_ACTION, result.status)
+        self.assertIsNone(result.dialogue)
+        self.assertIsNone(await DialogueRepository(self.storage).get_live())
+        self.assertEqual([], thread.calls)
+        self.assertEqual([], turns.start_calls)
+        self.assertEqual([], turns.wait_calls)
+
+    async def test_recovery_confirmed_idle_received_is_no_action_and_preserves_evidence(self):
+        dialogue = await DialogueRepository(self.storage, now_ms=lambda: 10).create_intent(
+            dialogue_id="idle-received", server_id="server", profile_id="profile"
+        )
+        dialogue = await DialogueRepository(self.storage, now_ms=lambda: 10).confirm_created(
+            dialogue_id=dialogue.dialogue_id, expected_version=0, thread_id="idle-thread"
+        )
+        admitted = await TurnJobRepository(self.storage, now_ms=lambda: 10).claim_ingress(
+            update_id=33, job_id="idle-received-job", source_chat_id=-1, source_message_id=1,
+            dialogue_id=dialogue.dialogue_id, server_id="server", profile_id="profile",
+            thread_id="idle-thread", model_id="model", reasoning_effort="high",
+            input_payload_id="idle-received-input", input_content=b"evidence", input_expires_at_ms=10000,
+        )
+        thread, turns = Thread(self.storage), Turns()
+        result = await self.service(thread=thread, turns=turns).recover_preexisting_creation()
+        self.assertEqual(CreationRecoveryStatus.NO_ACTION, result.status)
+        self.assertEqual(dialogue, result.dialogue)
+        self.assertEqual(admitted.job, await TurnJobRepository(self.storage).get(admitted.job.job_id))
+        self.assertEqual(admitted.input_payload, await TransientPayloadRepository(self.storage).get(admitted.input_payload.payload_id))
+        self.assertEqual([], thread.calls)
+        self.assertEqual([], turns.start_calls)
+        self.assertEqual([], turns.wait_calls)
 
     async def test_recovery_preserves_received_job_ingress_and_input(self):
         creating = await DialogueRepository(self.storage, now_ms=lambda: 10).create_intent(
@@ -253,8 +416,9 @@ class LazyDialogueTurnIntegrationTests(unittest.IsolatedAsyncioTestCase):
             gate = asyncio.Event()
             first_thread = Thread(self.storage, gate=gate)
             second_thread = Thread(self.storage, gate=gate)
-            first_service = self.service(thread=first_thread, turns=Turns(), ids=lambda kind: f"first-{kind}")
-            second_service = self.service(thread=second_thread, turns=Turns(), ids=lambda kind: f"second-{kind}")
+            first_turns, second_turns = Turns(), Turns()
+            first_service = self.service(thread=first_thread, turns=first_turns, ids=lambda kind: f"first-{kind}")
+            second_service = self.service(thread=second_thread, turns=second_turns, ids=lambda kind: f"second-{kind}")
             first = asyncio.create_task(first_service.execute(ExistingDialoguePromptRequest(first_update, -1, 1, "first")))
             second = asyncio.create_task(second_service.execute(ExistingDialoguePromptRequest(second_update, -1, 2, "second")))
             while not (first_thread.calls or second_thread.calls):
@@ -264,11 +428,110 @@ class LazyDialogueTurnIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM dialogues").fetchone()[0]))
             self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]))
             self.assertEqual(1, len(first_thread.calls) + len(second_thread.calls))
+            self.assertEqual(1, len(first_turns.start_calls) + len(second_turns.start_calls))
+            self.assertEqual(1, len(first_turns.wait_calls) + len(second_turns.wait_calls))
+            self.assertEqual([], [item for item in asyncio.all_tasks() if item is not asyncio.current_task() and not item.done()])
             if first_update == second_update:
                 self.assertEqual(1, sum(result.status is ExistingDialogueTurnStatus.DUPLICATE for result in results))
             else:
                 self.assertEqual(1, sum(result.job is not None for result in results))
                 self.assertIn(next(result for result in results if result.job is None).status, (ExistingDialogueTurnStatus.BLOCKED, ExistingDialogueTurnStatus.BUSY))
+
+    async def test_different_update_loser_is_released_after_completed_idle_winner(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_create = DialogueRepository.create_intent
+        paused = False
+
+        async def gated_create(repo, **kwargs):
+            nonlocal paused
+            if kwargs["dialogue_id"] == "b-dialogue" and not paused:
+                paused = True
+                entered.set()
+                await release.wait()
+            return await original_create(repo, **kwargs)
+
+        thread_a, thread_b = Thread(self.storage), Thread(self.storage)
+        turns_a, turns_b = Turns(), Turns()
+        service_a = self.service(thread=thread_a, turns=turns_a, ids=lambda kind: f"a-{kind}")
+        service_b = self.service(thread=thread_b, turns=turns_b, ids=lambda kind: "b-dialogue" if kind == "dialogue" else f"b-{kind}")
+        request_a = ExistingDialoguePromptRequest(501, -1, 1, "winner")
+        request_b = ExistingDialoguePromptRequest(502, -1, 2, "loser")
+        with patch.object(DialogueRepository, "create_intent", gated_create):
+            task_b = asyncio.create_task(service_b.execute(request_b))
+            await entered.wait()
+            result_a = await service_a.execute(request_a)
+            winner_dialogue = await DialogueRepository(self.storage).get_live()
+            self.assertEqual(ExistingDialogueTurnStatus.COMPLETED, result_a.status)
+            self.assertEqual(DialogueState.IDLE, winner_dialogue.state)
+            release.set()
+            result_b = await task_b
+
+        self.assertEqual(ExistingDialogueTurnStatus.BUSY, result_b.status)
+        self.assertIsNone(result_b.job)
+        self.assertEqual([], thread_b.calls)
+        self.assertEqual([], turns_b.start_calls)
+        self.assertEqual([], turns_b.wait_calls)
+        self.assertEqual(1, len(thread_a.calls))
+        self.assertEqual(1, len(turns_a.start_calls))
+        self.assertEqual(1, len(turns_a.wait_calls))
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM dialogues").fetchone()[0]))
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]))
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM ingress_updates").fetchone()[0]))
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM transient_payloads WHERE kind = 'INPUT'").fetchone()[0]))
+        self.assertIsNone(await IngressUpdateRepository(self.storage).get(request_b.update_id))
+
+    async def test_claim_ingress_state_conflict_reconstructs_busy_without_effect(self):
+        original_claim = TurnJobRepository.claim_ingress
+        changed = False
+
+        async def competing_confirmation(repo, **kwargs):
+            nonlocal changed
+            if not changed:
+                changed = True
+                await DialogueRepository(self.storage, now_ms=lambda: 10).confirm_created(
+                    dialogue_id=kwargs["dialogue_id"], expected_version=0, thread_id="race-thread"
+                )
+            return await original_claim(repo, **kwargs)
+
+        thread, turns = Thread(self.storage), Turns()
+        service = self.service(thread=thread, turns=turns, ids=lambda kind: f"conflict-{kind}")
+        with patch.object(TurnJobRepository, "claim_ingress", competing_confirmation):
+            result = await service.execute(ExistingDialoguePromptRequest(510, -1, 1, "conflict"))
+        self.assertEqual(ExistingDialogueTurnStatus.BUSY, result.status)
+        self.assertIsNone(result.job)
+        self.assertEqual(DialogueState.IDLE, (await DialogueRepository(self.storage).get_live()).state)
+        self.assertEqual([], thread.calls)
+        self.assertEqual([], turns.start_calls)
+        self.assertEqual([], turns.wait_calls)
+        self.assertIsNone(await IngressUpdateRepository(self.storage).get(510))
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]))
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM transient_payloads WHERE kind = 'INPUT'").fetchone()[0]))
+
+    async def test_claim_ingress_duplicate_is_materialized_without_effect(self):
+        original_claim = TurnJobRepository.claim_ingress
+        supplied = False
+
+        async def competing_duplicate(repo, **kwargs):
+            nonlocal supplied
+            winner_kwargs = dict(kwargs)
+            winner_kwargs.update(job_id="winner-job", input_payload_id="winner-input")
+            await original_claim(repo, **winner_kwargs)
+            supplied = True
+            return await original_claim(repo, **kwargs)
+
+        thread, turns = Thread(self.storage), Turns()
+        service = self.service(thread=thread, turns=turns, ids=lambda kind: f"loser-{kind}")
+        with patch.object(TurnJobRepository, "claim_ingress", competing_duplicate):
+            result = await service.execute(ExistingDialoguePromptRequest(520, -1, 1, "duplicate"))
+        self.assertTrue(supplied)
+        self.assertEqual(ExistingDialogueTurnStatus.DUPLICATE, result.status)
+        self.assertEqual("winner-job", result.job.job_id)
+        self.assertEqual([], thread.calls)
+        self.assertEqual([], turns.start_calls)
+        self.assertEqual([], turns.wait_calls)
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]))
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM transient_payloads WHERE kind = 'INPUT'").fetchone()[0]))
 
     async def test_admission_id_collision_terminalizes_owned_creation_without_retry(self):
         for collision_kind in ("job", "input"):
@@ -324,6 +587,29 @@ class LazyDialogueTurnIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], thread.calls)
         self.assertEqual([], turns.start_calls)
 
+    async def test_corrupt_tombstone_collision_fails_closed_without_retry(self):
+        await self.storage.write(lambda c: (c.execute(
+            "INSERT INTO deletion_tombstones VALUES ('dialogue-1', ?, 1, 100, 200)"
+        , ("a" * 64,)), None)[1])
+        path = os.path.join(self.tempdir.name, "controller.sqlite3")
+        await self.storage.close()
+        with sqlite3.connect(path) as connection:
+            connection.execute("UPDATE deletion_tombstones SET thread_identity_sha256 = ?", ("A" * 64,))
+            connection.commit()
+        self.storage = await SqliteStorage.open(path, now_ms=lambda: 1000)
+        thread, turns = Thread(self.storage), Turns()
+        with self.assertRaises(DialogueApplicationError) as raised:
+            await self.service(thread=thread, turns=turns).execute(
+                ExistingDialoguePromptRequest(41, -1, 1, "x")
+            )
+        self.assertEqual(DialogueApplicationErrorCategory.INVARIANT, raised.exception.category)
+        self.assertNotIn("A" * 64, repr(raised.exception))
+        self.assertIsNone(await DialogueRepository(self.storage).get_live())
+        self.assertEqual([], thread.calls)
+        self.assertEqual([], turns.start_calls)
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]))
+        self.assertIsNone(await IngressUpdateRepository(self.storage).get(41))
+
     async def test_post_admission_cancellation_remains_owned(self):
         thread_gate = asyncio.Event()
         wait_gate = asyncio.Event()
@@ -345,6 +631,12 @@ class LazyDialogueTurnIntegrationTests(unittest.IsolatedAsyncioTestCase):
         result = await task
         self.assertEqual(ExistingDialogueTurnStatus.COMPLETED, result.status)
         self.assertEqual((1, 1), (len(thread.calls), len(turns.start_calls)))
+        self.assertEqual(1, len(turns.wait_calls))
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]))
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM ingress_updates").fetchone()[0]))
+        self.assertEqual(TurnJobState.CODEX_COMPLETED, (await TurnJobRepository(self.storage).get(result.job.job_id)).state)
+        self.assertEqual(DialogueState.IDLE, (await DialogueRepository(self.storage).get_live()).state)
+        self.assertEqual([], [item for item in asyncio.all_tasks() if item is not asyncio.current_task() and not item.done()])
 
 
 if __name__ == "__main__":

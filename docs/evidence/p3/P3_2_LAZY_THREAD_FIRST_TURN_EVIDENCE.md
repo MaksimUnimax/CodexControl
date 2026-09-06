@@ -102,3 +102,72 @@ Generic service/result/error representations do not render prompt/output content
 Observed warning: the known pre-existing P1.6 pending-task warning appeared during full discovery. It was not introduced by P3.2.
 
 P3.3 and all later slices were not started.
+
+## Architect first repair
+
+This is factual first-repair executor evidence only. P3.2 is not architect-
+accepted.
+
+- Rejected candidate: `855722c0f013df7d89e23c30dbd2d1d32ff0ed99`.
+- Architect review comment: `5558625534`.
+- Root defect: first-path race losers could call effect-capable
+  `ExistingDialogueTurnService.execute()` after losing admission, allowing a
+  different update to become a later turn after the winner returned to IDLE.
+- Removed effect-capable race-loss re-execution for `create_intent`
+  `ALREADY_EXISTS`, first-path `claim_ingress` `STATE_CONFLICT`, and returned
+  first-path `claim_ingress` `DUPLICATE`.
+- `create_intent` `ALREADY_EXISTS` now uses no-effect reconstruction: an
+  already durable same-update ingress is materialized through duplicate-only
+  authority; with no ingress, IDLE/TURN_RUNNING returns BUSY, another live
+  state returns BLOCKED / DIALOGUE_NOT_READY, and no live dialogue returns
+  BLOCKED / NO_DIALOGUE.
+- `claim_ingress` `STATE_CONFLICT` uses the same read-only race reconstruction.
+- `claim_ingress` `DUPLICATE` consumes the returned durable claim through the
+  accepted duplicate-only materialization path, including retained INPUT
+  authority, without a second admission attempt or effect.
+- The deterministic different-update test releases B only after A has fully
+  completed and the canonical dialogue is IDLE. B returns BUSY and creates zero
+  ingress, JOB, INPUT, thread/start, turn/start, or wait effects; no delayed
+  execution remains.
+- Actual `ThreadOperationResult(START_REJECTED)` yields deterministic ERROR /
+  `CODEX_THREAD_FAILED`, leaves the first job RECEIVED, and performs no turn
+  effect. Actual `START_UNKNOWN` yields CREATE_UNKNOWN /
+  `CODEX_AMBIGUOUS`, leaves the first job RECEIVED, and performs no retry.
+- Actual START_CONFIRMED-shaped malformed/mismatched binding cases cover
+  missing/wrong binding and profile/model/effort mismatches; each yields
+  CREATE_UNKNOWN with one thread/start and no first-turn effect or retry.
+- Corrupt retained tombstone materialization is tested using temporary SQLite;
+  the application fails closed as INVARIANT with no local admission or thread
+  effect and no raw corrupt value in the error representation.
+- Ordinary existing durable JOB duplicate delegation remains on accepted P3.1
+  authority and returns the exact durable job with zero thread/start, new job,
+  new INPUT, turn/start, or wait effects.
+- No-dialogue recovery returns NO_ACTION without mutation or effect.
+  Confirmed IDLE plus RECEIVED first-job recovery also returns NO_ACTION and
+  preserves the dialogue, ingress, job, and INPUT evidence.
+- Post-admission cancellation proof binds one owned invocation to exactly one
+  thread/start, turn/start, wait, durable job, and successful CODEX_COMPLETED
+  terminal state with canonical IDLE dialogue and no pending application task.
+- Same-update aggregate proof binds one dialogue, JOB ingress, job, INPUT,
+  thread/start, turn/start, and wait across both contenders; the losing
+  invocation is duplicate and no second turn is delayed.
+
+## First-repair test counts and checks
+
+- Final P3.2 unit tests: `2`.
+- Final P3.2 integration tests: `21`.
+- Accepted pre-P3.2 full count: `543`.
+- Full-count arithmetic: `543 + 2 + 21 = 566`.
+- Observed full discovery count: `566` passing tests.
+- P3.1 regressions remained `11` unit and `26` integration tests.
+- P2.C1 remained `5` integration and `1` acceptance test; P2.6b remained
+  `5 / 12 / 8 / 3`; P1.10 remained `6 / 1 / 4`.
+- Repair delta is limited to `src/codex_control/application/dialogue_turn.py`,
+  `tests/integration/test_lazy_dialogue_turn_application.py`, and this
+  evidence file. Cumulative P3.2 changes remain under
+  `src/codex_control/application/**` plus P3.2 tests/evidence.
+- No P1/P2 production file, storage, adapter, domain, schema/DDL, authority
+  document, main branch, issue state, or service was changed.
+- Tests used temporary SQLite and fake catalog/thread/turn/workdir ports only;
+  no production database, state root, Codex, Telegram, network business
+  effect, or real external effect was used.

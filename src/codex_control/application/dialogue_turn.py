@@ -25,6 +25,7 @@ from codex_control.storage import (
     DialogueState,
     IngressDispositionKind,
     IngressUpdateRecord,
+    IngressUpdateRepository,
     RepositoryError,
     RepositoryErrorCategory,
     SettingsRepository,
@@ -281,7 +282,7 @@ class DialogueTurnService:
             )
         except RepositoryError as error:
             if error.category is RepositoryErrorCategory.ALREADY_EXISTS:
-                return await self._existing.execute(request)
+                return await self._race_loss_result(request)
             raise _repository_error(error) from None
         except StorageError as error:
             raise _repository_error(error) from None
@@ -321,7 +322,7 @@ class DialogueTurnService:
                 await self._admission_failure(dialogues, created)
                 raise _invariant() from None
             if error.category is RepositoryErrorCategory.STATE_CONFLICT:
-                return await self._existing.execute(request)
+                return await self._race_loss_result(request)
             raise _repository_error(error) from None
         except StorageError as error:
             raise _repository_error(error) from None
@@ -331,7 +332,7 @@ class DialogueTurnService:
             await self._admission_failure(dialogues, created)
             raise _invariant()
         if admission.status is TurnIngressClaimStatus.DUPLICATE:
-            return await self._existing.execute(request)
+            return await self._existing._admission_duplicate(admission)
         if (
             admission.status is not TurnIngressClaimStatus.CREATED
             or type(admission.ingress) is not IngressUpdateRecord
@@ -436,6 +437,32 @@ class DialogueTurnService:
             # failure; if terminalization could not commit, recovery evidence
             # remains in the still-CREATING row.
             raise _invariant() from None
+
+    async def _race_loss_result(self, request: ExistingDialoguePromptRequest) -> ExistingDialogueTurnResult:
+        """Reconstruct a lost first-path race without admitting new work.
+
+        This invocation already lost its original no-dialogue admission
+        attempt.  Reading the current canonical state is only for reporting;
+        it must never hand the request back to the effect-capable existing
+        dialogue service, because that could turn a delayed loser into a
+        later prompt.
+        """
+        try:
+            ingress = await IngressUpdateRepository(self._storage).get(request.update_id)
+            if ingress is not None:
+                return await self._existing._duplicate(ingress)
+            dialogue = await DialogueRepository(self._storage).get_live()
+        except (StorageError, RepositoryError) as error:
+            raise _repository_error(error) from None
+        if dialogue is None:
+            return self._blocked(None, ExistingDialogueTurnReason.NO_DIALOGUE)
+        if dialogue.server_id != self._server_id:
+            raise _invariant()
+        if dialogue.state in (DialogueState.IDLE, DialogueState.TURN_RUNNING):
+            return ExistingDialogueTurnResult(
+                ExistingDialogueTurnStatus.BUSY, None, dialogue, None, None
+            )
+        return self._blocked(dialogue, ExistingDialogueTurnReason.DIALOGUE_NOT_READY)
 
     async def _mark_error(self, dialogues, created, job, error_class):
         try:
