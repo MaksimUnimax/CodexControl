@@ -77,7 +77,7 @@ class ExistingDialogueApplicationUnitTests(unittest.IsolatedAsyncioTestCase):
     def test_exact_enums_and_constants(self):
         self.assertEqual(["COMPLETED", "FAILED", "UNKNOWN", "DUPLICATE", "BUSY", "BLOCKED"], [x.value for x in ExistingDialogueTurnStatus])
         self.assertEqual(
-            ["NO_DIALOGUE", "DIALOGUE_NOT_READY", "SETTINGS_MISSING", "SETTINGS_PROFILE_MISMATCH", "PROFILE_NOT_CONFIGURED", "MODEL_NOT_CONFIGURED", "MODEL_UNAVAILABLE", "WORKING_DIRECTORY_UNAVAILABLE", "DUPLICATE_NON_JOB", "DUPLICATE_ORPHAN_JOB"],
+            ["NO_DIALOGUE", "DIALOGUE_NOT_READY", "SETTINGS_MISSING", "SETTINGS_PROFILE_MISMATCH", "PROFILE_NOT_CONFIGURED", "MODEL_NOT_CONFIGURED", "MODEL_UNAVAILABLE", "WORKING_DIRECTORY_UNAVAILABLE", "DUPLICATE_NON_JOB", "DUPLICATE_ORPHAN_JOB", "SETTINGS_CHANGED"],
             [x.value for x in ExistingDialogueTurnReason],
         )
         self.assertEqual(["INVALID_ARGUMENT", "STORAGE", "CODEX", "INVARIANT"], [x.value for x in DialogueApplicationErrorCategory])

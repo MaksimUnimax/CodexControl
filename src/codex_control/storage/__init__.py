@@ -82,6 +82,7 @@ from .metadata_retention import (
     MetadataRetentionSweepResult,
 )
 from .repository_errors import RepositoryError, RepositoryErrorCategory
+from .settings_dialogue_guards import SettingsDialogueGuardRepository
 
 __all__ = [
     "MIGRATION_ID",
@@ -151,4 +152,5 @@ __all__ = [
     "METADATA_RETENTION_MS",
     "MetadataRetentionRepository",
     "MetadataRetentionSweepResult",
+    "SettingsDialogueGuardRepository",
 ]

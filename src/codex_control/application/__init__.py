@@ -21,6 +21,17 @@ from .dialogue_turn import (
     DialogueTurnService,
     ThreadLifecyclePort,
 )
+from .settings_selection import (
+    SettingsModelOption,
+    SettingsMutationReason,
+    SettingsMutationResult,
+    SettingsMutationStatus,
+    SettingsProfileOption,
+    SettingsSelectionError,
+    SettingsSelectionErrorCategory,
+    SettingsSelectionService,
+    SettingsSelectionView,
+)
 
 __all__ = [
     "P3_INPUT_PAYLOAD_RETENTION_MS",
@@ -40,4 +51,13 @@ __all__ = [
     "CreationRecoveryStatus",
     "CreationRecoveryResult",
     "DialogueTurnService",
+    "SettingsProfileOption",
+    "SettingsModelOption",
+    "SettingsSelectionView",
+    "SettingsMutationStatus",
+    "SettingsMutationReason",
+    "SettingsMutationResult",
+    "SettingsSelectionErrorCategory",
+    "SettingsSelectionError",
+    "SettingsSelectionService",
 ]

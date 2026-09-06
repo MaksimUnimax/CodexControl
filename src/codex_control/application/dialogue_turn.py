@@ -29,6 +29,7 @@ from codex_control.storage import (
     RepositoryError,
     RepositoryErrorCategory,
     SettingsRepository,
+    SettingsDialogueGuardRepository,
     SqliteStorage,
     TurnIngressClaimResult,
     TurnIngressClaimStatus,
@@ -193,6 +194,9 @@ class DialogueTurnService:
             profile_id=profile_id,
             model_id=settings.model_id,
             reasoning_effort=effort,
+            expected_settings_version=settings.version,
+            expected_model_id=settings.model_id,
+            expected_reasoning_effort=settings.reasoning_effort,
             working_directory=working_directory,
             dialogue_id=dialogue_id,
             job_id=job_id,
@@ -267,6 +271,9 @@ class DialogueTurnService:
         profile_id,
         model_id,
         reasoning_effort,
+        expected_settings_version,
+        expected_model_id,
+        expected_reasoning_effort,
         working_directory,
         dialogue_id,
         job_id,
@@ -275,14 +282,19 @@ class DialogueTurnService:
     ):
         dialogues = DialogueRepository(self._storage, now_ms=self._clock)
         try:
-            created = await dialogues.create_intent(
+            created = await SettingsDialogueGuardRepository(self._storage, now_ms=self._clock).create_dialogue_if_settings_current(
                 dialogue_id=dialogue_id,
                 server_id=self._server_id,
                 profile_id=profile_id,
+                expected_settings_version=expected_settings_version,
+                expected_model_id=expected_model_id,
+                expected_reasoning_effort=expected_reasoning_effort,
             )
         except RepositoryError as error:
             if error.category is RepositoryErrorCategory.ALREADY_EXISTS:
                 return await self._race_loss_result(request)
+            if error.category is RepositoryErrorCategory.VERSION_CONFLICT:
+                return self._blocked(None, ExistingDialogueTurnReason.SETTINGS_CHANGED)
             raise _repository_error(error) from None
         except StorageError as error:
             raise _repository_error(error) from None

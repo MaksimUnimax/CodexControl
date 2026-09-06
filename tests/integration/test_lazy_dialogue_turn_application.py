@@ -38,6 +38,7 @@ from codex_control.storage import (
     DialogueState,
     IngressUpdateRepository,
     SettingsRepository,
+    SettingsDialogueGuardRepository,
     SqliteStorage,
     RepositoryError,
     RepositoryErrorCategory,
@@ -334,7 +335,7 @@ class LazyDialogueTurnIntegrationTests(unittest.IsolatedAsyncioTestCase):
             service._existing.execute = initial
             async def lose(repo, **kwargs):
                 raise RepositoryError(RepositoryErrorCategory.ALREADY_EXISTS)
-            with patch.object(DialogueRepository, "create_intent", lose):
+            with patch.object(SettingsDialogueGuardRepository, "create_dialogue_if_settings_current", lose):
                 result = await service.execute(ExistingDialoguePromptRequest(index + 1000, -1, index, "x"))
             expected = ExistingDialogueTurnStatus.BUSY if state in ("IDLE", "TURN_RUNNING") else ExistingDialogueTurnStatus.BLOCKED
             self.assertEqual(expected, result.status)
@@ -440,7 +441,7 @@ class LazyDialogueTurnIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_different_update_loser_is_released_after_completed_idle_winner(self):
         entered = asyncio.Event()
         release = asyncio.Event()
-        original_create = DialogueRepository.create_intent
+        original_create = SettingsDialogueGuardRepository.create_dialogue_if_settings_current
         paused = False
 
         async def gated_create(repo, **kwargs):
@@ -457,7 +458,7 @@ class LazyDialogueTurnIntegrationTests(unittest.IsolatedAsyncioTestCase):
         service_b = self.service(thread=thread_b, turns=turns_b, ids=lambda kind: "b-dialogue" if kind == "dialogue" else f"b-{kind}")
         request_a = ExistingDialoguePromptRequest(501, -1, 1, "winner")
         request_b = ExistingDialoguePromptRequest(502, -1, 2, "loser")
-        with patch.object(DialogueRepository, "create_intent", gated_create):
+        with patch.object(SettingsDialogueGuardRepository, "create_dialogue_if_settings_current", gated_create):
             task_b = asyncio.create_task(service_b.execute(request_b))
             await entered.wait()
             result_a = await service_a.execute(request_a)
