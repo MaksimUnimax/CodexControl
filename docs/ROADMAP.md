@@ -26,15 +26,15 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P2.2 controller/settings/dialogue core repositories + optimistic versions and create-intent state claims. Accepted implementation/proof HEAD: `5187c080a7188a59989013defe7d07075662d007`.
 - [DONE] P2.3 ingress dedupe + atomic control epoch/mode claim + opaque callback-action one-time claims. Accepted implementation after one repair review: `0d8f34beaa35a2bc02b349abba9507ebb9bc3802`.
 - [DONE] P2.4a atomic JOB ingress + turn-job execution claims + bounded transient payload repository. Accepted implementation after one repair review: `ca5b5cc19ac9278377b96abec46c523603b2ff47`.
-- [NEXT] P2.4b delivery segments + atomic approval-subject callback claims + bounded transient retention/sanitization.
-- [PLANNED] P2.5 deletion tombstones + error fingerprints + confirmed hard-delete local purge/finalization transaction.
+- [DONE] P2.4b delivery segments + atomic approval-subject callback claims + bounded transient retention/sanitization. Accepted implementation after two repair reviews: `1dedc737ffa3092ba0dbcd8618a57fa6c351b849`.
+- [NEXT] P2.5 deletion state claims + deletion tombstones + sanitized error fingerprints + confirmed hard-delete local purge/finalization transaction.
 - [PLANNED] P2.6 crash/restart/idempotency harness and P2 acceptance.
 
 ## P3 — Dialogue application service
 Lazy create, one-dialogue invariant, immutable turn claims; BUSY/no queue; model/effort idle mutation/profile lock; interrupt/recovery; hard-delete orchestration over ports.
 
 ## P4 — Telegram private management
-Authorization edge, panel, profile/model/reasoning/status, dialogue/delete/interrupt, opaque callbacks, approval UI, tap-able menu fallback.
+Authorization edge, panel, profile/model/reasoning/status, dialogue/delete/interrupt, diagnostics and opaque callback actions.
 
 ## P5 — Telegram group routing
 Persistent fleet keyboard, serialized group updates, activation epoch/restart-SLEEP, SLEEP ignore, ACTIVE prompt ingress, BUSY, fleet status/version safeguards.
