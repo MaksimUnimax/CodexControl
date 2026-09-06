@@ -52,6 +52,26 @@ from .transient_payloads import (
     TransientPayloadRecord,
 )
 from .turn_job_repositories import TurnJobRepository, TransientPayloadRepository
+from .delivery_records import (
+    DeliveryOperation,
+    DeliverySegmentState,
+    DeliveryFinishOutcome,
+    DeliveryPlanItem,
+    DeliverySegmentRecord,
+    DeliveryPlanResult,
+    DeliveryClaimResult,
+    DeliveryFinishResult,
+)
+from .delivery_repositories import DeliverySegmentRepository
+from .approval_records import (
+    ApprovalKind,
+    ApprovalState,
+    ApprovalCallbackClaimStatus,
+    ApprovalRecord,
+    ApprovalCallbackClaimResult,
+)
+from .approval_repositories import ApprovalRepository
+from .retention import RetentionRepository, RetentionSweepResult
 from .repository_errors import RepositoryError, RepositoryErrorCategory
 
 __all__ = [
@@ -97,4 +117,21 @@ __all__ = [
     "MAX_TRANSIENT_PAYLOAD_BYTES",
     "TurnJobRepository",
     "TransientPayloadRepository",
+    "DeliveryOperation",
+    "DeliverySegmentState",
+    "DeliveryFinishOutcome",
+    "DeliveryPlanItem",
+    "DeliverySegmentRecord",
+    "DeliveryPlanResult",
+    "DeliveryClaimResult",
+    "DeliveryFinishResult",
+    "DeliverySegmentRepository",
+    "ApprovalState",
+    "ApprovalKind",
+    "ApprovalCallbackClaimStatus",
+    "ApprovalRecord",
+    "ApprovalCallbackClaimResult",
+    "ApprovalRepository",
+    "RetentionRepository",
+    "RetentionSweepResult",
 ]

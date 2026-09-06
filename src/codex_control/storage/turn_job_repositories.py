@@ -167,7 +167,7 @@ def _validate_outcome(value: object) -> TurnTerminalOutcome:
     return value
 
 
-def _materialize_job(row: Any) -> TurnJobRecord:
+def _materialize_job(row: Any, *, delivery_shapes: bool = False) -> TurnJobRecord:
     if row is None or len(row) != 17:
         raise _invariant()
     job_id = _validate_stored_string(row[0], _ID_LENGTH)
@@ -205,6 +205,14 @@ def _materialize_job(row: Any) -> TurnJobRecord:
             raise _invariant()
     elif state in (TurnJobState.FAILED, TurnJobState.UNKNOWN):
         if thread_id is None or error_class is None:
+            raise _invariant()
+    elif delivery_shapes and state in (
+        TurnJobState.DELIVERY_PENDING, TurnJobState.DELIVERING, TurnJobState.DELIVERED
+    ):
+        if thread_id is None or codex_turn_id is None or error_class is not None:
+            raise _invariant()
+    elif delivery_shapes and state is TurnJobState.DELIVERY_UNKNOWN:
+        if thread_id is None or codex_turn_id is None or error_class is None:
             raise _invariant()
     assert job_id is not None and dialogue_id is not None and server_id is not None and profile_id is not None
     assert input_sha256 is not None
