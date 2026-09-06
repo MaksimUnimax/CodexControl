@@ -44,33 +44,39 @@ Only P3.1 is eligible for the next implementation prompt.
 Binding source: `docs/adr/0026-existing-dialogue-turn-application-service.md` plus accepted P1/P2 authority, product/state/security/retention contracts.
 
 ### Scope
-P3.1 implements a Telegram-agnostic application service for **an already-existing canonical IDLE dialogue only**.
+P3.1 implements a Telegram-agnostic application service for an already-existing dialogue. For a NEW update, the dialogue must be canonical IDLE. Existing durable ingress is handled before current configuration so replay never depends on today's settings/catalog.
 
-It must:
+Required application order:
 
-1. accept a fake/source prompt request containing only update ID, source chat/message IDs and text;
-2. read exact live dialogue + durable settings;
-3. require service server ID == dialogue server ID;
-4. require settings profile == immutable dialogue profile and configured profile exists explicitly;
-5. require a configured model and resolve it through authenticated P1 model catalog;
-6. resolve NULL settings reasoning effort to the catalog's explicit default BEFORE durable job creation;
-7. resolve an explicit trusted working directory through an injected port;
-8. atomically claim P2 JOB ingress + RECEIVED job + INPUT before any `turn/start` effect;
-9. return durable duplicates without any Codex call;
-10. preserve V1 BUSY/no-queue semantics for racing/new prompts;
-11. atomically `claim_turn` then `mark_codex_starting` before exactly one P1.6 `start_turn` call;
-12. bind a confirmed Codex turn ID exactly once through `mark_codex_running`;
-13. wait exactly once for the exact P1 turn binding;
-14. map COMPLETED/FAILED/UNKNOWN to accepted P2 terminal capture without blind retry;
-15. persist ordered user-visible agent messages as one transient OUTPUT payload in the same P2 terminal transaction when non-empty;
-16. own post-admission caller cancellation so cancellation does not detach/restart the accepted prompt.
+1. validate only static request shapes;
+2. read `IngressUpdateRepository.get(update_id)` FIRST;
+3. if ingress already exists, return durable DUPLICATE without catalog/working-directory/ID-factory/turn calls:
+   - existing JOB + existing canonical job/INPUT -> exact duplicate job;
+   - existing non-JOB -> `DUPLICATE_NON_JOB`;
+   - orphan JOB + no live dialogue (accepted post-hard-delete shape) -> `DUPLICATE_ORPHAN_JOB`;
+   - orphan JOB while a live dialogue exists -> finite application INVARIANT;
+4. only for an unseen update, read live dialogue + durable settings;
+5. require service server ID == dialogue server ID;
+6. require settings profile == immutable dialogue profile and configured profile exists explicitly;
+7. require a configured model and resolve it through authenticated P1 model catalog;
+8. resolve NULL settings reasoning effort to the catalog's explicit default BEFORE durable job creation;
+9. resolve an explicit trusted working directory through an injected port;
+10. atomically claim P2 JOB ingress + RECEIVED job + INPUT before any `turn/start` effect;
+11. if the atomic claim races and returns DUPLICATE, return it without a turn call;
+12. preserve V1 BUSY/no-queue semantics for racing/new prompts;
+13. after CREATED, reread exact current dialogue, then atomically `claim_turn` and `mark_codex_starting` before exactly one P1.6 `start_turn` call;
+14. bind a confirmed Codex turn ID exactly once through `mark_codex_running`;
+15. wait exactly once for the exact P1 turn binding;
+16. map COMPLETED/FAILED/UNKNOWN to accepted P2 terminal capture without blind retry;
+17. persist ordered user-visible agent messages as one transient OUTPUT payload in the same P2 terminal transaction when non-empty;
+18. own post-admission caller cancellation so cancellation does not detach/restart the accepted prompt.
 
 ### Public application contract
 - `ExistingDialoguePromptRequest`: update ID, source chat ID, source message ID, `text` with `repr=False`.
 - `ExistingDialogueTurnStatus`: COMPLETED / FAILED / UNKNOWN / DUPLICATE / BUSY / BLOCKED.
-- finite payload-free block reasons from ADR-0026.
+- `ExistingDialogueTurnReason` exact values are frozen in ADR-0026, including `DUPLICATE_NON_JOB` and `DUPLICATE_ORPHAN_JOB`.
 - immutable `ExistingDialogueTurnResult`: status, nullable job/dialogue/output payload/reason.
-- finite `DialogueApplicationError` categories only; raw repository/adapter exception text never escapes.
+- `DialogueApplicationErrorCategory`: INVALID_ARGUMENT / STORAGE / CODEX / INVARIANT only; raw repository/adapter exception text never escapes.
 
 ### Retention
 - INPUT absolute expiry target: 1 hour.
@@ -78,10 +84,10 @@ It must:
 - FAILED/UNKNOWN partial OUTPUT: 24 hours.
 - no content is logged or put in generic repr.
 
-### Effect ordering
+### New-effect ordering
 For a newly accepted existing-dialogue prompt:
 
-`claim_ingress -> claim_turn -> mark_codex_starting -> P1 start_turn -> mark_codex_running -> P1 wait_turn -> finish_codex`
+`claim_ingress -> reread dialogue -> claim_turn -> mark_codex_starting -> P1 start_turn -> mark_codex_running -> P1 wait_turn -> finish_codex`
 
 No `start_turn` happens before CODEX_STARTING commits.
 No one job causes two starts.
