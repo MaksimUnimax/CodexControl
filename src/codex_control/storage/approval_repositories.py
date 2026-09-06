@@ -172,6 +172,23 @@ def _materialize_approval(connection: Any, row: Any) -> ApprovalRecord:
     expires_at_ms = _stored_nonnegative(row[11])
     if updated_at_ms < created_at_ms or expires_at_ms <= created_at_ms:
         raise _invariant()
+    if state is ApprovalState.PENDING:
+        if wire_type == "INTEGER":
+            live_count = connection.execute(
+                "SELECT COUNT(*) FROM approvals "
+                "WHERE profile_id = ? AND wire_request_id_type = 'INTEGER' "
+                "AND wire_request_id_int = ? AND state = 'PENDING'",
+                (profile_id, wire_request_id),
+            ).fetchone()[0]
+        else:
+            live_count = connection.execute(
+                "SELECT COUNT(*) FROM approvals "
+                "WHERE profile_id = ? AND wire_request_id_type = 'STRING' "
+                "AND wire_request_id_text = ? AND state = 'PENDING'",
+                (profile_id, wire_request_id),
+            ).fetchone()[0]
+        if live_count != 1:
+            raise _invariant()
     assert approval_id is not None and profile_id is not None and job_id is not None
     job_row = _job_row(connection, job_id)
     if job_row is None:

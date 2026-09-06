@@ -199,3 +199,66 @@ Validation results for this repair pass:
 - Tests used temporary SQLite databases only. No production state root,
   production DB, service, Telegram call, Codex call, secret or runtime
   dependency was touched.
+
+## Architect second repair pass
+
+This is factual second-repair evidence only. P2.4b remains subject to
+independent architect review and acceptance. No P2.5 work was started or
+recommended.
+
+Entering repair HEAD: `5355d88c44f02abe03a93bfb87d3c0eb571341a2`.
+
+The second repair closes the remaining exact-coherence and global-live-wire
+findings:
+
+- Delivery coherence now accepts only the exact reachable patterns. `DELIVERY_PENDING`
+  is `P+`; `DELIVERING` is either `C* S P*` with exactly one `S`, or `C+ P+`;
+  `DELIVERED` is `C+`; `DELIVERY_UNKNOWN` is `C* U P*` with exactly one `U`;
+  and delivery-overloaded `FAILED` is `C* F P*` with exactly one `F`. Sequences
+  remain contiguous and all invalid seeded patterns fail as
+  `INVARIANT_VIOLATION`.
+- `DeliverySegmentRepository.get()` and `list_for_job()` both load and validate
+  the complete ordered segment plan. The read-path tests cover every required
+  invalid ordering and every listed canonical shape. Canonical pre-delivery
+  jobs with no delivery rows still return an empty tuple.
+- A `DELIVERING` job seeded with all segments `PENDING` fails before claim
+  mutation and before its clock is called. The proof observes zero clock calls,
+  no segment mutation and no job-version mutation.
+- PENDING approval materialization performs a direct SQL count of PENDING rows
+  for the exact profile, wire-ID type and integer/text value. The count must be
+  exactly one and is not checked by recursively materializing matching rows.
+  INTEGER `7` and STRING `"7"` identities are distinct.
+- Test-only SQL corruption with `approval-A` and `approval-B` as duplicate live
+  PENDING rows fails both approval reads for both wire forms. A callback bound
+  to A fails invariant before callback consumption, approval mutation or the
+  repository clock. A due retention sweep fails invariant and rolls back both
+  approvals and same-sweep payload deletion.
+- Terminal historical approvals remain exempt from live uniqueness counting.
+  Two terminal rows plus one current PENDING row for the same typed wire
+  identity materialize successfully, and public creation after terminal history
+  remains allowed.
+- Existing terminal-segment retention behavior remains covered: CONFIRMED and
+  FAILED payload references may become NULL after safe deletion and continue
+  to materialize, while UNKNOWN payload references remain protected and may
+  never become NULL.
+
+Validation results for this second repair pass:
+
+- P2.4b unit: `6`.
+- P2.4b integration: `25` (`2` new integration regression tests in this pass).
+- P2.4a unit/integration: `8 / 31`.
+- P2.3 unit/integration: `7 / 28`.
+- P2.2 unit/integration: `6 / 20`.
+- P2.1 unit/integration: `8 / 31`.
+- P1.10 T0/T1/T2: `6 / 1 / 4`.
+- `BASE_ACCEPTED_FULL_TESTS=387`.
+- `EXPECTED_FULL_TESTS=387 + 6 + 25 = 418`.
+- `OBSERVED_FULL_TESTS=418`, all passing.
+- Compileall, required import, frozen DDL SHA, `git diff --check`, all
+  mandatory prior-slice suites, T0/T1/T2 and existing focused P1 suites
+  passed.
+- The known P1.6 pending-task warning was observed in final verbose discovery
+  output. It was not introduced by P2.4b.
+- Tests used temporary SQLite databases only. No production state root,
+  production DB, service, Telegram call, Codex call, secret or runtime
+  dependency was touched. The frozen DDL was not changed.

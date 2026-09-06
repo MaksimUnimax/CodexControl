@@ -314,43 +314,66 @@ def _validate_delivery_coherence(
             raise _invariant()
         return
     if job.state is TurnJobState.DELIVERY_UNKNOWN:
-        if DeliverySegmentState.UNKNOWN not in states or any(
-            state in (DeliverySegmentState.SENDING, DeliverySegmentState.FAILED)
-            for state in states
-        ):
-            raise _invariant()
+        _validate_exact_state_pattern(
+            states, DeliverySegmentState.CONFIRMED,
+            DeliverySegmentState.UNKNOWN, DeliverySegmentState.PENDING,
+        )
         return
     if job.state is TurnJobState.FAILED:
-        if job.codex_turn_id is None or states.count(DeliverySegmentState.FAILED) != 1 or any(
-            state in (DeliverySegmentState.SENDING, DeliverySegmentState.UNKNOWN)
-            for state in states
-        ):
+        if job.codex_turn_id is None:
             raise _invariant()
+        _validate_exact_state_pattern(
+            states, DeliverySegmentState.CONFIRMED,
+            DeliverySegmentState.FAILED, DeliverySegmentState.PENDING,
+        )
         return
 
-    # DELIVERING is C* (S)? P*. A confirmed segment can never follow work
-    # that is still pending or being sent, and there is at most one SENDING.
-    if DeliverySegmentState.UNKNOWN in states or DeliverySegmentState.FAILED in states:
+    # DELIVERING has exactly two reachable forms: the durable claim window
+    # C* S P*, or the post-confirmation window C+ P+.
+    if _is_exact_state_pattern(
+        states, DeliverySegmentState.CONFIRMED,
+        DeliverySegmentState.SENDING, DeliverySegmentState.PENDING,
+    ):
+        return
+    pending_index = next(
+        (index for index, state in enumerate(states)
+         if state is DeliverySegmentState.PENDING), None
+    )
+    if (
+        pending_index is not None
+        and pending_index > 0
+        and all(state is DeliverySegmentState.CONFIRMED for state in states[:pending_index])
+        and all(state is DeliverySegmentState.PENDING for state in states[pending_index:])
+    ):
+        return
+    raise _invariant()
+
+
+def _is_exact_state_pattern(
+    states: list[DeliverySegmentState],
+    before: DeliverySegmentState,
+    terminal: DeliverySegmentState,
+    after: DeliverySegmentState,
+) -> bool:
+    if not states or states.count(terminal) != 1:
+        return False
+    terminal_index = states.index(terminal)
+    return (
+        all(state is before for state in states[:terminal_index])
+        and all(state is after for state in states[terminal_index + 1:])
+    )
+
+
+def _validate_exact_state_pattern(
+    states: list[DeliverySegmentState],
+    before: DeliverySegmentState,
+    terminal: DeliverySegmentState,
+    after: DeliverySegmentState,
+) -> None:
+    if not _is_exact_state_pattern(states, before, terminal, after):
         raise _invariant()
-    sending_count = states.count(DeliverySegmentState.SENDING)
-    if sending_count > 1 or all(state is DeliverySegmentState.CONFIRMED for state in states):
-        raise _invariant()
-    phase = "CONFIRMED"
-    for state in states:
-        if phase == "CONFIRMED":
-            if state is DeliverySegmentState.SENDING:
-                phase = "SENDING"
-            elif state is DeliverySegmentState.PENDING:
-                phase = "PENDING"
-            elif state is not DeliverySegmentState.CONFIRMED:
-                raise _invariant()
-        elif phase == "SENDING":
-            if state is DeliverySegmentState.PENDING:
-                phase = "PENDING"
-            else:
-                raise _invariant()
-        elif state is not DeliverySegmentState.PENDING:
-            raise _invariant()
+
+
 class _RepositoryBase:
     def __init__(self, storage: SqliteStorage, *, now_ms: Callable[[], int] | None = None) -> None:
         if not isinstance(storage, SqliteStorage) or (now_ms is not None and not callable(now_ms)):

@@ -456,6 +456,252 @@ class DeliveryApprovalRetentionTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await storage.close()
 
+    async def test_delivery_exact_reachable_patterns_and_read_fail_closed(self):
+        storage = await self.open()
+        try:
+            job, dialogue = await self.running_completed(storage, update=43)
+            display = await self.make_display(storage, job.job_id, payload_id="shape-display",
+                                              dialogue_id=dialogue.dialogue_id)
+            delivery = DeliverySegmentRepository(storage)
+
+            async def seed(state, pattern):
+                error = (
+                    "DELIVERY.unknown" if state is TurnJobState.DELIVERY_UNKNOWN
+                    else "DELIVERY.failed" if state is TurnJobState.FAILED else None
+                )
+
+                def write(connection):
+                    connection.execute(
+                        "UPDATE turn_jobs SET state = ?, thread_id = 'thread', "
+                        "codex_turn_id = 'turn', error_class = ? WHERE job_id = ?",
+                        (state.value, error, job.job_id),
+                    )
+                    connection.execute("DELETE FROM delivery_segments WHERE job_id = ?", (job.job_id,))
+                    for sequence, segment_state in enumerate(pattern, 1):
+                        attempt = 0 if segment_state is DeliverySegmentState.PENDING else 1
+                        confirmed = (
+                            None if segment_state is not DeliverySegmentState.CONFIRMED
+                            else 100 + sequence
+                        )
+                        connection.execute(
+                            "INSERT INTO delivery_segments "
+                            "(job_id, sequence, operation, target_message_id, payload_id, "
+                            "payload_sha256, state, attempt_count, confirmed_message_id, "
+                            "created_at_ms, updated_at_ms) VALUES (?, ?, 'CREATE', NULL, ?, ?, ?, ?, ?, 1, 1)",
+                            (job.job_id, sequence, display.payload_id, display.content_sha256,
+                             segment_state.value, attempt, confirmed),
+                        )
+
+                await storage.write(write)
+
+            canonical = (
+                (TurnJobState.DELIVERY_PENDING, (DeliverySegmentState.PENDING,)),
+                (TurnJobState.DELIVERY_PENDING,
+                 (DeliverySegmentState.PENDING, DeliverySegmentState.PENDING)),
+                (TurnJobState.DELIVERING,
+                 (DeliverySegmentState.SENDING, DeliverySegmentState.PENDING)),
+                (TurnJobState.DELIVERING,
+                 (DeliverySegmentState.CONFIRMED, DeliverySegmentState.SENDING,
+                  DeliverySegmentState.PENDING)),
+                (TurnJobState.DELIVERING,
+                 (DeliverySegmentState.CONFIRMED, DeliverySegmentState.PENDING)),
+                (TurnJobState.DELIVERY_UNKNOWN,
+                 (DeliverySegmentState.UNKNOWN, DeliverySegmentState.PENDING)),
+                (TurnJobState.DELIVERY_UNKNOWN,
+                 (DeliverySegmentState.CONFIRMED, DeliverySegmentState.UNKNOWN,
+                  DeliverySegmentState.PENDING)),
+                (TurnJobState.FAILED,
+                 (DeliverySegmentState.FAILED, DeliverySegmentState.PENDING)),
+                (TurnJobState.FAILED,
+                 (DeliverySegmentState.CONFIRMED, DeliverySegmentState.FAILED,
+                  DeliverySegmentState.PENDING)),
+                (TurnJobState.DELIVERED, (DeliverySegmentState.CONFIRMED,)),
+                (TurnJobState.DELIVERED,
+                 (DeliverySegmentState.CONFIRMED, DeliverySegmentState.CONFIRMED)),
+            )
+            for state, pattern in canonical:
+                await seed(state, pattern)
+                listed = await delivery.list_for_job(job.job_id)
+                self.assertEqual(pattern, tuple(segment.state for segment in listed))
+                self.assertEqual(listed[0], await delivery.get(job.job_id, 1))
+
+            invalid = (
+                (TurnJobState.DELIVERING,
+                 (DeliverySegmentState.PENDING, DeliverySegmentState.PENDING)),
+                (TurnJobState.DELIVERING,
+                 (DeliverySegmentState.PENDING, DeliverySegmentState.SENDING)),
+                (TurnJobState.DELIVERING,
+                 (DeliverySegmentState.CONFIRMED, DeliverySegmentState.PENDING,
+                  DeliverySegmentState.CONFIRMED)),
+                (TurnJobState.DELIVERING,
+                 (DeliverySegmentState.SENDING, DeliverySegmentState.SENDING)),
+                (TurnJobState.DELIVERING,
+                 (DeliverySegmentState.CONFIRMED, DeliverySegmentState.CONFIRMED)),
+                (TurnJobState.DELIVERY_UNKNOWN,
+                 (DeliverySegmentState.UNKNOWN, DeliverySegmentState.UNKNOWN)),
+                (TurnJobState.DELIVERY_UNKNOWN,
+                 (DeliverySegmentState.PENDING, DeliverySegmentState.UNKNOWN)),
+                (TurnJobState.DELIVERY_UNKNOWN,
+                 (DeliverySegmentState.UNKNOWN, DeliverySegmentState.CONFIRMED)),
+                (TurnJobState.DELIVERY_UNKNOWN,
+                 (DeliverySegmentState.CONFIRMED, DeliverySegmentState.UNKNOWN,
+                  DeliverySegmentState.CONFIRMED)),
+                (TurnJobState.FAILED,
+                 (DeliverySegmentState.FAILED, DeliverySegmentState.FAILED)),
+                (TurnJobState.FAILED,
+                 (DeliverySegmentState.PENDING, DeliverySegmentState.FAILED)),
+                (TurnJobState.FAILED,
+                 (DeliverySegmentState.FAILED, DeliverySegmentState.CONFIRMED)),
+                (TurnJobState.FAILED,
+                 (DeliverySegmentState.CONFIRMED, DeliverySegmentState.FAILED,
+                  DeliverySegmentState.CONFIRMED)),
+            )
+            for state, pattern in invalid:
+                await seed(state, pattern)
+                for read in (
+                    lambda: delivery.list_for_job(job.job_id),
+                    lambda: delivery.get(job.job_id, 1),
+                ):
+                    with self.assertRaises(RepositoryError) as raised:
+                        await read()
+                    self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+
+            await seed(TurnJobState.DELIVERING,
+                       (DeliverySegmentState.PENDING, DeliverySegmentState.PENDING))
+            before = await storage.read(
+                lambda c: tuple(tuple(row) for row in c.execute(
+                    "SELECT turn_jobs.state, turn_jobs.version, delivery_segments.attempt_count FROM turn_jobs "
+                    "JOIN delivery_segments USING (job_id) WHERE turn_jobs.job_id = ? "
+                    "ORDER BY sequence",
+                    (job.job_id,),
+                ).fetchall())
+            )
+            clock_calls = []
+            with self.assertRaises(RepositoryError) as raised:
+                await DeliverySegmentRepository(
+                    storage, now_ms=lambda: clock_calls.append(1) or 99
+                ).claim_next(job_id=job.job_id, expected_job_version=job.version)
+            self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+            self.assertEqual([], clock_calls)
+            after = await storage.read(
+                lambda c: tuple(tuple(row) for row in c.execute(
+                    "SELECT turn_jobs.state, turn_jobs.version, delivery_segments.attempt_count FROM turn_jobs "
+                    "JOIN delivery_segments USING (job_id) WHERE turn_jobs.job_id = ? "
+                    "ORDER BY sequence",
+                    (job.job_id,),
+                ).fetchall())
+            )
+            self.assertEqual(before, after)
+        finally:
+            await storage.close()
+
+    async def test_duplicate_live_wire_corruption_fails_closed_everywhere(self):
+        for index, (wire_type, wire_value) in enumerate((("INTEGER", 7), ("STRING", "7"))):
+            self.path = os.path.join(self.tempdir.name, f"duplicate-live-{index}.sqlite3")
+            storage = await self.open()
+            try:
+                jobs, job, dialogue, running = await self.make_running(storage, update=44 + index)
+                await self.execute_write(
+                    storage,
+                    "INSERT INTO transient_payloads "
+                    "(payload_id, dialogue_id, job_id, kind, content, content_sha256, byte_length, "
+                    "created_at_ms, expires_at_ms) VALUES ('duplicate-retention-payload', ?, ?, 'DISPLAY', "
+                    "?, ?, 3, 1, 2)",
+                    (dialogue.dialogue_id, job.job_id, b"old", hashlib.sha256(b"old").hexdigest()),
+                )
+                wire_columns = (
+                    (wire_value, None) if wire_type == "INTEGER" else (None, wire_value)
+                )
+                for approval_id in ("approval-A", "approval-B"):
+                    await self.execute_write(
+                        storage,
+                        "INSERT INTO approvals "
+                        "(approval_id, profile_id, wire_request_id_type, wire_request_id_int, "
+                        "wire_request_id_text, job_id, kind, display_payload_id, state, created_at_ms, "
+                        "updated_at_ms, expires_at_ms) VALUES (?, 'profile', ?, ?, ?, ?, 'permissions', "
+                        "NULL, 'PENDING', 1, 1, 2)",
+                        (approval_id, wire_type, wire_columns[0], wire_columns[1], job.job_id),
+                    )
+
+                approvals = ApprovalRepository(storage)
+                for approval_id in ("approval-A", "approval-B"):
+                    with self.assertRaises(RepositoryError) as raised:
+                        await approvals.get(approval_id)
+                    self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+
+                token = token_hash(f"duplicate-live-{index}")
+                callback = await CallbackActionRepository(storage, now_ms=lambda: 3).create(
+                    token_hash_sha256=token, action="approval_allow", subject_type="approval",
+                    subject_id="approval-A", expected_version=running.version,
+                    expected_state="PENDING", authorized_user_id=1, authorized_chat_id=-2,
+                    expires_at_ms=100,
+                )
+                clock_calls = []
+                with self.assertRaises(RepositoryError) as raised:
+                    await ApprovalRepository(
+                        storage, now_ms=lambda: clock_calls.append(1) or 4
+                    ).claim_callback(
+                        token_hash_sha256=callback.token_hash_sha256,
+                        authorized_user_id=1, authorized_chat_id=-2,
+                    )
+                self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+                self.assertEqual([], clock_calls)
+                durable = await storage.read(
+                    lambda c: tuple(tuple(row) for row in c.execute(
+                        "SELECT state FROM approvals WHERE approval_id IN ('approval-A', 'approval-B') "
+                        "ORDER BY approval_id"
+                    ).fetchall())
+                )
+                self.assertEqual(["PENDING", "PENDING"], [row[0] for row in durable])
+                self.assertIsNone(await storage.read(
+                    lambda c: c.execute(
+                        "SELECT consumed_at_ms FROM callback_actions WHERE token_hash_sha256 = ?",
+                        (callback.token_hash_sha256,),
+                    ).fetchone()[0]
+                ))
+
+                with self.assertRaises(RepositoryError) as raised:
+                    await RetentionRepository(storage, now_ms=lambda: 10).sweep(1)
+                self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+                durable = await storage.read(
+                    lambda c: tuple(tuple(row) for row in c.execute(
+                        "SELECT state FROM approvals WHERE approval_id IN ('approval-A', 'approval-B') "
+                        "ORDER BY approval_id"
+                    ).fetchall())
+                )
+                self.assertEqual(["PENDING", "PENDING"], [row[0] for row in durable])
+                self.assertIsNotNone(await TransientPayloadRepository(storage).get(
+                    "duplicate-retention-payload"
+                ))
+
+                await self.execute_write(
+                    storage, "UPDATE approvals SET state = 'APPROVED' "
+                    "WHERE approval_id IN ('approval-A', 'approval-B')"
+                )
+                current = await ApprovalRepository(storage, now_ms=lambda: 10).create_pending(
+                    approval_id="approval-current", profile_id="profile", wire_request_id=wire_value,
+                    kind=ApprovalKind.PERMISSIONS, job_id=job.job_id,
+                    expected_job_version=running.version, expires_at_ms=100,
+                )
+                await self.execute_write(
+                    storage,
+                    "INSERT INTO approvals "
+                    "(approval_id, profile_id, wire_request_id_type, wire_request_id_int, "
+                    "wire_request_id_text, job_id, kind, display_payload_id, state, created_at_ms, "
+                    "updated_at_ms, expires_at_ms) VALUES ('approval-history', 'profile', ?, ?, ?, ?, "
+                    "'permissions', NULL, 'DENIED', 1, 1, 2)",
+                    (wire_type, wire_columns[0], wire_columns[1], job.job_id),
+                )
+                self.assertEqual(ApprovalState.PENDING, current.state)
+                self.assertEqual(ApprovalState.PENDING,
+                                 (await ApprovalRepository(storage).get("approval-current")).state)
+                self.assertEqual(ApprovalState.DENIED,
+                                 (await ApprovalRepository(storage).get("approval-history")).state)
+                self.assertEqual(ApprovalState.APPROVED,
+                                 (await ApprovalRepository(storage).get("approval-A")).state)
+            finally:
+                await storage.close()
+
     async def test_delivery_coherence_and_unknown_payload_authority(self):
         storage = await self.open()
         try:
