@@ -28,8 +28,8 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P2.4a atomic JOB ingress + turn-job execution claims + bounded transient payload repository. Accepted implementation after one repair review: `ca5b5cc19ac9278377b96abec46c523603b2ff47`.
 - [DONE] P2.4b delivery segments + atomic approval-subject callback claims + bounded transient retention/sanitization. Accepted implementation after two repair reviews: `1dedc737ffa3092ba0dbcd8618a57fa6c351b849`.
 - [DONE] P2.5 deletion state claims + deletion tombstones + sanitized error fingerprints + confirmed hard-delete local purge/finalization transaction. Accepted implementation after one repair review: `87ef37cf245d79f6d20b507b13c0f36014c1580f`.
-- [NEXT] P2.6a bounded non-content metadata retention for terminal jobs/ingress/callbacks/tombstones/errors.
-- [PLANNED] P2.6b crash/restart/idempotency harness and final P2 acceptance.
+- [DONE] P2.6a bounded non-content metadata retention for terminal jobs/ingress/callbacks/tombstones/errors. Accepted implementation after one repair review: `e6f59739b3091d00894d3434abb5a99e2af72885`.
+- [NEXT] P2.6b crash/restart/idempotency harness and final P2 acceptance.
 
 ## P3 — Dialogue application service
 Lazy create, one-dialogue invariant, immutable turn claims; BUSY/no queue; model/effort idle mutation/profile lock; interrupt/recovery; hard-delete orchestration over ports.
