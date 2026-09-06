@@ -15,6 +15,8 @@ from .core_repositories import (
     _next_version,
     _validate_clock,
 )
+from .delivery_records import DeliverySegmentState
+from .delivery_repositories import _load_segments
 from .deletion_records import DeletionFinalizeResult, DeletionTombstoneRecord
 from .repository_errors import RepositoryError, RepositoryErrorCategory
 from .records import DialogueRecord, DialogueState
@@ -126,6 +128,23 @@ def _validate_job_binding(dialogue: DialogueRecord, job: Any) -> None:
         raise _invariant()
 
 
+def _ensure_no_tombstone(connection: Any, dialogue_id: str) -> None:
+    if connection.execute(
+        "SELECT 1 FROM deletion_tombstones WHERE dialogue_id = ?", (dialogue_id,)
+    ).fetchone() is not None:
+        raise _invariant()
+
+
+def _is_exact_delivery_failure_pattern(states: list[DeliverySegmentState]) -> bool:
+    if not states or states.count(DeliverySegmentState.FAILED) != 1:
+        return False
+    failed_index = states.index(DeliverySegmentState.FAILED)
+    return (
+        all(state is DeliverySegmentState.CONFIRMED for state in states[:failed_index])
+        and all(state is DeliverySegmentState.PENDING for state in states[failed_index + 1:])
+    )
+
+
 def _check_delete_readiness(connection: Any, dialogue: DialogueRecord) -> tuple[Any, ...]:
     rows = connection.execute(
         _job_select() + " WHERE dialogue_id = ? ORDER BY job_id", (dialogue.dialogue_id,)
@@ -136,6 +155,14 @@ def _check_delete_readiness(connection: Any, dialogue: DialogueRecord) -> tuple[
         if job.state not in (TurnJobState.DELIVERED, TurnJobState.FAILED):
             raise _state_conflict()
         _validate_job_binding(dialogue, job)
+        segments = _load_segments(connection, job)
+        states = [segment.state for segment, _ in segments]
+        if job.state is TurnJobState.DELIVERED:
+            if not segments or any(state is not DeliverySegmentState.CONFIRMED for state in states):
+                raise _invariant()
+        elif segments:
+            if job.codex_turn_id is None or not _is_exact_delivery_failure_pattern(states):
+                raise _invariant()
         jobs.append(job)
 
     approval_rows = connection.execute(
@@ -188,6 +215,7 @@ class DeletionRepository(_RepositoryBase):
 
         def write(connection: Any) -> DialogueRecord:
             current = _dialogue_for_update(connection, dialogue_id)
+            _ensure_no_tombstone(connection, dialogue_id)
             if current.version != expected_version:
                 raise _error(RepositoryErrorCategory.VERSION_CONFLICT)
             if current.state is not DialogueState.IDLE or current.thread_id is None:
@@ -221,6 +249,7 @@ class DeletionRepository(_RepositoryBase):
 
         def write(connection: Any) -> DialogueRecord:
             current = _dialogue_for_update(connection, dialogue_id)
+            _ensure_no_tombstone(connection, dialogue_id)
             if current.version != expected_version:
                 raise _error(RepositoryErrorCategory.VERSION_CONFLICT)
             if current.state is not DialogueState.DELETE_PENDING or current.thread_id is None:

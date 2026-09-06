@@ -133,3 +133,68 @@ No credentials, tokens, private keys, production paths, prompt/response
 content, raw external error body, traceback, stdout/stderr or environment dump
 was added. No architecture/ADR, schema, roadmap or current-work authority
 file was edited.
+
+## Architect first repair pass
+
+This is factual repair evidence only. P2.5 remains subject to independent
+architect review and acceptance; this section does not claim acceptance and
+does not start or recommend P2.6.
+
+- Rejected candidate repaired: `24e76e9913069b0b38e92ac33aedb0aceace0c24`.
+- Original architect P2.5 base: `521453dbd73aab6c6f52defe770af3bd2e265a95`.
+
+Repair and proof coverage:
+
+- Delete readiness now reuses accepted P2.4b segment materialization and
+  requires a non-empty all-CONFIRMED plan for DELIVERED jobs. A Codex-level
+  FAILED job with zero delivery rows remains safe; a delivery-owned FAILED
+  job requires exactly `C* F P*` with one FAILED segment. Impossible plans are
+  invariant violations before the deletion clock, including after the
+  dialogue has entered DELETE_PENDING or DELETING.
+- `claim_delete_intent` and `claim_deleting` independently reject any
+  pre-existing same-dialogue tombstone before clock use or state mutation.
+  Finalization retains its collision guard and does not overwrite tombstones.
+- Error `get` and `record` now fetch all ASCII-case-insensitive fingerprint
+  aliases, require at most one row, and require the stored row itself to be
+  canonical lowercase. Uppercase-only and dual-case aliases fail closed with
+  no mutation or clock call.
+- Tests bind exact `stale_generation` to the DELETING version, including
+  signed-64 MAX finalization without a version increment. Wrong-version,
+  wrong-state and missing-dialogue finalization paths prove zero clock,
+  tombstone and purge effects.
+- Deletion transition overflow is covered for intent, deleting, unknown and
+  error claims at signed-64 MAX. Public expected-version and tombstone-expiry
+  numeric boundary matrices distinguish static validation from the
+  post-clock expiry relation.
+- Error entity-binding collision and persisted last-seen-before-first-seen
+  corruption are covered with finite/redacted invariant diagnostics.
+- Finalization cancellation uses `asyncio.to_thread(started.wait, 2)` event
+  synchronization followed only by `asyncio.sleep(0)` loop yields. Repeated
+  cancellation remains attached to one owned transaction and produces one
+  tombstone and one purge.
+
+Validation results for this repair pass:
+
+- P2.5 unit: `4`.
+- P2.5 integration: `18`.
+- P2.4b unit/integration: `6 / 25`.
+- P2.4a unit/integration: `8 / 31`.
+- P2.3 unit/integration: `7 / 28`.
+- P2.2 unit/integration: `6 / 20`.
+- P2.1 unit/integration: `8 / 31`.
+- P1.10 T0/T1/T2: `6 / 1 / 4`.
+- `BASE_ACCEPTED_FULL_TESTS=418`.
+- `EXPECTED_FULL_TESTS=418 + 4 + 18 = 440`.
+- `OBSERVED_FULL_TESTS=440`, all passing.
+- Compileall, required public import, frozen DDL SHA, `git diff --check`,
+  prior-slice regressions and focused P1 suites passed.
+- The known pre-existing P1.6 pending-task warning was observed during the
+  focused P1 turn-lifecycle run and was not introduced by P2.5.
+
+Security and effects:
+
+- All repair tests used temporary SQLite databases and test-only SQL fixtures.
+- No Codex, Telegram, thread/delete, network, service, deployment,
+  production DB/state, secret or runtime dependency effect occurred.
+- No schema/DDL, accepted delivery implementation, architecture/ADR, roadmap
+  or current-work file was changed.

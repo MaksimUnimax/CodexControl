@@ -148,15 +148,32 @@ def _error_select() -> str:
     )
 
 
+def _lookup_error_rows(connection: Any, fingerprint_sha256: str) -> list[Any]:
+    rows = connection.execute(
+        _error_select() + " WHERE lower(fingerprint_sha256) = ?",
+        (fingerprint_sha256,),
+    ).fetchall()
+    if len(rows) > 1:
+        raise _invariant()
+    return rows
+
+
+def _lookup_error(connection: Any, fingerprint_sha256: str) -> ErrorFingerprintRecord | None:
+    rows = _lookup_error_rows(connection, fingerprint_sha256)
+    if not rows:
+        return None
+    record = _materialize_error(connection, rows[0])
+    if record.fingerprint_sha256 != fingerprint_sha256:
+        raise _invariant()
+    return record
+
+
 class ErrorFingerprintRepository(_RepositoryBase):
     async def get(self, fingerprint_sha256: str) -> ErrorFingerprintRecord | None:
         fingerprint_sha256 = _validate_fingerprint(fingerprint_sha256)
 
         def read(connection: Any) -> ErrorFingerprintRecord | None:
-            row = connection.execute(
-                _error_select() + " WHERE lower(fingerprint_sha256) = ?", (fingerprint_sha256,)
-            ).fetchone()
-            return None if row is None else _materialize_error(connection, row)
+            return _lookup_error(connection, fingerprint_sha256)
 
         return await self._storage.read(read)
 
@@ -171,10 +188,8 @@ class ErrorFingerprintRepository(_RepositoryBase):
 
         def write(connection: Any) -> ErrorFingerprintRecord:
             _validate_entity_references(connection, dialogue_id, job_id)
-            row = connection.execute(
-                _error_select() + " WHERE lower(fingerprint_sha256) = ?", (fingerprint_sha256,)
-            ).fetchone()
-            if row is None:
+            existing = _lookup_error(connection, fingerprint_sha256)
+            if existing is None:
                 now = _validate_clock(self._clock)
                 connection.execute(
                     "INSERT INTO errors "
@@ -186,7 +201,6 @@ class ErrorFingerprintRepository(_RepositoryBase):
                     fingerprint_sha256, error_class, 1, now, now, dialogue_id, job_id
                 )
 
-            existing = _materialize_error(connection, row)
             if (
                 existing.error_class != error_class
                 or existing.dialogue_id != dialogue_id

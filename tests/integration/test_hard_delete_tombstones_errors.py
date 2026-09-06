@@ -55,7 +55,7 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
         deleting = await repo.claim_deleting(dialogue_id="d", expected_version=pending.version)
         return repo, deleting
 
-    async def insert_job(self, storage, state, *, job_id="job", error_class=None):
+    async def insert_job(self, storage, state, *, job_id="job", error_class=None, delivery=False):
         shape = {
             "RECEIVED": (None, None, None),
             "CLAIMED": (THREAD_SENTINEL, None, None),
@@ -66,7 +66,7 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
             "DELIVERY_PENDING": (THREAD_SENTINEL, "turn", None),
             "DELIVERING": (THREAD_SENTINEL, "turn", None),
             "DELIVERY_UNKNOWN": (THREAD_SENTINEL, "turn", "ERR"),
-            "FAILED": (THREAD_SENTINEL, None, error_class or "ERR"),
+            "FAILED": (THREAD_SENTINEL, "turn" if delivery else None, error_class or "ERR"),
             "DELIVERED": (THREAD_SENTINEL, "turn", None),
         }
         thread_id, codex_turn_id, stored_error = shape[state]
@@ -78,6 +78,39 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
             "codex_turn_id, state, version, created_at_ms, updated_at_ms, error_class) "
             "VALUES (?, ?, -100, 1, 'd', 'server', 'profile', ?, 'model', 'high', ?, ?, ?, 0, 1, 1, ?)",
             (job_id, abs(hash(job_id)) % 1000000, thread_id, "a" * 64, codex_turn_id, state, stored_error),
+        )
+
+    async def insert_terminal_job_with_segments(self, storage, job_state, segment_states):
+        await self.insert_job(storage, job_state, delivery=bool(segment_states))
+        digest = hashlib.sha256(b"display").hexdigest()
+        for sequence, segment_state in enumerate(segment_states, 1):
+            payload_id = f"display-{sequence}" if segment_state in ("PENDING", "SENDING", "UNKNOWN") else None
+            if payload_id is not None:
+                await self.write_sql(
+                    storage,
+                    "INSERT INTO transient_payloads VALUES (?, 'd', 'job', 'DISPLAY', ?, ?, 7, 1, 100)",
+                    (payload_id, b"display", digest),
+                )
+            attempt_count = 0 if segment_state == "PENDING" else 1
+            confirmed_message_id = 10 + sequence if segment_state == "CONFIRMED" else None
+            await self.write_sql(
+                storage,
+                "INSERT INTO delivery_segments VALUES ('job', ?, 'CREATE', NULL, ?, ?, ?, ?, ?, 1, 1)",
+                (sequence, payload_id, digest, segment_state, attempt_count, confirmed_message_id),
+            )
+
+    async def corrupt_segment_to_active_state(self, storage, state):
+        digest = hashlib.sha256(b"corrupt").hexdigest()
+        await self.write_sql(
+            storage,
+            "INSERT INTO transient_payloads VALUES ('corrupt-display', 'd', 'job', 'DISPLAY', ?, ?, 7, 1, 100)",
+            (b"corrupt", digest),
+        )
+        await self.write_sql(
+            storage,
+            "UPDATE delivery_segments SET payload_id = 'corrupt-display', payload_sha256 = ?, state = ?, "
+            "attempt_count = 1, confirmed_message_id = NULL WHERE job_id = 'job' AND sequence = 1",
+            (digest, state),
         )
 
     async def test_public_surfaces_and_input_validation(self):
@@ -117,15 +150,51 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await storage.close()
 
-        for state in ("DELIVERED", "FAILED"):
+        for state, segment_states in (
+            ("DELIVERED", ("CONFIRMED",)),
+            ("FAILED", ()),
+            ("FAILED", ("FAILED",)),
+            ("FAILED", ("CONFIRMED", "FAILED")),
+            ("FAILED", ("CONFIRMED", "FAILED", "PENDING")),
+        ):
             storage = await self.fresh_storage()
             try:
                 current = await self.dialogue(storage)
-                await self.insert_job(storage, state)
+                await self.insert_terminal_job_with_segments(storage, state, segment_states)
                 result = await DeletionRepository(storage, now_ms=lambda: 20).claim_delete_intent(
                     dialogue_id="d", expected_version=current.version
                 )
                 self.assertEqual(DialogueState.DELETE_PENDING, result.state)
+            finally:
+                await storage.close()
+
+        for state, segment_states in (
+            ("DELIVERED", ()),
+            ("DELIVERED", ("SENDING",)),
+            ("DELIVERED", ("UNKNOWN",)),
+            ("FAILED", ("PENDING", "FAILED")),
+            ("FAILED", ("FAILED", "CONFIRMED")),
+            ("FAILED", ("FAILED", "FAILED")),
+            ("FAILED", ("CONFIRMED", "FAILED", "CONFIRMED")),
+        ):
+            storage = await self.fresh_storage()
+            clock_calls = []
+            try:
+                current = await self.dialogue(storage)
+                await self.insert_terminal_job_with_segments(storage, state, segment_states)
+
+                def failing_clock():
+                    clock_calls.append(True)
+                    raise AssertionError("clock must not be called")
+
+                with self.assertRaises(RepositoryError) as raised:
+                    await DeletionRepository(storage, now_ms=failing_clock).claim_delete_intent(
+                        dialogue_id="d", expected_version=current.version
+                    )
+                self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+                self.assertEqual([], clock_calls)
+                self.assertEqual(DialogueState.IDLE, (await DialogueRepository(storage).get_live()).state)
+                self.assertIsNone(await DeletionRepository(storage).get_tombstone("d"))
             finally:
                 await storage.close()
 
@@ -145,11 +214,94 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await storage.close()
 
+    async def test_delivery_coherence_remains_a_gate_after_delete_state_changes(self):
+        for target_state in ("DELETE_PENDING", "DELETING"):
+            storage = await self.fresh_storage()
+            clock_calls = []
+            try:
+                current = await self.dialogue(storage)
+                await self.insert_terminal_job_with_segments(storage, "DELIVERED", ("CONFIRMED",))
+                repo = DeletionRepository(storage, now_ms=lambda: 20)
+                pending = await repo.claim_delete_intent(dialogue_id="d", expected_version=current.version)
+                if target_state == "DELETE_PENDING":
+                    expected_version = pending.version
+                else:
+                    deleting = await repo.claim_deleting(dialogue_id="d", expected_version=pending.version)
+                    expected_version = deleting.version
+                await self.corrupt_segment_to_active_state(storage, "SENDING")
+
+                def failing_clock():
+                    clock_calls.append(True)
+                    raise AssertionError("clock must not be called")
+
+                gated_repo = DeletionRepository(storage, now_ms=failing_clock)
+                if target_state == "DELETE_PENDING":
+                    with self.assertRaises(RepositoryError) as raised:
+                        await gated_repo.claim_deleting(dialogue_id="d", expected_version=expected_version)
+                    self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+                    self.assertEqual(DialogueState.DELETE_PENDING, (await DialogueRepository(storage).get_live()).state)
+                else:
+                    with self.assertRaises(RepositoryError) as raised:
+                        await gated_repo.finalize_confirmed(
+                            dialogue_id="d", expected_version=expected_version, tombstone_expires_at_ms=100
+                        )
+                    self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+                    self.assertEqual(DialogueState.DELETING, (await DialogueRepository(storage).get_live()).state)
+                    self.assertIsNone(await gated_repo.get_tombstone("d"))
+                self.assertEqual([], clock_calls)
+            finally:
+                await storage.close()
+
+    async def test_tombstone_collision_is_blocked_before_delete_effect_boundary(self):
+        storage = await self.open()
+        try:
+            current = await self.dialogue(storage)
+            await self.write_sql(storage, "INSERT INTO deletion_tombstones VALUES ('d', ?, 1, 1, 100)", ("a" * 64,))
+            clock_calls = []
+
+            def failing_clock():
+                clock_calls.append(True)
+                raise AssertionError("clock must not be called")
+
+            with self.assertRaises(RepositoryError) as raised:
+                await DeletionRepository(storage, now_ms=failing_clock).claim_delete_intent(
+                    dialogue_id="d", expected_version=current.version
+                )
+            self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+            self.assertEqual([], clock_calls)
+            self.assertEqual(DialogueState.IDLE, (await DialogueRepository(storage).get_live()).state)
+            self.assertIsNotNone(await DeletionRepository(storage).get_tombstone("d"))
+        finally:
+            await storage.close()
+
+        storage = await self.fresh_storage()
+        try:
+            current = await self.dialogue(storage)
+            repo = DeletionRepository(storage, now_ms=lambda: 20)
+            pending = await repo.claim_delete_intent(dialogue_id="d", expected_version=current.version)
+            await self.write_sql(storage, "INSERT INTO deletion_tombstones VALUES ('d', ?, 1, 1, 100)", ("b" * 64,))
+            clock_calls = []
+
+            def failing_clock():
+                clock_calls.append(True)
+                raise AssertionError("clock must not be called")
+
+            with self.assertRaises(RepositoryError) as raised:
+                await DeletionRepository(storage, now_ms=failing_clock).claim_deleting(
+                    dialogue_id="d", expected_version=pending.version
+                )
+            self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+            self.assertEqual([], clock_calls)
+            self.assertEqual(DialogueState.DELETE_PENDING, (await DialogueRepository(storage).get_live()).state)
+            self.assertIsNotNone(await repo.get_tombstone("d"))
+        finally:
+            await storage.close()
+
     async def test_pending_approval_blocks_without_clock_and_concurrent_intent_has_one_winner(self):
         storage = await self.open()
         try:
             current = await self.dialogue(storage)
-            await self.insert_job(storage, "DELIVERED")
+            await self.insert_terminal_job_with_segments(storage, "DELIVERED", ("CONFIRMED",))
             await self.write_sql(storage,
                 "INSERT INTO approvals "
                 "(approval_id, profile_id, wire_request_id_type, wire_request_id_int, wire_request_id_text, "
@@ -221,13 +373,12 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
         storage = await self.open()
         try:
             repo, deleting = await self.delete_claimed(storage)
-            await self.insert_job(storage, "DELIVERED")
+            await self.insert_terminal_job_with_segments(storage, "DELIVERED", ("CONFIRMED",))
             digest = hashlib.sha256(b"x").hexdigest()
             def write_children(connection):
                 connection.execute("INSERT INTO transient_payloads VALUES ('p-dialogue', 'd', NULL, 'DISPLAY', X'78', ?, 1, 1, 100)", (digest,))
                 connection.execute("INSERT INTO transient_payloads VALUES ('p-job', NULL, 'job', 'OUTPUT', X'78', ?, 1, 1, 100)", (digest,))
                 connection.execute("INSERT INTO transient_payloads VALUES ('p-both', 'd', 'job', 'OUTPUT', X'78', ?, 1, 1, 100)", (digest,))
-                connection.execute("INSERT INTO delivery_segments VALUES ('job', 1, 'CREATE', NULL, NULL, ?, 'CONFIRMED', 1, 9, 1, 1)", (digest,))
                 connection.execute("INSERT INTO approvals VALUES ('approval', 'profile', 'INTEGER', 1, NULL, 'job', 'command_execution', NULL, 'DENIED', 1, 1, 100)")
                 connection.execute("INSERT INTO errors VALUES (?, 'STORAGE:failure', 2, 2, 5, 'd', 'job')", ('b' * 64,))
                 connection.execute("INSERT INTO ingress_updates VALUES (7, 1, 1, 'JOB:job')")
@@ -299,15 +450,12 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
 
         try:
             repo, deleting = await self.delete_claimed(storage)
-            await self.insert_job(storage, "DELIVERED")
+            await self.insert_terminal_job_with_segments(storage, "DELIVERED", ("CONFIRMED",))
             repo = DeletionRepository(storage, now_ms=blocked_clock)
             task = asyncio.create_task(repo.finalize_confirmed(
                 dialogue_id="d", expected_version=deleting.version, tombstone_expires_at_ms=100
             ))
-            for _ in range(100):
-                if started.is_set():
-                    break
-                await asyncio.sleep(0.001)
+            await asyncio.to_thread(started.wait, 2)
             self.assertTrue(started.is_set())
             for _ in range(5):
                 task.cancel()
@@ -320,11 +468,190 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
             release.set()
             await storage.close()
 
+    async def test_finalize_binds_exact_stale_generation_and_accepts_max_version(self):
+        storage = await self.open()
+        try:
+            repo, deleting = await self.delete_claimed(storage)
+            result = await repo.finalize_confirmed(
+                dialogue_id="d", expected_version=deleting.version, tombstone_expires_at_ms=100
+            )
+            self.assertEqual(deleting.version, result.tombstone.stale_generation)
+            persisted = await repo.get_tombstone("d")
+            self.assertEqual(deleting.version, persisted.stale_generation)
+        finally:
+            await storage.close()
+
+        storage = await self.fresh_storage()
+        try:
+            await self.dialogue(storage)
+            await self.write_sql(
+                storage,
+                "UPDATE dialogues SET state = 'DELETING', version = ?, last_error_class = NULL WHERE dialogue_id = 'd'",
+                (MAX_SQLITE_INT,),
+            )
+            repo = DeletionRepository(storage, now_ms=lambda: 20)
+            result = await repo.finalize_confirmed(
+                dialogue_id="d", expected_version=MAX_SQLITE_INT, tombstone_expires_at_ms=100
+            )
+            self.assertEqual(MAX_SQLITE_INT, result.tombstone.stale_generation)
+            self.assertEqual(MAX_SQLITE_INT, (await repo.get_tombstone("d")).stale_generation)
+        finally:
+            await storage.close()
+
+    async def test_finalize_preconditions_are_exact_and_do_not_call_clock(self):
+        storage = await self.open()
+        try:
+            repo, deleting = await self.delete_claimed(storage)
+            clock_calls = []
+
+            def failing_clock():
+                clock_calls.append(True)
+                raise AssertionError("clock must not be called")
+
+            with self.assertRaises(RepositoryError) as raised:
+                await DeletionRepository(storage, now_ms=failing_clock).finalize_confirmed(
+                    dialogue_id="d", expected_version=deleting.version - 1, tombstone_expires_at_ms=100
+                )
+            self.assertIs(RepositoryErrorCategory.VERSION_CONFLICT, raised.exception.category)
+            self.assertEqual([], clock_calls)
+            self.assertEqual(deleting, await DialogueRepository(storage).get_live())
+            self.assertIsNone(await repo.get_tombstone("d"))
+        finally:
+            await storage.close()
+
+        storage = await self.fresh_storage()
+        try:
+            current = await self.dialogue(storage)
+            repo = DeletionRepository(storage, now_ms=lambda: 20)
+            pending = await repo.claim_delete_intent(dialogue_id="d", expected_version=current.version)
+            clock_calls = []
+
+            def failing_clock():
+                clock_calls.append(True)
+                raise AssertionError("clock must not be called")
+
+            with self.assertRaises(RepositoryError) as raised:
+                await DeletionRepository(storage, now_ms=failing_clock).finalize_confirmed(
+                    dialogue_id="d", expected_version=pending.version, tombstone_expires_at_ms=100
+                )
+            self.assertIs(RepositoryErrorCategory.STATE_CONFLICT, raised.exception.category)
+            self.assertEqual([], clock_calls)
+            self.assertEqual(pending, await DialogueRepository(storage).get_live())
+            self.assertIsNone(await repo.get_tombstone("d"))
+        finally:
+            await storage.close()
+
+        storage = await self.fresh_storage()
+        try:
+            clock_calls = []
+
+            def failing_clock():
+                clock_calls.append(True)
+                raise AssertionError("clock must not be called")
+
+            with self.assertRaises(RepositoryError) as raised:
+                await DeletionRepository(storage, now_ms=failing_clock).finalize_confirmed(
+                    dialogue_id="missing", expected_version=0, tombstone_expires_at_ms=100
+                )
+            self.assertIs(RepositoryErrorCategory.NOT_FOUND, raised.exception.category)
+            self.assertEqual([], clock_calls)
+        finally:
+            await storage.close()
+
+    async def test_delete_transition_version_overflow_matrix_is_fail_closed(self):
+        cases = (
+            ("IDLE", "claim_delete_intent"),
+            ("DELETE_PENDING", "claim_deleting"),
+            ("DELETING", "mark_delete_unknown"),
+            ("DELETING", "mark_delete_error"),
+        )
+        for state, method_name in cases:
+            storage = await self.fresh_storage()
+            try:
+                await self.dialogue(storage)
+                await self.write_sql(
+                    storage,
+                    "UPDATE dialogues SET state = ?, version = ?, last_error_class = ? WHERE dialogue_id = 'd'",
+                    (state, MAX_SQLITE_INT, None),
+                )
+                before = await DialogueRepository(storage).get_live()
+                clock_calls = []
+
+                def failing_clock():
+                    clock_calls.append(True)
+                    raise AssertionError("clock must not be called")
+
+                repo = DeletionRepository(storage, now_ms=failing_clock)
+                kwargs = {"dialogue_id": "d", "expected_version": MAX_SQLITE_INT}
+                if method_name in ("mark_delete_unknown", "mark_delete_error"):
+                    kwargs["error_class"] = "E"
+                with self.assertRaises(RepositoryError) as raised:
+                    await getattr(repo, method_name)(**kwargs)
+                self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+                self.assertEqual([], clock_calls)
+                self.assertEqual(before, await DialogueRepository(storage).get_live())
+            finally:
+                await storage.close()
+
+    async def test_deletion_numeric_input_boundaries_are_distinct_from_expiry_relation(self):
+        storage = await self.open()
+        try:
+            current = await self.dialogue(storage)
+            clock_calls = []
+
+            def failing_clock():
+                clock_calls.append(True)
+                raise AssertionError("clock must not be called")
+
+            for value in (True, False, -1, 1.5, MAX_SQLITE_INT + 1):
+                with self.assertRaises(RepositoryError) as raised:
+                    await DeletionRepository(storage, now_ms=failing_clock).claim_delete_intent(
+                        dialogue_id="d", expected_version=value
+                    )
+                self.assertIs(RepositoryErrorCategory.INVALID_ARGUMENT, raised.exception.category)
+            for value in (0, MAX_SQLITE_INT):
+                with self.assertRaises(RepositoryError) as raised:
+                    await DeletionRepository(storage, now_ms=failing_clock).claim_delete_intent(
+                        dialogue_id="d", expected_version=value
+                    )
+                self.assertIs(RepositoryErrorCategory.VERSION_CONFLICT, raised.exception.category)
+            self.assertEqual([], clock_calls)
+        finally:
+            await storage.close()
+
+        for value in (True, False, -1, 1.5, MAX_SQLITE_INT + 1):
+            storage = await self.fresh_storage()
+            try:
+                _, deleting = await self.delete_claimed(storage)
+                with self.assertRaises(RepositoryError) as raised:
+                    await DeletionRepository(storage, now_ms=lambda: 20).finalize_confirmed(
+                        dialogue_id="d", expected_version=deleting.version,
+                        tombstone_expires_at_ms=value,
+                    )
+                self.assertIs(RepositoryErrorCategory.INVALID_ARGUMENT, raised.exception.category)
+            finally:
+                await storage.close()
+
+        for value in (0, MAX_SQLITE_INT):
+            storage = await self.fresh_storage()
+            try:
+                _, deleting = await self.delete_claimed(storage)
+                with self.assertRaises(RepositoryError) as raised:
+                    await DeletionRepository(
+                        storage, now_ms=lambda: (_ for _ in ()).throw(RuntimeError("CLOCK"))
+                    ).finalize_confirmed(
+                        dialogue_id="d", expected_version=deleting.version,
+                        tombstone_expires_at_ms=value,
+                    )
+                self.assertIs(RepositoryErrorCategory.CLOCK_INVALID, raised.exception.category)
+            finally:
+                await storage.close()
+
     async def test_error_first_duplicate_references_concurrency_and_overflow(self):
         storage = await self.open()
         try:
             await self.dialogue(storage)
-            await self.insert_job(storage, "DELIVERED")
+            await self.insert_terminal_job_with_segments(storage, "DELIVERED", ("CONFIRMED",))
             repo = ErrorFingerprintRepository(storage, now_ms=lambda: 10)
             first = await repo.record(fingerprint_sha256="a" * 64, error_class="STORAGE:failure", dialogue_id="d", job_id="job")
             duplicate = await ErrorFingerprintRepository(storage, now_ms=lambda: 5).record(
@@ -352,16 +679,79 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await storage.close()
 
+    async def test_error_fingerprint_case_aliases_are_unique_semantically(self):
+        storage = await self.open()
+        try:
+            await self.write_sql(
+                storage,
+                "INSERT INTO errors VALUES (?, 'E', 1, 2, 3, NULL, NULL)",
+                ("A" * 64,),
+            )
+            with self.assertRaises(RepositoryError) as raised:
+                await ErrorFingerprintRepository(storage).get("a" * 64)
+            self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+            self.assertNotIn("A" * 64, repr(raised.exception))
+        finally:
+            await storage.close()
+
+        for order in (("a" * 64, "A" * 64), ("A" * 64, "a" * 64)):
+            storage = await self.fresh_storage()
+            try:
+                await self.dialogue(storage)
+                await self.insert_job(storage, "DELIVERED")
+                for fingerprint in order:
+                    await self.write_sql(
+                        storage,
+                        "INSERT INTO errors VALUES (?, 'E', 1, 2, 3, 'd', 'job')",
+                        (fingerprint,),
+                    )
+                with self.assertRaises(RepositoryError) as raised:
+                    await ErrorFingerprintRepository(storage).get("a" * 64)
+                self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+                before = await storage.read(lambda c: [tuple(row) for row in c.execute(
+                    "SELECT fingerprint_sha256, count FROM errors ORDER BY rowid"
+                ).fetchall()])
+                clock_calls = []
+
+                def no_clock():
+                    clock_calls.append(True)
+                    raise AssertionError("clock must not be called")
+
+                with self.assertRaises(RepositoryError) as raised:
+                    await ErrorFingerprintRepository(storage, now_ms=no_clock).record(
+                        fingerprint_sha256="a" * 64, error_class="E", dialogue_id="d", job_id="job"
+                    )
+                self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+                self.assertEqual([], clock_calls)
+                self.assertEqual(before, await storage.read(lambda c: [tuple(row) for row in c.execute(
+                    "SELECT fingerprint_sha256, count FROM errors ORDER BY rowid"
+                ).fetchall()]))
+            finally:
+                await storage.close()
+
     async def test_error_entity_coherence_and_post_delete_fk_clearing(self):
         storage = await self.open()
         try:
             await self.dialogue(storage)
-            await self.insert_job(storage, "DELIVERED")
+            await self.insert_terminal_job_with_segments(storage, "DELIVERED", ("CONFIRMED",))
             repo = ErrorFingerprintRepository(storage, now_ms=lambda: 10)
             with self.assertRaises(RepositoryError) as raised:
                 await repo.record(fingerprint_sha256="a" * 64, error_class="E", dialogue_id="missing")
             self.assertIs(RepositoryErrorCategory.NOT_FOUND, raised.exception.category)
             await repo.record(fingerprint_sha256="a" * 64, error_class="E", dialogue_id="d", job_id="job")
+            clock_calls = []
+
+            def no_clock():
+                clock_calls.append(True)
+                raise AssertionError("clock must not be called")
+
+            with self.assertRaises(RepositoryError) as raised:
+                await ErrorFingerprintRepository(storage, now_ms=no_clock).record(
+                    fingerprint_sha256="a" * 64, error_class="E"
+                )
+            self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+            self.assertEqual([], clock_calls)
+            self.assertEqual(1, (await repo.get("a" * 64)).count)
             with self.assertRaises(RepositoryError) as raised:
                 await repo.record(fingerprint_sha256="b" * 64, error_class="E", dialogue_id="d", job_id="other")
             self.assertIs(RepositoryErrorCategory.NOT_FOUND, raised.exception.category)
@@ -405,6 +795,7 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
             ("error_class", "raw prose"),
             ("count", 1.5),
             ("first_seen_at_ms", 1.5),
+            ("last_seen_at_ms", 1),
         )
         for column, value in error_cases:
             storage = await self.fresh_storage()
@@ -414,6 +805,7 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await storage.close()
                 with sqlite3.connect(self.path) as connection:
+                    connection.execute("PRAGMA ignore_check_constraints = ON")
                     connection.execute(f"UPDATE errors SET {column} = ?", (value,))
                     connection.commit()
                 storage = await self.open()
