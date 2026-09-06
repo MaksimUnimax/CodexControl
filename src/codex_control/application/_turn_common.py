@@ -24,6 +24,7 @@ from codex_control.storage import (
     DialogueState,
     MAX_TRANSIENT_PAYLOAD_BYTES,
     RepositoryError,
+    RepositoryErrorCategory,
     SqliteStorage,
     TransientPayloadKind,
     TransientPayloadRecord,
@@ -33,8 +34,10 @@ from codex_control.storage import (
     TurnJobRepository,
     TurnTerminalOutcome,
 )
+from codex_control.storage.interrupt_coordination import InterruptCoordinationRepository
 from codex_control.storage.errors import StorageError
 
+from .active_turn_registry import ActiveTurnRegistry
 from .existing_dialogue_turn import (
     DialogueApplicationError,
     ExistingDialogueTurnResult,
@@ -56,6 +59,7 @@ async def run_admitted_turn(
     clock: Callable[[], int],
     id_factory: Callable[[str], str],
     turn_lifecycle: object,
+    active_turn_registry: ActiveTurnRegistry | None = None,
     admitted: TurnJobRecord,
     user_text: str,
     working_directory: TrustedWorkingDirectory,
@@ -66,6 +70,7 @@ async def run_admitted_turn(
     ``claim_turn`` call binds it to the confirmed dialogue thread.
     """
     jobs = TurnJobRepository(storage, now_ms=clock)
+    registry = active_turn_registry if active_turn_registry is not None else ActiveTurnRegistry()
     try:
         current = await DialogueRepository(storage).get_live()
     except (StorageError, RepositoryError) as error:
@@ -153,28 +158,38 @@ async def run_admitted_turn(
         )
 
     try:
-        running = await jobs.mark_codex_running(
-            job_id=starting.job_id, expected_version=starting.version, codex_turn_id=binding.turn_id
-        )
-    except (StorageError, RepositoryError) as error:
-        return await _running_bind_failure(
-            storage, clock, id_factory, jobs, starting, claimed.dialogue, error
-        )
-    if not isinstance(running, TurnJobRecord):
-        return await _running_bind_failure(
-            storage, clock, id_factory, jobs, starting, claimed.dialogue, _invariant()
-        )
-
-    try:
-        terminal = await turn_lifecycle.wait_turn(binding)
-    except asyncio.CancelledError:
-        raise
+        lease = registry.publish(starting.job_id, binding)
     except Exception:
-        terminal = None
-    outcome, error_class, messages = _project_terminal(terminal, binding)
-    return await _finish(
-        storage, clock, id_factory, jobs, running, claimed.dialogue, outcome, error_class, messages
-    )
+        return await _finish(
+            storage, clock, id_factory, jobs, starting, claimed.dialogue,
+            TurnTerminalOutcome.UNKNOWN, "CODEX_AMBIGUOUS", (),
+        )
+    try:
+        try:
+            running = await jobs.mark_codex_running(
+                job_id=starting.job_id, expected_version=starting.version, codex_turn_id=binding.turn_id
+            )
+        except (StorageError, RepositoryError) as error:
+            return await _running_bind_failure(
+                storage, clock, id_factory, jobs, starting, claimed.dialogue, error
+            )
+        if not isinstance(running, TurnJobRecord):
+            return await _running_bind_failure(
+                storage, clock, id_factory, jobs, starting, claimed.dialogue, _invariant()
+            )
+
+        try:
+            terminal = await turn_lifecycle.wait_turn(binding)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            terminal = None
+        outcome, error_class, messages = _project_terminal(terminal, binding)
+        return await _finish(
+            storage, clock, id_factory, jobs, running, claimed.dialogue, outcome, error_class, messages
+        )
+    finally:
+        registry.retire(starting.job_id, lease)
 
 
 async def _running_bind_failure(storage, clock, id_factory, jobs, starting, dialogue, original):
@@ -214,7 +229,7 @@ def _project_terminal(
     return TurnTerminalOutcome.UNKNOWN, "CODEX_AMBIGUOUS", ()
 
 
-async def _finish(storage, clock, id_factory, jobs, job, dialogue, outcome, error_class, messages):
+def _prepare_output(clock, id_factory, outcome, messages):
     output = b""
     if messages:
         try:
@@ -233,6 +248,11 @@ async def _finish(storage, clock, id_factory, jobs, job, dialogue, outcome, erro
             output_id = _generated_id(id_factory("output"))
         except Exception:
             raise _invariant() from None
+    return output_id, output if output_id is not None else None, output_expiry
+
+
+async def _finish(storage, clock, id_factory, jobs, job, dialogue, outcome, error_class, messages):
+    output_id, output_content, output_expiry = _prepare_output(clock, id_factory, outcome, messages)
     try:
         finished = await jobs.finish_codex(
             job_id=job.job_id,
@@ -241,10 +261,35 @@ async def _finish(storage, clock, id_factory, jobs, job, dialogue, outcome, erro
             outcome=outcome,
             error_class=None if outcome is TurnTerminalOutcome.COMPLETED else error_class,
             output_payload_id=output_id,
-            output_content=output if output_id is not None else None,
+            output_content=output_content,
             output_expires_at_ms=output_expiry,
         )
-    except (StorageError, RepositoryError) as error:
+    except RepositoryError as error:
+        if (
+            error.category in (RepositoryErrorCategory.VERSION_CONFLICT, RepositoryErrorCategory.STATE_CONFLICT)
+            and job.thread_id is not None
+            and job.codex_turn_id is not None
+        ):
+            try:
+                finished = await InterruptCoordinationRepository(storage, now_ms=clock).reconcile_natural_terminal(
+                    dialogue_id=dialogue.dialogue_id,
+                    job_id=job.job_id,
+                    profile_id=job.profile_id,
+                    thread_id=job.thread_id,
+                    codex_turn_id=job.codex_turn_id,
+                    base_dialogue_version=dialogue.version,
+                    expected_job_version=job.version,
+                    outcome=outcome,
+                    error_class=None if outcome is TurnTerminalOutcome.COMPLETED else error_class,
+                    output_payload_id=output_id,
+                    output_content=output_content,
+                    output_expires_at_ms=output_expiry,
+                )
+            except (StorageError, RepositoryError):
+                raise _repository_error(error) from None
+        else:
+            raise _repository_error(error) from None
+    except StorageError as error:
         raise _repository_error(error) from None
     if not isinstance(finished, TurnJobFinishResult):
         raise _invariant()

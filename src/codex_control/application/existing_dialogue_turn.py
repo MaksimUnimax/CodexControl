@@ -50,6 +50,8 @@ from codex_control.storage import (
 )
 from codex_control.storage.errors import StorageError
 
+from .active_turn_registry import ActiveTurnRegistry
+
 
 P3_INPUT_PAYLOAD_RETENTION_MS = 3_600_000
 P3_COMPLETED_OUTPUT_RETENTION_MS = 3_600_000
@@ -277,6 +279,7 @@ class ExistingDialogueTurnService:
         working_directory_resolver: WorkingDirectoryResolver,
         now_ms: Callable[[], int] | None = None,
         id_factory: Callable[[str], str] | None = None,
+        active_turn_registry: ActiveTurnRegistry | None = None,
     ) -> None:
         if not isinstance(storage, SqliteStorage):
             raise _invalid()
@@ -301,6 +304,8 @@ class ExistingDialogueTurnService:
             raise _invalid()
         if id_factory is not None and not callable(id_factory):
             raise _invalid()
+        if active_turn_registry is not None and type(active_turn_registry) is not ActiveTurnRegistry:
+            raise _invalid()
         self._storage = storage
         self._server_id = server_id
         self._profiles = profiles
@@ -309,6 +314,7 @@ class ExistingDialogueTurnService:
         self._working_directory_resolver = working_directory_resolver
         self._clock = now_ms if now_ms is not None else _default_clock
         self._id_factory = id_factory if id_factory is not None else _default_id_factory
+        self._active_turn_registry = active_turn_registry if active_turn_registry is not None else ActiveTurnRegistry()
 
     def __repr__(self) -> str:
         return f"<ExistingDialogueTurnService server_id={self._server_id!r}>"
@@ -524,6 +530,7 @@ class ExistingDialogueTurnService:
             clock=self._clock,
             id_factory=self._id_factory,
             turn_lifecycle=self._turn_lifecycle,
+            active_turn_registry=self._active_turn_registry,
             admitted=admitted,
             user_text=user_text,
             working_directory=working_directory,

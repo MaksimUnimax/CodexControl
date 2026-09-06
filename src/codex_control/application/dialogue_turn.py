@@ -65,6 +65,7 @@ from .existing_dialogue_turn import (
 )
 
 from ._turn_common import run_admitted_turn
+from .active_turn_registry import ActiveTurnRegistry
 
 
 class ThreadLifecyclePort(Protocol):
@@ -102,6 +103,7 @@ class DialogueTurnService:
         working_directory_resolver: WorkingDirectoryResolver,
         now_ms: Callable[[], int] | None = None,
         id_factory: Callable[[str], str] | None = None,
+        active_turn_registry: ActiveTurnRegistry | None = None,
     ) -> None:
         if not isinstance(storage, SqliteStorage):
             raise DialogueApplicationError("INVALID_ARGUMENT")
@@ -112,6 +114,8 @@ class DialogueTurnService:
             raise DialogueApplicationError("INVALID_ARGUMENT")
         if id_factory is not None and not callable(id_factory):
             raise DialogueApplicationError("INVALID_ARGUMENT")
+        if active_turn_registry is not None and type(active_turn_registry) is not ActiveTurnRegistry:
+            raise DialogueApplicationError("INVALID_ARGUMENT")
         self._storage = storage
         self._server_id = server_id
         self._profiles = profiles
@@ -121,6 +125,7 @@ class DialogueTurnService:
         self._working_directory_resolver = working_directory_resolver
         self._clock = now_ms if now_ms is not None else _default_clock
         self._id_factory = id_factory if id_factory is not None else _default_id_factory
+        self._active_turn_registry = active_turn_registry if active_turn_registry is not None else ActiveTurnRegistry()
         # This is the single accepted existing-dialogue authority used for
         # the mandatory top-level delegation and all race re-evaluations.
         self._existing = ExistingDialogueTurnService(
@@ -132,6 +137,7 @@ class DialogueTurnService:
             working_directory_resolver=working_directory_resolver,
             now_ms=self._clock,
             id_factory=self._id_factory,
+            active_turn_registry=self._active_turn_registry,
         )
 
     def __repr__(self) -> str:
@@ -430,6 +436,7 @@ class DialogueTurnService:
             clock=self._clock,
             id_factory=self._id_factory,
             turn_lifecycle=self._turn_lifecycle,
+            active_turn_registry=self._active_turn_registry,
             admitted=admitted,
             user_text=request.text,
             working_directory=working_directory,

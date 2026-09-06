@@ -1,5 +1,7 @@
 """Application services."""
 
+from .active_turn_registry import ActiveTurnRegistry
+
 from .existing_dialogue_turn import (
     DialogueApplicationError,
     DialogueApplicationErrorCategory,
@@ -32,6 +34,17 @@ from .settings_selection import (
     SettingsSelectionService,
     SettingsSelectionView,
 )
+from .dialogue_interrupt import (
+    DialogueInterruptError,
+    DialogueInterruptErrorCategory,
+    DialogueInterruptReason,
+    DialogueInterruptRequest,
+    DialogueInterruptResult,
+    DialogueInterruptService,
+    DialogueInterruptStatus,
+    InterruptRecoveryResult,
+    InterruptRecoveryStatus,
+)
 
 __all__ = [
     "P3_INPUT_PAYLOAD_RETENTION_MS",
@@ -60,4 +73,14 @@ __all__ = [
     "SettingsSelectionErrorCategory",
     "SettingsSelectionError",
     "SettingsSelectionService",
+    "ActiveTurnRegistry",
+    "DialogueInterruptError",
+    "DialogueInterruptErrorCategory",
+    "DialogueInterruptRequest",
+    "DialogueInterruptStatus",
+    "DialogueInterruptReason",
+    "DialogueInterruptResult",
+    "InterruptRecoveryStatus",
+    "InterruptRecoveryResult",
+    "DialogueInterruptService",
 ]
