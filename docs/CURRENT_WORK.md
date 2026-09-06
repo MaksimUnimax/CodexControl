@@ -1,6 +1,6 @@
 # Current work authority
 
-Date: 2026-09-05
+Date: 2026-09-06
 
 ## Accepted facts
 - Repository: `MaksimUnimax/CodexControl`.
@@ -9,47 +9,51 @@ Date: 2026-09-05
 - P2.1 accepted: `61301fd25ff7253693f367664ce99e13dfc88446`.
 - P2.2 accepted: `5187c080a7188a59989013defe7d07075662d007`.
 - P2.3 accepted: `0d8f34beaa35a2bc02b349abba9507ebb9bc3802`.
-- P2.4a accepted after one repair: `ca5b5cc19ac9278377b96abec46c523603b2ff47`.
+- P2.4a accepted: `ca5b5cc19ac9278377b96abec46c523603b2ff47`.
+- P2.4b accepted after two repair reviews: `1dedc737ffa3092ba0dbcd8618a57fa6c351b849`.
 - Frozen schema-v1 DDL SHA-256: `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
-- ADR-0017..0021 remain accepted authority for the existing storage kernel/core/idempotency/turn-job boundaries.
-- ADR-0022 is the binding P2.4b delivery/approval/retention authority.
+- ADR-0017..0022 remain accepted authority for the existing storage/core/idempotency/turn/delivery/approval/retention boundaries.
+- ADR-0023 is the binding P2.5 hard-delete/tombstone/error authority.
 
-## Accepted P2.4a facts
-- Atomic prompt acceptance durably writes one RECEIVED turn job, one INPUT payload and one `JOB:<id>` ingress before external effect; no second outstanding RECEIVED job for the dialogue is permitted.
-- Duplicate JOB reconstruction and `claim_turn` require canonical durable ingress plus exactly one matching INPUT; internal missing/corrupt INPUT is `INVARIANT_VIOLATION`, while public missing input remains `NOT_FOUND`.
-- `claim_turn` atomically moves RECEIVED->CLAIMED and IDLE->TURN_RUNNING and binds a first-dialogue thread once. `mark_codex_starting` is pre-wire durable intent; `mark_codex_running` binds the Codex turn ID once.
-- `finish_codex` atomically captures COMPLETED/FAILED/UNKNOWN and may persist one OUTPUT payload in the same transaction.
-- Payload content is exact bytes only, 1..8,388,608 bytes, repr-redacted and transient; long-lived job state stores hashes/metadata only.
-- Final P2.4a proof: unit 8, integration 31, full `348 + 8 + 31 = 387`; prior P2/P1 regressions and security/scope checks passed.
+## Accepted P2.4b facts
+- Delivery planning/claim/terminal capture is durable before future transport effect; each segment has at most one send attempt and UNKNOWN is never a blind retry source.
+- Reachable delivery shapes are fail-closed and exact: DELIVERY_PENDING=`P+`; DELIVERING=`C*SP*` or `C+P+`; DELIVERED=`C+`; DELIVERY_UNKNOWN=`C*UP*`; delivery-owned FAILED=`C*FP*`.
+- PENDING/SENDING/UNKNOWN delivery payloads remain required and protected; terminal CONFIRMED/FAILED metadata survives safe payload deletion through durable hashes.
+- Approval callbacks consume the callback and claim the exact bound approval subject in one transaction with authorization privacy, expiry/stale one-time semantics and typed wire identity.
+- At most one PENDING approval exists for one exact profile + typed wire identity; terminal history may coexist and wire IDs may be reused after terminalization.
+- Retention applies protection predicates before LIMIT, so protected old rows cannot starve later eligible payloads.
+- Final P2.4b proof: unit 6, integration 25, full `387 + 6 + 25 = 418`; prior regressions/security/scope checks passed.
 
-## P2.4b exact architect authority
-P2.4b implements only **delivery-segment durable send claims, approval persistence with atomic callback+approval subject claims, and bounded safe transient-content retention**.
+## P2.5 exact architect authority
+P2.5 implements only **durable delete-state claims, confirmed hard-delete local purge/finalization, deletion tombstones and sanitized error fingerprints**.
 
-Binding source: `docs/adr/0022-delivery-approval-and-retention-claims.md` plus accepted ADR-0017..0021, `docs/DATA_MODEL.md`, `docs/STATE_MACHINES.md`, `docs/PRODUCT_REQUIREMENTS.md`, `docs/TELEGRAM_INTERACTION_CONTRACT.md` and retention/security docs.
+Binding source: `docs/adr/0023-hard-delete-tombstones-and-error-fingerprints.md` plus accepted ADR-0017..0022, `docs/DATA_MODEL.md`, `docs/STATE_MACHINES.md`, `docs/PRODUCT_REQUIREMENTS.md` and observability/security authority.
 
-### Delivery
-- Delivery operations are CREATE/EDIT; states are PENDING/SENDING/CONFIRMED/UNKNOWN/FAILED.
-- `plan` atomically validates 1..4096 ordered DISPLAY payload-backed segments and moves job CODEX_COMPLETED->DELIVERY_PENDING.
-- `claim_next` durably moves only the lowest eligible PENDING segment to SENDING/attempt1 and job to/remains DELIVERING before any future Telegram send/edit.
-- `finish_sending` captures CONFIRMED, UNKNOWN or FAILED. Confirmed segments are never recreated; UNKNOWN moves job to DELIVERY_UNKNOWN and has no automatic retry; deterministic failure moves job to FAILED.
-- Delivery state-shapes and active payload/hash/owner coherence fail closed.
+### Dialogue delete states
+- ADR-0023 globally owns DELETE_PENDING, DELETING and DELETE_UNKNOWN state-shapes.
+- Hard-delete intent is accepted only from canonical IDLE with a bound thread, exact version, only terminal-safe retained jobs (`DELIVERED|FAILED`) and no remaining PENDING approvals.
+- `claim_delete_intent` atomically moves IDLE->DELETE_PENDING before any future external delete operation.
+- `claim_deleting` atomically moves DELETE_PENDING->DELETING and returns the exact profile/thread binding to be used later by application code with P1.9.
+- P2.5 performs no P1.9 invocation. Ambiguous dispatched non-confirmation is recorded as DELETE_UNKNOWN; deterministic local/pre-dispatch failure may be ERROR. Neither is retried by P2.5.
 
-### Approvals
-- Approval records materialize exact PENDING/APPROVED/DENIED/EXPIRED/CANCELLED states and exact P1.7 wire-ID forms/kinds.
-- `create_pending` requires exact CODEX_RUNNING job/version/profile and prevents a second live PENDING approval for the same profile+wire identity while allowing wire-ID reuse after terminal state.
-- Production approval callbacks are NOT `CallbackActionRepository.claim()` followed by a separate approval mutation. P2.4b performs one SQLite transaction that preserves P2.3 callback privacy/expiry/one-time rules and atomically claims the bound approval subject before any external P1.7 approval response.
-- Approval callback binding is `subject_type=approval`, `expected_state=PENDING`, action `approval_allow|approval_deny`, and callback expected_version equals current job version.
-- Stale authorized callbacks are consumed once; expired callbacks/approvals terminalize fail-closed; only APPROVED/DENIED return approval metadata.
+### Confirmed finalization
+- `finalize_confirmed` is legal only after definitive external `DELETE_CONFIRMED` for the exact DELETING binding.
+- One SQLite transaction computes SHA-256 of the exact raw thread ID, inserts a non-content tombstone, and deletes the live dialogue under exact state/version guard.
+- `stale_generation` is the current DELETING dialogue version; `deleted_at_ms=max(clock, dialogue.updated_at_ms)`; tombstone expiry must be strictly later.
+- FK cascade purges dialogue-owned turn jobs, transient payloads, delivery segments and approvals. Error fingerprints remain with entity refs nulled by FK.
+- `ingress_updates` and `callback_actions` remain as bounded non-content replay/idempotency metadata in P2.5; their age-based cleanup belongs to P2.6.
+- No raw thread ID is stored in the tombstone and no controller-owned live binding remains after commit.
 
-### Retention
-- `RetentionRepository.sweep(limit)` is explicit/bounded, no background loop; limit 1..1000 and one clock per sweep.
-- It may expire due PENDING approvals and delete only expired transient payload content that is not required by unfinished delivery, pending approvals or active/reconciliation-critical job states defined by ADR-0022.
-- It never deletes jobs, delivery rows, approval rows, ingress, callbacks, tombstones or errors in P2.4b. Broader metadata retention/recovery remains P2.6; hard-delete purge remains P2.5.
+### Error fingerprints
+- Only canonical SHA-256 fingerprint + sanitized error class + optional canonical dialogue/job references may be recorded; there is no raw exception/trace/stderr/content API.
+- First occurrence inserts count 1. Exact duplicate occurrence increments count once with monotonic last-seen time.
+- Reusing one fingerprint with a different error class or different entity references is an invariant violation, not a merge.
+- Hard delete may clear entity refs through FK while retaining the non-content fingerprint/count history.
 
-### Forbidden P2.4b scope
-No Telegram API/client/send/edit, no P1 approval response, no token generation, no interrupt/delete state machine, no tombstones/errors/hard-delete purge, no P3 application service and no production state.
+### Forbidden P2.5 scope
+No Codex/Telegram effect, no interrupt orchestration, no DELETE_UNKNOWN retry/reconciliation, no tombstone expiry cleanup, no callback/ingress metadata retention sweep, no broad P2.6 recovery harness, no P3 application service and no production state.
 
 ## Execution authority
 Codex must not self-start work from this document.
 
-Only **P2.4b — delivery + atomic approval-subject claims + bounded transient retention** is eligible for the next explicit implementation prompt.
+Only **P2.5 — delete claims + tombstones + error fingerprints + confirmed local finalization** is eligible for the next explicit implementation prompt.
