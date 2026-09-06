@@ -24,3 +24,5 @@ Architect-owned; individual records under `docs/adr/`.
 - ADR-0020 freezes P2.3 durable ingress dedupe, atomic control-message epoch/mode claims and hashed opaque callback one-time claim semantics; no raw Telegram content/token, JOB creation, subject business mutation or Telegram integration is included.
 - ADR-0021 freezes P2.4a atomic JOB ingress + turn-job execution claims + bounded transient payload storage. Delivery segments, approvals and retention deletion remain P2.4b.
 - ADR-0022 freezes P2.4b delivery-plan/send claims, atomic approval callback+subject claims, and bounded safe transient-content retention; no Telegram/Codex external effect or blind retry is included.
+- ADR-0023 freezes P2.5 hard-delete durable claims around the accepted P1.9 effect, exact confirmed local purge+tombstone semantics, and sanitized error fingerprints; no external delete invocation or reconciliation retry is included.
+- ADR-0024 freezes P2.6a explicit seven-day non-content metadata retention, terminal job+JOB-ingress coupled cleanup, callback/tombstone/error cleanup and bounded one-clock sweep semantics; final crash/restart/idempotency P2 acceptance remains P2.6b.
