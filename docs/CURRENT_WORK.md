@@ -10,50 +10,82 @@ Date: 2026-09-06
 - P2.2 accepted: `5187c080a7188a59989013defe7d07075662d007`.
 - P2.3 accepted: `0d8f34beaa35a2bc02b349abba9507ebb9bc3802`.
 - P2.4a accepted: `ca5b5cc19ac9278377b96abec46c523603b2ff47`.
-- P2.4b accepted after two repair reviews: `1dedc737ffa3092ba0dbcd8618a57fa6c351b849`.
+- P2.4b accepted: `1dedc737ffa3092ba0dbcd8618a57fa6c351b849`.
+- P2.5 accepted after one repair: `87ef37cf245d79f6d20b507b13c0f36014c1580f`.
 - Frozen schema-v1 DDL SHA-256: `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
-- ADR-0017..0022 remain accepted authority for the existing storage/core/idempotency/turn/delivery/approval/retention boundaries.
-- ADR-0023 is the binding P2.5 hard-delete/tombstone/error authority.
+- ADR-0017..0023 remain accepted authority for storage/core/idempotency/turn/delivery/approval/delete/error semantics.
+- ADR-0024 is binding P2.6a bounded metadata-retention authority.
 
-## Accepted P2.4b facts
-- Delivery planning/claim/terminal capture is durable before future transport effect; each segment has at most one send attempt and UNKNOWN is never a blind retry source.
-- Reachable delivery shapes are fail-closed and exact: DELIVERY_PENDING=`P+`; DELIVERING=`C*SP*` or `C+P+`; DELIVERED=`C+`; DELIVERY_UNKNOWN=`C*UP*`; delivery-owned FAILED=`C*FP*`.
-- PENDING/SENDING/UNKNOWN delivery payloads remain required and protected; terminal CONFIRMED/FAILED metadata survives safe payload deletion through durable hashes.
-- Approval callbacks consume the callback and claim the exact bound approval subject in one transaction with authorization privacy, expiry/stale one-time semantics and typed wire identity.
-- At most one PENDING approval exists for one exact profile + typed wire identity; terminal history may coexist and wire IDs may be reused after terminalization.
-- Retention applies protection predicates before LIMIT, so protected old rows cannot starve later eligible payloads.
-- Final P2.4b proof: unit 6, integration 25, full `387 + 6 + 25 = 418`; prior regressions/security/scope checks passed.
+## Accepted P2.5 facts
+- Hard-delete intent is durable before external effect: only canonical IDLE with exact version, bound thread, no tombstone collision, no pending approval and terminal-safe retained job history may enter DELETE_PENDING.
+- Terminal-safe history is fail-closed against accepted P2.4b delivery coherence: DELIVERED requires non-empty all-CONFIRMED delivery rows; Codex FAILED may have no delivery rows; delivery-owned FAILED requires exact `C*FP*`.
+- DELETE_PENDING->DELETING rechecks readiness and tombstone collision before exposing the exact durable profile/thread binding for later P1.9 use.
+- DELETE_UNKNOWN/ERROR retain the exact binding and sanitized class; P2.5 has no retry/reconciliation API.
+- Confirmed local finalization computes SHA-256 from the raw thread ID, records current DELETING version as stale generation, inserts a content-free tombstone, deletes the exact live dialogue and cascades jobs/payloads/delivery/approvals in one transaction.
+- Ingress/callback idempotency rows and sanitized errors remain after hard delete; error entity references clear through FK.
+- Error-fingerprint semantic aliases are fail-closed; exact duplicates increment once, mismatched class/entity bindings do not merge.
+- Final P2.5 proof: unit 4, integration 18, full `418 + 4 + 18 = 440`; prior regressions/security/scope checks passed.
 
-## P2.5 exact architect authority
-P2.5 implements only **durable delete-state claims, confirmed hard-delete local purge/finalization, deletion tombstones and sanitized error fingerprints**.
+## P2.6 split
+The remaining P2 work is split into two architect-owned slices for reviewability:
 
-Binding source: `docs/adr/0023-hard-delete-tombstones-and-error-fingerprints.md` plus accepted ADR-0017..0022, `docs/DATA_MODEL.md`, `docs/STATE_MACHINES.md`, `docs/PRODUCT_REQUIREMENTS.md` and observability/security authority.
+- **P2.6a** — bounded non-content metadata retention/hygiene.
+- **P2.6b** — crash/restart/idempotency harness and final P2 acceptance.
 
-### Dialogue delete states
-- ADR-0023 globally owns DELETE_PENDING, DELETING and DELETE_UNKNOWN state-shapes.
-- Hard-delete intent is accepted only from canonical IDLE with a bound thread, exact version, only terminal-safe retained jobs (`DELIVERED|FAILED`) and no remaining PENDING approvals.
-- `claim_delete_intent` atomically moves IDLE->DELETE_PENDING before any future external delete operation.
-- `claim_deleting` atomically moves DELETE_PENDING->DELETING and returns the exact profile/thread binding to be used later by application code with P1.9.
-- P2.5 performs no P1.9 invocation. Ambiguous dispatched non-confirmation is recorded as DELETE_UNKNOWN; deterministic local/pre-dispatch failure may be ERROR. Neither is retried by P2.5.
+P2.6b does not start until P2.6a is independently accepted.
 
-### Confirmed finalization
-- `finalize_confirmed` is legal only after definitive external `DELETE_CONFIRMED` for the exact DELETING binding.
-- One SQLite transaction computes SHA-256 of the exact raw thread ID, inserts a non-content tombstone, and deletes the live dialogue under exact state/version guard.
-- `stale_generation` is the current DELETING dialogue version; `deleted_at_ms=max(clock, dialogue.updated_at_ms)`; tombstone expiry must be strictly later.
-- FK cascade purges dialogue-owned turn jobs, transient payloads, delivery segments and approvals. Error fingerprints remain with entity refs nulled by FK.
-- `ingress_updates` and `callback_actions` remain as bounded non-content replay/idempotency metadata in P2.5; their age-based cleanup belongs to P2.6.
-- No raw thread ID is stored in the tombstone and no controller-owned live binding remains after commit.
+## P2.6a exact architect authority
+P2.6a implements only **explicit bounded cleanup of old terminal metadata that intentionally survived earlier P2 slices**.
+
+Binding source: `docs/adr/0024-bounded-metadata-retention.md` plus accepted ADR-0017..0023, `docs/OBSERVABILITY_AND_RETENTION.md`, `docs/DATA_MODEL.md`, `docs/STATE_MACHINES.md` and security/test authority.
+
+### Retention horizon
+- `METADATA_RETENTION_MS = 604800000` (seven days).
+- One validated repository clock per successful sweep.
+- For non-explicit-expiry metadata: `cutoff=max(0, now-METADATA_RETENTION_MS)`.
+- Tombstones use their explicit `expires_at_ms` directly.
+
+### Repository surface
+- New `MetadataRetentionRepository.sweep(limit)` only.
+- `limit` is exact non-bool integer `1..1000`.
+- The same limit is an independent per-category root budget for terminal job groups, standalone ingress, callbacks, tombstones and errors.
+- One sweep is one SQLite write transaction. Any corruption/storage failure rolls back all categories.
+
+### Terminal job groups
+- Only canonical `DELIVERED|FAILED` jobs are eligible.
+- Job and exact JOB ingress must both be at least seven days old.
+- DELIVERED requires accepted all-CONFIRMED delivery coherence.
+- Codex FAILED may have zero delivery rows; delivery-owned FAILED requires exact `C*FP*`.
+- No PENDING approval may remain.
+- Existing job without exact `JOB:<job_id>` ingress/update identity is corruption.
+- Eligible cleanup deletes exact job+JOB ingress together; job FK cascades may remove remaining terminal payload/delivery/approval rows while the live dialogue remains.
+- Error rows survive with entity refs nulled.
+
+### Standalone ingress
+- Completed CONTROL/IGNORED rows older than cutoff may be deleted.
+- Old JOB ingress may be deleted only when its job no longer exists, e.g. after confirmed hard delete.
+- JOB ingress for an existing job is never deleted standalone.
+- `completed_at_ms IS NULL` is recovery-critical and protected.
+
+### Callback actions
+- Delete only when declared `expires_at_ms <= cutoff`.
+- Consumed or unconsumed expired rows are then eligible.
+- Fresh/unexpired callbacks remain.
+- Later replay becoming NOT_FOUND is fail-closed.
+
+### Tombstones
+- Delete canonical tombstones only when `expires_at_ms <= now`.
+- A live dialogue with the same dialogue ID is corruption and blocks tombstone cleanup.
 
 ### Error fingerprints
-- Only canonical SHA-256 fingerprint + sanitized error class + optional canonical dialogue/job references may be recorded; there is no raw exception/trace/stderr/content API.
-- First occurrence inserts count 1. Exact duplicate occurrence increments count once with monotonic last-seen time.
-- Reusing one fingerprint with a different error class or different entity references is an invariant violation, not a merge.
-- Hard delete may clear entity refs through FK while retaining the non-content fingerprint/count history.
+- Delete canonical error rows when `last_seen_at_ms <= cutoff`.
+- Live or NULL entity references are both allowed; fingerprint rows are diagnostics, not recovery authority.
+- Semantic case-alias corruption remains fail-closed.
 
-### Forbidden P2.5 scope
-No Codex/Telegram effect, no interrupt orchestration, no DELETE_UNKNOWN retry/reconciliation, no tombstone expiry cleanup, no callback/ingress metadata retention sweep, no broad P2.6 recovery harness, no P3 application service and no production state.
+### Forbidden P2.6a scope
+No P2.6b crash harness, UNKNOWN reconciliation, P3 policy, Codex/Telegram effects, production scheduling, filesystem temp-store implementation, schema migration or production state.
 
 ## Execution authority
 Codex must not self-start work from this document.
 
-Only **P2.5 — delete claims + tombstones + error fingerprints + confirmed local finalization** is eligible for the next explicit implementation prompt.
+Only **P2.6a — bounded metadata retention** is eligible for the next explicit implementation prompt.
