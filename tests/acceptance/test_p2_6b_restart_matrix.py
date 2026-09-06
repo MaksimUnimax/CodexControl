@@ -422,6 +422,7 @@ class P26bRestartMatrixTests(unittest.IsolatedAsyncioTestCase):
         try:
             persisted = await DialogueRepository(storage).get_live()
             self.assertEqual(DialogueState.DELETE_PENDING, persisted.state)
+            self.assertEqual("profile-1", persisted.profile_id)
             self.assertEqual("thread-1", persisted.thread_id)
             deleting = await DeletionRepository(storage, now_ms=lambda: 30).claim_deleting(dialogue_id="dialogue-1", expected_version=persisted.version)
             await storage.close()
@@ -432,6 +433,8 @@ class P26bRestartMatrixTests(unittest.IsolatedAsyncioTestCase):
         try:
             persisted = await DialogueRepository(storage).get_live()
             self.assertEqual(DialogueState.DELETING, persisted.state)
+            self.assertEqual("profile-1", persisted.profile_id)
+            self.assertEqual("thread-1", persisted.thread_id)
             unknown = await DeletionRepository(storage, now_ms=lambda: 40).mark_delete_unknown(dialogue_id="dialogue-1", expected_version=persisted.version, error_class="CODEX_AMBIGUOUS")
             await storage.close()
         finally:
@@ -441,6 +444,7 @@ class P26bRestartMatrixTests(unittest.IsolatedAsyncioTestCase):
         try:
             persisted = await DialogueRepository(storage).get_live()
             self.assertEqual(DialogueState.DELETE_UNKNOWN, persisted.state)
+            self.assertEqual("profile-1", persisted.profile_id)
             self.assertEqual("thread-1", persisted.thread_id)
             self.assertEqual("CODEX_AMBIGUOUS", persisted.last_error_class)
             with self.assertRaises(RepositoryError) as raised:
@@ -476,6 +480,37 @@ class P26bRestartMatrixTests(unittest.IsolatedAsyncioTestCase):
                 outcome=DeliveryFinishOutcome.CONFIRMED, confirmed_message_id=901,
             )
             dialogue = await DialogueRepository(storage).get_live()
+            old_ingress = await IngressUpdateRepository(storage).get(101)
+            self.assertIsNotNone(old_ingress)
+            self.assertEqual(IngressDispositionKind.JOB, old_ingress.disposition)
+            self.assertEqual(running.job_id, old_ingress.job_id)
+
+            callback_hash = sha("delete-retained-callback")
+            await CallbackActionRepository(storage, now_ms=lambda: 9).create(
+                token_hash_sha256=callback_hash,
+                action="retained_callback",
+                subject_type="dialogue",
+                subject_id=dialogue.dialogue_id,
+                expected_version=dialogue.version,
+                expected_state=dialogue.state.value,
+                authorized_user_id=42,
+                authorized_chat_id=-1001,
+                expires_at_ms=50_000,
+            )
+            callback_claim = await CallbackActionRepository(storage, now_ms=lambda: 9).claim(
+                token_hash_sha256=callback_hash,
+                authorized_user_id=42,
+                authorized_chat_id=-1001,
+            )
+            self.assertEqual(CallbackClaimStatus.CLAIMED, callback_claim.status)
+
+            error_fingerprint = sha("delete-retained-error")
+            retained_error = await ErrorFingerprintRepository(storage, now_ms=lambda: 9).record(
+                fingerprint_sha256=error_fingerprint,
+                error_class="CODEX_PROCESS",
+                dialogue_id=dialogue.dialogue_id,
+                job_id=running.job_id,
+            )
             pending = await DeletionRepository(storage, now_ms=lambda: 10).claim_delete_intent(dialogue_id=dialogue.dialogue_id, expected_version=dialogue.version)
             deleting = await DeletionRepository(storage, now_ms=lambda: 11).claim_deleting(dialogue_id=dialogue.dialogue_id, expected_version=pending.version)
             final = await DeletionRepository(storage, now_ms=lambda: 12).finalize_confirmed(dialogue_id=dialogue.dialogue_id, expected_version=deleting.version, tombstone_expires_at_ms=100_000)
@@ -485,15 +520,36 @@ class P26bRestartMatrixTests(unittest.IsolatedAsyncioTestCase):
             tombstone = await DeletionRepository(storage).get_tombstone(dialogue.dialogue_id)
             self.assertEqual(final.tombstone, tombstone)
             self.assertNotIn("thread-1", repr(tombstone))
+            self.assertEqual(old_ingress, await IngressUpdateRepository(storage).get(101))
             counts = await storage.read(lambda c: tuple(c.execute("SELECT (SELECT COUNT(*) FROM turn_jobs), (SELECT COUNT(*) FROM transient_payloads), (SELECT COUNT(*) FROM delivery_segments), (SELECT COUNT(*) FROM approvals)").fetchone()))
             self.assertEqual((0, 0, 0, 0), counts)
             self.assertEqual((1, 2, 1, 1), (final.purged_jobs, final.purged_payloads, final.purged_delivery_segments, final.purged_approvals))
+            callback_replay = await CallbackActionRepository(storage).claim(
+                token_hash_sha256=callback_hash,
+                authorized_user_id=42,
+                authorized_chat_id=-1001,
+            )
+            self.assertEqual(CallbackClaimStatus.ALREADY_CONSUMED, callback_replay.status)
+            persisted_error = await ErrorFingerprintRepository(storage).get(error_fingerprint)
+            self.assertEqual(
+                ErrorFingerprintRecord(
+                    retained_error.fingerprint_sha256,
+                    retained_error.error_class,
+                    retained_error.count,
+                    retained_error.first_seen_at_ms,
+                    retained_error.last_seen_at_ms,
+                    None,
+                    None,
+                ),
+                persisted_error,
+            )
         finally:
             await storage.close()
             db.cleanup()
 
     async def test_metadata_retention_and_error_fingerprint_restart(self):
         storage = await self.open()
+        received = await create_received(storage)
         await IngressUpdateRepository(storage, now_ms=lambda: 1).claim_ignored(update_id=300, disposition=IngressDispositionKind.IGNORED_SLEEP)
         await IngressUpdateRepository(storage, now_ms=lambda: 2).claim_ignored(update_id=301, disposition=IngressDispositionKind.IGNORED_SLEEP)
         await storage.close()
@@ -513,22 +569,55 @@ class P26bRestartMatrixTests(unittest.IsolatedAsyncioTestCase):
             second_sweep = await MetadataRetentionRepository(storage, now_ms=lambda: 604_802_000).sweep(limit=1)
             self.assertGreaterEqual(second_sweep.ingress_deleted, 1)
             self.assertEqual(0, await storage.read(lambda c: c.execute("SELECT COUNT(*) FROM ingress_updates WHERE update_id=301").fetchone()[0]))
-            first = await ErrorFingerprintRepository(storage, now_ms=lambda: 604_801_001).record(fingerprint_sha256=sha("error"), error_class="CODEX_PROCESS")
-            second = await ErrorFingerprintRepository(storage, now_ms=lambda: 604_802_000).record(fingerprint_sha256=sha("error"), error_class="CODEX_PROCESS")
+            await storage.close()
+        finally:
+            if repr(storage).endswith("open>"):
+                await storage.close()
+
+        fingerprint = sha("error-restart-count")
+        first_storage = await self.open()
+        try:
+            first = await ErrorFingerprintRepository(first_storage, now_ms=lambda: 604_803_001).record(
+                fingerprint_sha256=fingerprint,
+                error_class="CODEX_PROCESS",
+                dialogue_id=received.job.dialogue_id,
+                job_id=received.job.job_id,
+            )
+        finally:
+            await first_storage.close()
+
+        second_storage = await self.open()
+        try:
+            second = await ErrorFingerprintRepository(second_storage, now_ms=lambda: 604_804_000).record(
+                fingerprint_sha256=fingerprint,
+                error_class="CODEX_PROCESS",
+                dialogue_id=received.job.dialogue_id,
+                job_id=received.job.job_id,
+            )
             self.assertEqual(2, second.count)
             self.assertEqual(first.first_seen_at_ms, second.first_seen_at_ms)
             self.assertGreaterEqual(second.last_seen_at_ms, first.last_seen_at_ms)
+            self.assertEqual(first.error_class, second.error_class)
+            self.assertEqual(first.dialogue_id, second.dialogue_id)
+            self.assertEqual(first.job_id, second.job_id)
         finally:
-            await storage.close()
+            await second_storage.close()
+
+        final_storage = await self.open()
+        try:
+            final = await ErrorFingerprintRepository(final_storage).get(fingerprint)
+            self.assertEqual(second, final)
+        finally:
+            await final_storage.close()
 
     async def test_representative_corruption_fails_closed_and_redacts_values(self):
         cases = (
-            ("UPDATE controller_runtime SET boot_generation=1.5", ControllerRuntimeRepository, "get"),
-            ("UPDATE turn_jobs SET error_class='raw prose' WHERE job_id='job-1'", TurnJobRepository, "get"),
-            ("INSERT INTO deletion_tombstones VALUES ('d-tomb', '" + "a" * 64 + "', 1, 2, 2)", DeletionRepository, "get_tombstone"),
-            ("INSERT INTO errors VALUES ('" + "a" * 64 + "', 'raw prose', 1, 1, 1, NULL, NULL)", ErrorFingerprintRepository, "get"),
+            ("UPDATE controller_runtime SET boot_generation=1.5", "1.5", ControllerRuntimeRepository, "get"),
+            ("UPDATE turn_jobs SET error_class='PRIVATE_RAW_JOB_VALUE' WHERE job_id='job-1'", "PRIVATE_RAW_JOB_VALUE", TurnJobRepository, "get"),
+            ("INSERT INTO deletion_tombstones VALUES ('d-tomb', '" + "A" * 64 + "', 1, 2, 2)", "A" * 64, DeletionRepository, "get_tombstone"),
+            ("INSERT INTO errors VALUES ('" + "a" * 64 + "', 'PRIVATE_RAW_ERROR_VALUE WITH SPACE', 1, 1, 1, NULL, NULL)", "PRIVATE_RAW_ERROR_VALUE WITH SPACE", ErrorFingerprintRepository, "get"),
         )
-        for index, (sql, repo_type, method) in enumerate(cases):
+        for index, (sql, raw_value, repo_type, method) in enumerate(cases):
             db = TempDatabase.create()
             storage = await SqliteStorage.open(db.path, now_ms=lambda: 1)
             try:
@@ -552,7 +641,8 @@ class P26bRestartMatrixTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         await repo_type(storage).get("a" * 64)
                 self.assertEqual(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
-                self.assertNotIn("PRIVATE_RAW", str(raised.exception))
+                self.assertNotIn(raw_value, str(raised.exception))
+                self.assertNotIn(raw_value, repr(raised.exception))
             finally:
                 await storage.close()
                 db.cleanup()

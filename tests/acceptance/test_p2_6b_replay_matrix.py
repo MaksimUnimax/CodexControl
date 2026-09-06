@@ -98,12 +98,26 @@ class P26bReplayMatrixTests(unittest.IsolatedAsyncioTestCase):
         await storage.close()
         storage = await self.open()
         try:
+            wrong_user = await ApprovalRepository(storage, now_ms=lambda: 1_100).claim_callback(
+                token_hash_sha256=token, authorized_user_id=7, authorized_chat_id=-1001
+            )
+            self.assertEqual(ApprovalCallbackClaimStatus.UNAUTHORIZED, wrong_user.status)
+            self.assertIsNone(wrong_user.record)
+            wrong_chat = await ApprovalRepository(storage, now_ms=lambda: 1_200).claim_callback(
+                token_hash_sha256=token, authorized_user_id=42, authorized_chat_id=-2002
+            )
+            self.assertEqual(ApprovalCallbackClaimStatus.UNAUTHORIZED, wrong_chat.status)
+            self.assertIsNone(wrong_chat.record)
+            self.assertEqual(ApprovalState.PENDING, (await ApprovalRepository(storage).get(approval.approval_id)).state)
+        finally:
+            await storage.close()
+
+        storage = await self.open()
+        try:
             result = await ApprovalRepository(storage, now_ms=lambda: 1_500).claim_callback(token_hash_sha256=token, authorized_user_id=42, authorized_chat_id=-1001)
             self.assertEqual(ApprovalCallbackClaimStatus.APPROVED, result.status)
-            await storage.close()
         finally:
-            if repr(storage).endswith("open>"):
-                await storage.close()
+            await storage.close()
         for _ in range(2):
             storage = await self.open()
             try:

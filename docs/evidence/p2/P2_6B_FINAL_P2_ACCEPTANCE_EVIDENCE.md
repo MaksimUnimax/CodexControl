@@ -139,3 +139,55 @@ observed in the final full run: `P1_6_PENDING_TASK_WARNING_OBSERVED=NO`.
 
 This evidence records the executor run only. Independent architect review of the
 GitHub candidate remains a separate acceptance gate.
+
+## Architect first proof repair
+
+This section records factual closure of the architect-rejected proof candidate;
+it does not claim architect acceptance, mark P2 complete, edit roadmap
+authority, or authorize P3.
+
+- Rejected proof candidate: `28000c0046db14372c605586c5f7cf12c7d4db4a`
+- Architect review comment: `5557355563`
+- Repair remains on branch `impl-p2-6b-final-p2-acceptance-2026-09-06`.
+
+The proof-only repair closes the following factual gaps:
+
+- `test_metadata_retention_and_error_fingerprint_restart` records the first
+  fingerprint, closes storage, uses a new repository after reopen for the
+  identical second record, checks count/class/references/timestamps, closes
+  again, and checks the final durable record with a new repository.
+- Every representative corruption tuple retains its exact seeded raw value.
+  The controller numeric value, turn-job sentinel, uppercase tombstone hash,
+  and error prose sentinel are each asserted absent from both `str(exception)`
+  and `repr(exception)`, while the reopened materialization category remains
+  `INVARIANT_VIOLATION`.
+- DELETE_PENDING, DELETING, and DELETE_UNKNOWN restart assertions now bind
+  exact `profile-1` and `thread-1`; DELETE_UNKNOWN also retains the exact
+  `CODEX_AMBIGUOUS` error class.
+- The confirmed-delete restart scenario retains and verifies the exact JOB
+  ingress for `job-1`, a consumed content-free hash-only callback action, and
+  an error fingerprint referencing the live dialogue/job before finalization.
+  After close/reopen, the dialogue and owned execution rows are absent, the
+  tombstone is exact, ingress remains exact, callback claim returns
+  `ALREADY_CONSUMED`, and the error record remains unchanged except for both
+  entity references being cleared to `None` by accepted FK behavior.
+- The replay callback test performs separate wrong-user and wrong-chat claims
+  before authorization, requires `UNAUTHORIZED` with no returned record,
+  verifies the approval remains `PENDING`, then closes/reopens and proves the
+  authorized claim succeeds and terminal replay remains one-time.
+
+Final acceptance-module counts remain contract `5`, restart `12`, replay `8`,
+abrupt `3`, and support `0`. The mandated P2.6a, P2.5, P2.4b, P2.4a, P2.3,
+P2.2, and P2.1 focused suites passed at their accepted counts. P1.10 T0/T1/T2
+passed `6 / 1 / 4`, and all existing focused P1 suites passed. Full discovery
+passed `500` tests with the exact arithmetic `472 + 5 + 12 + 8 + 3 = 500`.
+
+The known P1.6 pending-task warning was observed in the unchanged direct
+P1.6 turn-lifecycle run: `P1_6_PENDING_TASK_WARNING_OBSERVED=YES`.
+`P1_6_WARNING_INTRODUCED_BY_P2_6B=NO`.
+
+The production source diff remains zero. No schema, DDL, dependency,
+architecture, roadmap, current-work or decisions file changed. All probes used
+temporary databases and fake values only; no real Codex, Telegram, network,
+service, production database or production state effect occurred. Independent
+architect review of this repair candidate remains unresolved.
