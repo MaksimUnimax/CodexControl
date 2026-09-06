@@ -12,7 +12,7 @@ Date: 2026-09-06
 - P3.1 final full suite: `543` passing tests (`506 + 11 unit + 26 integration`).
 - P3.1 acceptance authority: `docs/evidence/p3/P3_1_ARCHITECT_ACCEPTANCE_2026-09-06.md`.
 - ADR-0026 + ADR-0027 remain binding accepted P3.1/replay authority.
-- ADR-0028 is binding P3.2 authority.
+- ADR-0028 is binding P3.2 authority together with the exact additional guards in this current-work record.
 
 ## Accepted P3.1 boundary
 P3.1 owns an already-existing canonical IDLE dialogue only. Its accepted order is:
@@ -34,14 +34,28 @@ For a genuinely new first prompt with no live dialogue:
 1. P3.1-compatible duplicate/static check has already found no ingress and no dialogue.
 2. Resolve durable settings profile/model, explicit configured profile, authenticated non-hidden model + concrete effort, and trusted working directory.
 3. Generate bounded opaque dialogue/job/INPUT IDs and one-hour INPUT expiry.
-4. Start one cancellation-owned lazy-creation task before submitting the first local mutation.
-5. `DialogueRepository.create_intent` -> durable `CREATING`, `thread_id=NULL`.
-6. `TurnJobRepository.claim_ingress` against that exact CREATING dialogue with `thread_id=None` -> durable JOB ingress + RECEIVED job + INPUT.
-7. Only now call exactly one P1.5 `thread/start` using the immutable job profile/model/effort and resolved workdir.
-8. Exact `START_CONFIRMED` binding -> `DialogueRepository.confirm_created` -> IDLE with exact thread ID.
-9. Reuse the accepted admitted-turn runner on the already-created RECEIVED job. `claim_turn` binds the formerly NULL job thread ID and continues accepted P3.1 turn semantics.
+4. Before create intent, check the generated dialogue ID against `DeletionRepository.get_tombstone(dialogue_id)`. Any still-retained same-ID tombstone is application INVARIANT; do not retry IDs and do not create a live dialogue.
+5. Start one cancellation-owned lazy-creation task before submitting the first local mutation.
+6. `DialogueRepository.create_intent` -> durable `CREATING`, `thread_id=NULL`.
+7. `TurnJobRepository.claim_ingress` against that exact CREATING dialogue with `thread_id=None` -> durable JOB ingress + RECEIVED job + INPUT.
+8. Only now call exactly one P1.5 `thread/start` using the immutable job profile/model/effort and resolved workdir.
+9. Exact `START_CONFIRMED` binding -> `DialogueRepository.confirm_created` -> IDLE with exact thread ID.
+10. Reuse the accepted admitted-turn runner on the already-created RECEIVED job. `claim_turn` binds the formerly NULL job thread ID and continues accepted P3.1 turn semantics.
 
 No second ingress/job is created for the first prompt.
+
+## Generated dialogue-ID tombstone collision guard
+P2.5 intentionally retains deletion tombstones after hard delete, and its accepted invariant forbids a live dialogue and a tombstone with the same `dialogue_id`.
+
+`DialogueRepository.create_intent` does not itself consume tombstone authority. Therefore P3.2 MUST check the generated dialogue ID through `DeletionRepository.get_tombstone()` before `create_intent`.
+
+- no tombstone -> creation may continue;
+- canonical retained tombstone -> application INVARIANT;
+- corrupt tombstone -> application INVARIANT through accepted repository materialization;
+- no ID regeneration/retry;
+- zero dialogue/job/ingress/INPUT/thread effect on collision.
+
+This is an application collision guard only; P2 tombstone retention policy is unchanged.
 
 ## Thread/start terminal authority
 - Exact `START_CONFIRMED` requires exact profile binding and exact returned logical model/concrete effort match. Then confirm the local dialogue and continue the first turn.
