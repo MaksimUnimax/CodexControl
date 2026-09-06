@@ -33,8 +33,8 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P2.C1 retention-compatible JOB duplicate replay correction under ADR-0027. Accepted implementation `4b6d226ce647fbf38a6ada7b82947be7ad3e30c2`; corrected full suite 506.
 
 ## P3 — Dialogue application service
-- [NEXT] P3.1 existing-dialogue prompt admission + immutable authenticated selection + one-turn Codex orchestration + terminal capture. Rejected candidate `05a268781b4b7189271b64f55a3b21f30c259269` is reference material only; P3.1 must be reapplied on the corrected P2.C1 base with retention-compatible replay, hidden-model fail-closed validation, and the remaining proof gaps closed.
-- [PLANNED] P3.2 lazy `thread/start` + first-turn orchestration and create-failure/recovery boundary.
+- [DONE] P3.1 existing-dialogue prompt admission + immutable authenticated selection + one-turn Codex orchestration + terminal capture. Accepted after corrected P2.C1 base plus one proof-only repair: `9e0a86b311bb63d6a36a4641cb588321987e1550`; final full suite 543.
+- [NEXT] P3.2 lazy `thread/start` + first-turn orchestration and fail-closed create/restart boundary under ADR-0028.
 - [PLANNED] P3.3 profile/model/reasoning application settings service with authenticated catalog validation and dialogue locks.
 - [PLANNED] P3.4 durable interrupt orchestration over P1.8 plus application-owned `INTERRUPTING` transition/recovery authority.
 - [PLANNED] P3.5 hard-delete orchestration over P1.9 + final P3 recovery/application acceptance.
