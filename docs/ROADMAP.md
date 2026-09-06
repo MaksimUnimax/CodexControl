@@ -29,10 +29,11 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P2.4b delivery segments + atomic approval-subject callback claims + bounded transient retention/sanitization. Accepted implementation after two repair reviews: `1dedc737ffa3092ba0dbcd8618a57fa6c351b849`.
 - [DONE] P2.5 deletion state claims + deletion tombstones + sanitized error fingerprints + confirmed hard-delete local purge/finalization transaction. Accepted implementation after one repair review: `87ef37cf245d79f6d20b507b13c0f36014c1580f`.
 - [DONE] P2.6a bounded non-content metadata retention for terminal jobs/ingress/callbacks/tombstones/errors. Accepted implementation after one repair review: `e6f59739b3091d00894d3434abb5a99e2af72885`.
-- [DONE] P2.6b crash/restart/idempotency harness and final P2 acceptance. Accepted proof after one proof-only repair: `9db97f0dda109b4d0c0ecfa5f167733905df2766`; final full suite 500.
+- [DONE] P2.6b crash/restart/idempotency harness and final P2 acceptance. Historical accepted proof after one proof-only repair: `9db97f0dda109b4d0c0ecfa5f167733905df2766`; full suite 500.
+- [NEXT] P2.C1 retention-compatible JOB duplicate replay correction under ADR-0027. This narrowly reopens final P2 replay authority after P3.1 review found that legal transient INPUT retention can invalidate the old duplicate reconstruction assumption.
 
 ## P3 — Dialogue application service
-- [NEXT] P3.1 existing-dialogue prompt admission + immutable authenticated selection + one-turn Codex orchestration + terminal capture; no lazy thread creation yet.
+- [BLOCKED] P3.1 existing-dialogue prompt admission + immutable authenticated selection + one-turn Codex orchestration + terminal capture. Candidate `05a268781b4b7189271b64f55a3b21f30c259269` is not accepted and remains blocked until P2.C1 is accepted; separate P3.1 hidden-model validation repair is also required.
 - [PLANNED] P3.2 lazy `thread/start` + first-turn orchestration and create-failure/recovery boundary.
 - [PLANNED] P3.3 profile/model/reasoning application settings service with authenticated catalog validation and dialogue locks.
 - [PLANNED] P3.4 durable interrupt orchestration over P1.8 plus application-owned `INTERRUPTING` transition/recovery authority.
