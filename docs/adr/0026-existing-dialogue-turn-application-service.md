@@ -46,7 +46,7 @@ Expose immutable `ExistingDialoguePromptRequest` with exactly:
 - `source_message_id: int`;
 - `text: str` with `repr=False`.
 
-Static application validation occurs before external reads/effects:
+Static application validation occurs before storage/effect processing:
 
 - update/message IDs are exact non-bool signed-64 values in the accepted non-negative ranges;
 - source chat ID is exact non-bool signed-64 and non-zero;
@@ -66,7 +66,7 @@ The application does not accept caller-supplied job/payload IDs, profile, model,
 - `BUSY`
 - `BLOCKED`
 
-`ExistingDialogueTurnReason` is finite and payload-free. It contains at least:
+`ExistingDialogueTurnReason` is exactly:
 
 - `NO_DIALOGUE`
 - `DIALOGUE_NOT_READY`
@@ -77,6 +77,7 @@ The application does not accept caller-supplied job/payload IDs, profile, model,
 - `MODEL_UNAVAILABLE`
 - `WORKING_DIRECTORY_UNAVAILABLE`
 - `DUPLICATE_NON_JOB`
+- `DUPLICATE_ORPHAN_JOB`
 
 `ExistingDialogueTurnResult` is immutable and contains exactly:
 
@@ -90,7 +91,7 @@ No raw prompt is returned or exposed in repr.
 
 ## Finite application error
 
-Programming/storage/contract failures that are not normal application outcomes use a finite `DialogueApplicationError` / `DialogueApplicationErrorCategory` boundary. At minimum categories are:
+Programming/storage/contract failures that are not normal application outcomes use a finite `DialogueApplicationError` / `DialogueApplicationErrorCategory` boundary. Exact categories are:
 
 - `INVALID_ARGUMENT`
 - `STORAGE`
@@ -101,7 +102,43 @@ Exception rendering contains only the category. Raw repository/adapter exception
 
 Normal busy/blocked/duplicate/terminal outcomes return `ExistingDialogueTurnResult` rather than throwing application exceptions.
 
-## Explicit configured profile authority
+## Durable duplicate-first short circuit
+
+After static request-shape validation, P3.1 MUST inspect the already-durable ingress for `request.update_id` **before** reading current settings, resolving profile/catalog/model/effort, resolving working directory, generating new IDs or calling any Codex port.
+
+This guarantees replay authority does not depend on today's configuration or catalog availability.
+
+If an ingress row already exists:
+
+### Existing JOB ingress with existing job
+
+- require exact canonical job `job_id == ingress.job_id` and `job.telegram_update_id == ingress.update_id`;
+- require exactly one canonical INPUT through accepted `TransientPayloadRepository.get_input_for_job(job_id)`;
+- return `DUPLICATE` with the exact durable job;
+- current caller text/settings/model/IDs are irrelevant and never rewrite durable state;
+- no model-catalog/working-directory/turn port call occurs.
+
+The current live dialogue may be read for factual result context, but its current state does not authorize re-execution.
+
+### Existing non-JOB ingress
+
+Return `DUPLICATE`, `job=None`, reason `DUPLICATE_NON_JOB`, with no external/configuration work.
+
+A prior CONTROL/ignored update is never reclassified as a prompt.
+
+### Existing orphan JOB ingress
+
+An orphan `JOB:<id>` ingress with no job can be legitimate after accepted P2.5 hard-delete finalization until P2.6a metadata retention removes the old ingress.
+
+If no live dialogue exists, return `DUPLICATE`, `job=None`, reason `DUPLICATE_ORPHAN_JOB`; never recreate a job/dialogue or call Codex.
+
+If a live dialogue still exists while the JOB ingress references a missing job, that shape is not produced by accepted P2 history and is an application `INVARIANT` failure.
+
+The duplicate-first read is an optimization/safety short circuit, not the new-update atomic dedupe transaction. For a previously unseen update, accepted `TurnJobRepository.claim_ingress` remains authoritative and handles races where another process commits the same update after this precheck.
+
+## Explicit configured profile authority for NEW updates
+
+Only after proving the update has no existing ingress does P3.1 perform new-prompt preflight.
 
 The service is constructed with the exact server ID and explicit configured `tuple[CodexProfile, ...]`; it never scans the filesystem for profiles.
 
@@ -117,7 +154,7 @@ Failure before durable prompt admission is `BLOCKED` with a finite reason and cr
 
 ## Authenticated selection capture
 
-Before creating a new prompt job, P3.1 calls the injected authenticated model-catalog port for the exact bound profile.
+For a NEW update only, before creating a prompt job, P3.1 calls the injected authenticated model-catalog port for the exact bound profile.
 
 It resolves settings `model_id` and calls the catalog's accepted reasoning-effort validation. If settings reasoning effort is NULL, the catalog default is resolved to the explicit concrete effort before job creation.
 
@@ -141,7 +178,9 @@ P3.1 receives a narrow resolver equivalent to:
 
 The resolver is configuration/application authority, not a filesystem scan.
 
-Resolution happens before durable prompt admission. Missing/invalid resolution returns `BLOCKED / WORKING_DIRECTORY_UNAVAILABLE` with no effect.
+Resolution happens before durable NEW prompt admission. Missing/invalid resolution returns `BLOCKED / WORKING_DIRECTORY_UNAVAILABLE` with no effect.
+
+Duplicate short-circuit never needs working-directory resolution.
 
 P3.1 does not add deployment/config file format for working directory; P8 owns deployment packaging.
 
@@ -159,11 +198,13 @@ Application constants:
 
 The service uses one injected signed-64 millisecond clock to compute absolute expiries and passes the same clock into repositories it constructs for P3.1 mutations. Overflow/invalid clock is a finite application error; it never truncates/wraps.
 
+The duplicate-first path does not need the application clock or ID factory.
+
 Expired active INPUT safety remains owned by accepted P2.4b retention guards.
 
-## Admission state
+## Admission state for NEW updates
 
-P3.1 executes only against an existing canonical `DialogueState.IDLE` dialogue with non-null thread ID.
+P3.1 executes a NEW update only against an existing canonical `DialogueState.IDLE` dialogue with non-null thread ID.
 
 - no dialogue -> `BLOCKED / NO_DIALOGUE`;
 - `TURN_RUNNING` -> `BUSY`;
@@ -171,9 +212,9 @@ P3.1 executes only against an existing canonical `DialogueState.IDLE` dialogue w
 
 P3.1 does not synthesize a thread or state transition for CREATING/UNKNOWN/ERROR/delete states.
 
-## Durable prompt admission
+## Durable NEW prompt admission
 
-After preflight selection/working-directory resolution, call accepted `TurnJobRepository.claim_ingress(...)` with:
+After new-update preflight selection/working-directory resolution, call accepted `TurnJobRepository.claim_ingress(...)` with:
 
 - exact Telegram/source IDs from request;
 - generated job/input payload IDs;
@@ -183,17 +224,13 @@ After preflight selection/working-directory resolution, call accepted `TurnJobRe
 - exact UTF-8 input bytes;
 - one-hour absolute INPUT expiry.
 
-This commit remains the sole new-prompt dedupe boundary before `turn/start`.
+This commit remains the sole atomic new-prompt dedupe boundary before `turn/start`.
 
-If P2 returns `DUPLICATE`:
+A same-update race may cause `claim_ingress` itself to return `DUPLICATE` despite the earlier read finding no row. That result is authoritative and is returned immediately without a turn call.
 
-- return `DUPLICATE` immediately;
-- return the exact durable job when disposition is JOB;
-- for a durable non-JOB disposition return `DUPLICATE` with `job=None` and reason `DUPLICATE_NON_JOB`;
-- never call the turn port;
-- never rewrite caller-supplied changed text/IDs into durable state.
+For a new different update, an outstanding RECEIVED or racing turn conflict preserves V1 no queue. When the canonical live dialogue is still IDLE after the conflict, return `BUSY`; otherwise return the appropriate busy/blocked current-state result. Do not delete or rewrite an accepted job.
 
-For a new update, an outstanding RECEIVED or racing turn conflict preserves V1 no queue. When the canonical live dialogue is still IDLE after the conflict, return `BUSY`; otherwise return the appropriate busy/blocked current-state result. Do not delete or rewrite the accepted job.
+After a CREATED claim, reread/materialize the current dialogue before `claim_turn`; use its exact current version and require it is still the same IDLE server/profile/thread binding. Accepted no-queue/delete guards prevent silently moving the newly admitted job under another binding.
 
 ## Durable turn-start ordering
 
@@ -284,14 +321,14 @@ Explicit turn interruption is P3.4 only.
 
 ## Concurrency / no queue
 
-Two different requests racing against one IDLE dialogue:
+Two different NEW requests racing against one IDLE dialogue:
 
 - at most one may create the outstanding RECEIVED job;
 - at most one may perform P1 `start_turn`;
 - the other returns BUSY/blocked finite result;
 - there is no in-memory delayed queue and no later automatic execution of the rejected prompt.
 
-Same update replay at any point after its durable ingress exists returns DUPLICATE and never starts another P1 turn.
+Same update replay at any point after its durable ingress exists returns DUPLICATE through the duplicate-first or atomic race path and never starts another P1 turn.
 
 ## No restart recovery policy in P3.1
 
