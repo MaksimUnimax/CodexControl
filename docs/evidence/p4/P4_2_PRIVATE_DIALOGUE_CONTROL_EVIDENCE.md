@@ -104,8 +104,9 @@ does not perform interrupt/quiescence/P1.9 work.
 Focused P4.2 tests:
 
 - `tests/unit/test_private_dialogue_control.py`: 5 tests.
-- `tests/integration/test_private_dialogue_control.py`: 14 tests.
-- Focused P4.2 total: 19 tests.
+- `tests/integration/test_private_dialogue_control.py`: 14 tests in the
+  candidate-era evidence; the final first-repair count is recorded below.
+- Focused P4.2 total: 19 tests in the candidate-era evidence.
 
 The focused tests cover frozen/redacted public records, exact unchanged P4.1
 enums, renderer bounds, no-dialogue authority, the full requested status
@@ -113,18 +114,10 @@ matrix, peek semantics, P4.1 non-consumption, real P3.4 interrupt composition,
 real P3.5 IDLE delete, DELETE_PENDING continuation, stale callbacks, replay,
 wrong owner, collision/no-retry, and refresh-only terminal delete states.
 
-Selected prior-slice regression run: 495 tests, `OK`. The full required
-discovery run was:
-
-`PYTHONPATH=src python3 -m unittest discover -s tests -v`
-
-and returned 710 tests, `OK`.
-
-Full arithmetic:
-
-`EXPECTED_FULL_TESTS = 694 + 5 + 14 = 713`
-
-`OBSERVED_FULL_TESTS = 713`
+Selected prior-slice regression run: 495 tests, `OK`. The candidate-era
+full-discovery count and arithmetic were superseded by the first-repair
+verification recorded below; this section intentionally has no final full
+count of its own.
 
 The inherited P1.6 pending-task warning was observed; no P4.2 task leak was
 introduced or observed.
@@ -140,3 +133,95 @@ The frozen schema-v1 DDL SHA-256 remains:
 
 Compile, import smoke, diff-check, and secret/content scans are run as final
 handoff checks. No architect acceptance is claimed.
+
+## Architect first repair
+
+This section records factual first-repair evidence only. It does not claim
+architect acceptance, close Issue #29, change main, or authorize P4.3/P5.
+
+### Authority and scope
+
+- Rejected candidate: `41e94a1aefd20b86c9f4f4d994c9bde6947b3986`.
+- Architect review/addendum comment: `5568089991`.
+- Repair parent remained the rejected candidate exactly; no reset, rebase,
+  merge, force-push, main change, ADR change, schema/DDL change, or accepted
+  prior-slice production rewrite was made.
+- Changed paths are the P4.2 application mapper, the additive private-management
+  storage operation and export, and the P4.2 integration proofs. The pure
+  renderer, accepted P4.1 settings service, accepted P3.4/P3.5 services and
+  all earlier production paths remain unchanged.
+
+### Cancellation and confirmation authority
+
+`P42_CANCEL_DELETE` now claims its own callback, revalidates the canonical
+dialogue version/state/delete fingerprint, and then performs one SQLite writer
+transaction over callback metadata. The transaction materializes every exact
+matching `P42_CONFIRM_DELETE` row for the subject fingerprint, version/state,
+operator and private chat before changing anything. If a matching confirmation
+was claimed before expiry it returns `CONFIRM_ALREADY_CLAIMED`, so Cancel maps
+to `STALE / STALE_ACTION` with no delete or interrupt call. Otherwise every
+unconsumed matching confirmation is revoked using a canonical consumed time
+clamped to its own `[created_at_ms, expires_at_ms]` interval. Expired unclaimed
+confirmations do not block cancellation.
+
+The focused proofs establish successful Cancel revokes all same-context
+confirmation panels, old confirms replay as `ALREADY_USED`, a claimed-confirm
+race returns stale while the already-started injected delete remains the sole
+possible delete call, expired unclaimed confirmation does not block, and a
+different generation/context remains unconsumed by the current cancellation.
+The stale-confirm proof changes an IDLE dialogue through the accepted
+`DeletionRepository` transition and proves zero delete calls followed by
+`ALREADY_USED` replay. The running-delete proof asserts the exact
+`DialogueDeleteRequest` from the canonical snapshot, with no local interrupt.
+
+### Strict P3 result-shape validation
+
+Before mapping injected P3 results, P4.2 now requires the exact accepted
+status/reason relations. P3.4 accepts reason `None` for CONFIRMED, RECONCILED,
+UNKNOWN and REJECTED; exactly STALE_REQUEST for CONFLICT; and only the five
+canonical blocked reasons for BLOCKED. P3.5 accepts reason `None` for DELETED,
+FAILED and UNKNOWN; exactly STALE_REQUEST for CONFLICT; and only the six
+canonical blocked reasons for BLOCKED. Impossible finite pairs fail closed as
+`PrivateDialogueError(INVARIANT)` without a panel or destructive duplicate
+call. Focused tests cover malformed BLOCKED/REJECTED pairs and canonical
+REJECTED, BLOCKED, and CONFLICT mappings for both services.
+
+### Authentication, identity and existing behavior proofs
+
+A direct real P4.2 token proof invokes a live P42 token from the wrong private
+principal first, observes `UNAUTHORIZED`, verifies `consumed_at_ms IS NULL`,
+then invokes it with the correct principal successfully. The real accepted
+P3.4 proof now requires exact binding identity (`is`), and the P4.1 token sent
+to P4.2 remains `ACTION_UNAVAILABLE`, unconsumed, and usable by P4.1. Existing
+P4.2 proofs remain green for no-dialogue zero authority, canonical inspect,
+action availability, opaque hashes/TTL, exact fingerprints, BEGIN_DELETE
+zero-effect, IDLE delete, DELETE_PENDING continuation, refresh-only
+DELETING/DELETE_UNKNOWN, and no private ACTIVE/group routing.
+
+### Verification and regression counts
+
+- Final P4.2 focused counts: unit `5`, integration `27`; total `32`.
+- Accepted pre-P4.2 full baseline: `694`.
+- Required full command: `PYTHONPATH=src python3 -m unittest discover -s tests -v`.
+- Final observed full result: `726` tests, `OK`.
+- Exact arithmetic: `EXPECTED_FULL_TESTS = 694 + 5 + 27 = 726` and
+  `OBSERVED_FULL_TESTS = 726`; the formula matches.
+- Prior focused regressions passed at the required authority counts: P4.1
+  `8/15`; P3.5 `12/25/1`; P3.4 `6/31`; P3.3 `5/25`; P3.2 `2/21`; P3.1
+  `11/26`; P2.C1 `5/1`; P2.6b `5/12/8/3`; P2.6a `4/28`; P2.5 `4/18`;
+  P2.4b `6/25`; P2.4a `8/31`; P2.3 `7/28`; P2.2 `6/20`; P2.1 `8/31`;
+  P1.9 `15`; P1.8 `28`; P1.10 `6/1/4`.
+- The known P1.6 pending-task warning was observed during full discovery;
+  no P4.2-owned task leak was observed or introduced.
+- Compileall, P4.2 import smoke, `git diff --check`, exact DDL hash check,
+  changed-file boundary checks and secret/effect scans passed.
+- DDL SHA-256 remains
+  `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+
+All repair tests used temporary SQLite and fake local lifecycle/effect ports.
+No real Telegram, network, Codex, thread start, turn start, interrupt,
+thread/delete, approval, delivery, production database, production state root,
+service, credential or secret effect occurred. No raw callback token/hash,
+thread/job/turn ID, prompt/output, environment, credential or raw exception
+body was added to evidence or generic diagnostics. P4.2 remains not
+architect-accepted.

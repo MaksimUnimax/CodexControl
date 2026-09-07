@@ -16,6 +16,8 @@ from codex_control.storage import (
     CallbackActionRecord,
     CallbackActionRepository,
     CallbackClaimStatus,
+    DeleteConfirmationRevocationResult,
+    DeleteConfirmationRevocationStatus,
     DialogueState,
     PrivateCallbackActionSpec,
     PrivateManagementRepository,
@@ -363,6 +365,36 @@ class PrivateDialogueManagementService:
         if record.action == "P42_CANCEL_DELETE":
             if not self._delete_available(snapshot):
                 return PrivateDialogueResult(PrivateDialogueStatus.STALE, None, PrivateDialogueReason.STALE_ACTION)
+            if record.consumed_at_ms is None:
+                raise _invariant()
+            try:
+                revocation = await PrivateManagementRepository(
+                    self._storage, now_ms=self._clock
+                ).revoke_delete_confirmations(
+                    subject_id=record.subject_id,
+                    expected_version=dialogue.version,
+                    expected_state=dialogue.state.value,
+                    authorized_user_id=record.authorized_user_id,
+                    authorized_chat_id=record.authorized_chat_id,
+                    consumed_at_ms=record.consumed_at_ms,
+                )
+            except (StorageError, RepositoryError) as error:
+                raise self._map_repository_error(error, internal=True) from None
+            if (
+                type(revocation) is not DeleteConfirmationRevocationResult
+                or type(revocation.status) is not DeleteConfirmationRevocationStatus
+                or type(revocation.revoked_count) is not int
+                or revocation.revoked_count < 0
+            ):
+                raise _invariant()
+            if revocation.status is DeleteConfirmationRevocationStatus.CONFIRM_ALREADY_CLAIMED:
+                return PrivateDialogueResult(
+                    PrivateDialogueStatus.STALE,
+                    None,
+                    PrivateDialogueReason.STALE_ACTION,
+                )
+            if revocation.status is not DeleteConfirmationRevocationStatus.REVOKED:
+                raise _invariant()
             panel = await self._status_panel_with_callbacks(snapshot, self._mode(), await self._settings())
             return PrivateDialogueResult(PrivateDialogueStatus.RENDERED, panel, None)
         if record.action == "P42_CONFIRM_DELETE":
@@ -662,7 +694,19 @@ class PrivateDialogueManagementService:
             if result.reason is not DialogueInterruptReason.STALE_REQUEST:
                 raise _invariant()
             return PrivateDialogueResult(PrivateDialogueStatus.STALE, None, PrivateDialogueReason.STALE_ACTION)
-        if result.status in (DialogueInterruptStatus.BLOCKED, DialogueInterruptStatus.REJECTED):
+        if result.status is DialogueInterruptStatus.REJECTED:
+            if result.reason is not None:
+                raise _invariant()
+            return PrivateDialogueResult(PrivateDialogueStatus.BLOCKED, None, None)
+        if result.status is DialogueInterruptStatus.BLOCKED:
+            if result.reason not in {
+                DialogueInterruptReason.NO_DIALOGUE,
+                DialogueInterruptReason.DIALOGUE_NOT_RUNNING,
+                DialogueInterruptReason.JOB_NOT_RUNNING,
+                DialogueInterruptReason.ACTIVE_BINDING_UNAVAILABLE,
+                DialogueInterruptReason.INTERRUPT_IN_PROGRESS,
+            }:
+                raise _invariant()
             return PrivateDialogueResult(PrivateDialogueStatus.BLOCKED, None, self._map_interrupt_reason(result.reason))
         raise _invariant()
 
@@ -697,6 +741,15 @@ class PrivateDialogueManagementService:
                 raise _invariant()
             return PrivateDialogueResult(PrivateDialogueStatus.STALE, None, PrivateDialogueReason.STALE_ACTION)
         if result.status is DialogueDeleteStatus.BLOCKED:
+            if result.reason not in {
+                DialogueDeleteReason.NO_DIALOGUE,
+                DialogueDeleteReason.DIALOGUE_NOT_READY,
+                DialogueDeleteReason.DELETE_NOT_READY,
+                DialogueDeleteReason.INTERRUPT_IN_PROGRESS,
+                DialogueDeleteReason.INTERRUPT_UNRESOLVED,
+                DialogueDeleteReason.DELETE_IN_PROGRESS,
+            }:
+                raise _invariant()
             return PrivateDialogueResult(PrivateDialogueStatus.BLOCKED, None, self._map_delete_reason(result.reason))
         raise _invariant()
 

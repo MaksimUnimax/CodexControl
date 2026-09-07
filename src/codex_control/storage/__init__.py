@@ -84,7 +84,12 @@ from .metadata_retention import (
 from .repository_errors import RepositoryError, RepositoryErrorCategory
 from .settings_dialogue_guards import SettingsDialogueGuardRepository
 from .interrupt_coordination import InterruptCoordinationRepository
-from .private_management import PrivateCallbackActionSpec, PrivateManagementRepository
+from .private_management import (
+    DeleteConfirmationRevocationResult,
+    DeleteConfirmationRevocationStatus,
+    PrivateCallbackActionSpec,
+    PrivateManagementRepository,
+)
 
 __all__ = [
     "MIGRATION_ID",
@@ -157,5 +162,7 @@ __all__ = [
     "SettingsDialogueGuardRepository",
     "InterruptCoordinationRepository",
     "PrivateCallbackActionSpec",
+    "DeleteConfirmationRevocationStatus",
+    "DeleteConfirmationRevocationResult",
     "PrivateManagementRepository",
 ]

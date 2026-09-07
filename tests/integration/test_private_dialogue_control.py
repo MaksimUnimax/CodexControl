@@ -20,7 +20,14 @@ from codex_control.adapters.telegram import PrivateCommand, TelegramPrivateDialo
 from codex_control.application import (
     ActiveTurnRegistry,
     DialogueDeleteService,
+    DialogueDeleteRequest,
+    DialogueDeleteResult,
+    DialogueDeleteReason,
+    DialogueDeleteStatus,
     DialogueInterruptService,
+    DialogueInterruptResult,
+    DialogueInterruptReason,
+    DialogueInterruptStatus,
     PrivateCallbackRequest,
     PrivateDialogueError,
     PrivateDialogueErrorCategory,
@@ -103,6 +110,30 @@ class MappingDeleteService:
 
     async def delete(self, request):
         self.calls.append(request)
+        return self.result
+
+
+class MappingInterruptService:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    async def interrupt(self, request):
+        self.calls.append(request)
+        return self.result
+
+
+class BlockingDeleteService:
+    def __init__(self, result):
+        self.result = result
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.calls = []
+
+    async def delete(self, request):
+        self.calls.append(request)
+        self.entered.set()
+        await self.release.wait()
         return self.result
 
 
@@ -431,7 +462,7 @@ class PrivateDialogueControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(PrivateDialogueStatus.INTERRUPTED, result.status)
         self.assertIsNone(result.panel)
         self.assertEqual(1, len(lifecycle.interrupt_calls))
-        self.assertEqual(binding, lifecycle.interrupt_calls[0])
+        self.assertIs(binding, lifecycle.interrupt_calls[0])
         current = await DialogueRepository(self.storage).get_live()
         self.assertEqual(DialogueState.IDLE, current.state)
         self.assertEqual([], delete.calls)
@@ -577,7 +608,298 @@ class PrivateDialogueControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
         result = await service.handle_callback(PrivateCallbackRequest(31, 7, 7, "query", confirm))
         self.assertEqual((PrivateDialogueStatus.UNKNOWN, PrivateDialogueReason.DELETE_UNKNOWN), (result.status, result.reason))
         self.assertEqual(1, len(delete.calls))
+        current = await DialogueRepository(self.storage).get_live()
+        self.assertEqual(
+            DialogueDeleteRequest(current.dialogue_id, current.version),
+            delete.calls[0],
+        )
         self.assertEqual([], interrupt.calls)
+
+    async def test_cancel_revokes_all_same_context_confirmations(self):
+        await self.seed_idle()
+        delete = MappingDeleteService(DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, None, None, None))
+        service = self.p42(PassiveService(), delete)
+
+        first_status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        first_begin = await self.action_token(first_status.panel, "P42_BEGIN_DELETE")
+        first_confirmation = await service.handle_callback(
+            PrivateCallbackRequest(50, 7, 7, "query", first_begin)
+        )
+        first_confirm = await self.action_token(first_confirmation.panel, "P42_CONFIRM_DELETE")
+        first_cancel = await self.action_token(first_confirmation.panel, "P42_CANCEL_DELETE")
+
+        second_status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        second_begin = await self.action_token(second_status.panel, "P42_BEGIN_DELETE")
+        second_confirmation = await service.handle_callback(
+            PrivateCallbackRequest(51, 7, 7, "query", second_begin)
+        )
+        second_confirm = await self.action_token(second_confirmation.panel, "P42_CONFIRM_DELETE")
+        self.assertNotEqual(first_confirm, second_confirm)
+
+        cancelled = await service.handle_callback(
+            PrivateCallbackRequest(52, 7, 7, "query", first_cancel)
+        )
+        self.assertEqual(
+            (PrivateDialogueStatus.RENDERED, None),
+            (cancelled.status, cancelled.reason),
+        )
+        self.assertEqual(0, len(delete.calls))
+        self.assertEqual(
+            PrivateDialogueStatus.ALREADY_USED,
+            (await service.handle_callback(PrivateCallbackRequest(53, 7, 7, "query", first_confirm))).status,
+        )
+        self.assertEqual(
+            PrivateDialogueStatus.ALREADY_USED,
+            (await service.handle_callback(PrivateCallbackRequest(54, 7, 7, "query", second_confirm))).status,
+        )
+
+    async def test_cancel_does_not_revoke_other_generation(self):
+        current = await self.seed_idle()
+        service = self.p42(PassiveService(), PassiveService())
+        original_status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        original_begin = await self.action_token(original_status.panel, "P42_BEGIN_DELETE")
+        original_confirmation = await service.handle_callback(
+            PrivateCallbackRequest(55, 7, 7, "query", original_begin)
+        )
+        original_confirm = await self.action_token(original_confirmation.panel, "P42_CONFIRM_DELETE")
+        original_hash = hashlib.sha256(original_confirm.encode()).hexdigest()
+
+        pending = await DeletionRepository(self.storage, now_ms=lambda: 1).claim_delete_intent(
+            dialogue_id=current.dialogue_id, expected_version=current.version
+        )
+        current_status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        current_begin = await self.action_token(current_status.panel, "P42_BEGIN_DELETE")
+        current_confirmation = await service.handle_callback(
+            PrivateCallbackRequest(56, 7, 7, "query", current_begin)
+        )
+        current_cancel = await self.action_token(current_confirmation.panel, "P42_CANCEL_DELETE")
+        cancelled = await service.handle_callback(
+            PrivateCallbackRequest(57, 7, 7, "query", current_cancel)
+        )
+        self.assertEqual(PrivateDialogueStatus.RENDERED, cancelled.status)
+        original_consumed = await self.storage.read(
+            lambda c: c.execute(
+                "SELECT consumed_at_ms FROM callback_actions WHERE token_hash_sha256 = ?",
+                (original_hash,),
+            ).fetchone()[0]
+        )
+        self.assertIsNone(original_consumed)
+        self.assertEqual(pending.version, 2)
+
+    async def test_confirm_claimed_before_cancel_returns_stale_without_cancel_effect(self):
+        await self.seed_idle()
+        delete = BlockingDeleteService(DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, None, None, None))
+        service = self.p42(PassiveService(), delete)
+        status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        begin = await self.action_token(status.panel, "P42_BEGIN_DELETE")
+        confirmation = await service.handle_callback(
+            PrivateCallbackRequest(58, 7, 7, "query", begin)
+        )
+        confirm = await self.action_token(confirmation.panel, "P42_CONFIRM_DELETE")
+        cancel = await self.action_token(confirmation.panel, "P42_CANCEL_DELETE")
+
+        confirm_task = asyncio.create_task(
+            service.handle_callback(PrivateCallbackRequest(59, 7, 7, "query", confirm))
+        )
+        await delete.entered.wait()
+        cancelled = await service.handle_callback(
+            PrivateCallbackRequest(60, 7, 7, "query", cancel)
+        )
+        self.assertEqual(
+            (PrivateDialogueStatus.STALE, PrivateDialogueReason.STALE_ACTION),
+            (cancelled.status, cancelled.reason),
+        )
+        self.assertEqual(1, len(delete.calls))
+        delete.release.set()
+        confirmed = await confirm_task
+        self.assertEqual(PrivateDialogueStatus.UNKNOWN, confirmed.status)
+        self.assertEqual(1, len(delete.calls))
+
+    async def test_expired_unclaimed_confirmation_does_not_block_cancel(self):
+        await self.seed_idle()
+        service = self.p42(PassiveService(), PassiveService())
+        initial = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        initial_begin = await self.action_token(initial.panel, "P42_BEGIN_DELETE")
+        initial_confirmation = await service.handle_callback(
+            PrivateCallbackRequest(61, 7, 7, "query", initial_begin)
+        )
+        initial_confirm = await self.action_token(initial_confirmation.panel, "P42_CONFIRM_DELETE")
+        initial_hash = hashlib.sha256(initial_confirm.encode()).hexdigest()
+
+        self.clock.value = 901000
+        fresh = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        fresh_begin = await self.action_token(fresh.panel, "P42_BEGIN_DELETE")
+        fresh_confirmation = await service.handle_callback(
+            PrivateCallbackRequest(62, 7, 7, "query", fresh_begin)
+        )
+        fresh_cancel = await self.action_token(fresh_confirmation.panel, "P42_CANCEL_DELETE")
+        cancelled = await service.handle_callback(
+            PrivateCallbackRequest(63, 7, 7, "query", fresh_cancel)
+        )
+        self.assertEqual(PrivateDialogueStatus.RENDERED, cancelled.status)
+        initial_row = await self.storage.read(
+            lambda c: tuple(c.execute(
+                "SELECT consumed_at_ms, expires_at_ms FROM callback_actions WHERE token_hash_sha256 = ?",
+                (initial_hash,),
+            ).fetchone())
+        )
+        self.assertEqual(initial_row[0], initial_row[1])
+
+    async def test_stale_confirm_consumes_callback_without_delete(self):
+        current = await self.seed_idle()
+        delete = MappingDeleteService(DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, None, None, None))
+        service = self.p42(PassiveService(), delete)
+        status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        begin = await self.action_token(status.panel, "P42_BEGIN_DELETE")
+        confirmation = await service.handle_callback(
+            PrivateCallbackRequest(64, 7, 7, "query", begin)
+        )
+        confirm = await self.action_token(confirmation.panel, "P42_CONFIRM_DELETE")
+        await DeletionRepository(self.storage, now_ms=lambda: 1).claim_delete_intent(
+            dialogue_id=current.dialogue_id, expected_version=current.version
+        )
+        stale = await service.handle_callback(PrivateCallbackRequest(65, 7, 7, "query", confirm))
+        self.assertEqual(
+            (PrivateDialogueStatus.STALE, PrivateDialogueReason.STALE_ACTION),
+            (stale.status, stale.reason),
+        )
+        self.assertEqual(0, len(delete.calls))
+        replay = await service.handle_callback(PrivateCallbackRequest(66, 7, 7, "query", confirm))
+        self.assertEqual(PrivateDialogueStatus.ALREADY_USED, replay.status)
+
+    async def test_wrong_principal_p42_token_is_unconsumed_then_right_principal_succeeds(self):
+        await self.seed_idle()
+        service = self.p42(PassiveService(), PassiveService())
+        status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        token = await self.action_token(status.panel, "P42_REFRESH")
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        wrong = await service.handle_callback(PrivateCallbackRequest(67, 8, 7, "query", token))
+        self.assertEqual(PrivateDialogueStatus.UNAUTHORIZED, wrong.status)
+        self.assertIsNone(await self.storage.read(
+            lambda c: c.execute(
+                "SELECT consumed_at_ms FROM callback_actions WHERE token_hash_sha256 = ?",
+                (token_hash,),
+            ).fetchone()[0]
+        ))
+        right = await service.handle_callback(PrivateCallbackRequest(68, 7, 7, "query", token))
+        self.assertEqual(PrivateDialogueStatus.RENDERED, right.status)
+
+    async def test_p34_blocked_none_is_invariant(self):
+        await self.seed_running()
+        service = self.p42(
+            MappingInterruptService(DialogueInterruptResult(DialogueInterruptStatus.BLOCKED, None, None, None, None)),
+            PassiveService(),
+        )
+        status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        token = await self.action_token(status.panel, "P42_INTERRUPT")
+        with self.assertRaises(PrivateDialogueError) as raised:
+            await service.handle_callback(PrivateCallbackRequest(69, 7, 7, "query", token))
+        self.assertEqual(PrivateDialogueErrorCategory.INVARIANT, raised.exception.category)
+
+    async def test_p34_blocked_stale_request_is_invariant(self):
+        await self.seed_running()
+        service = self.p42(
+            MappingInterruptService(DialogueInterruptResult(
+                DialogueInterruptStatus.BLOCKED, None, None, None, DialogueInterruptReason.STALE_REQUEST
+            )),
+            PassiveService(),
+        )
+        status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        token = await self.action_token(status.panel, "P42_INTERRUPT")
+        with self.assertRaises(PrivateDialogueError) as raised:
+            await service.handle_callback(PrivateCallbackRequest(70, 7, 7, "query", token))
+        self.assertEqual(PrivateDialogueErrorCategory.INVARIANT, raised.exception.category)
+
+    async def test_p34_rejected_reason_is_invariant(self):
+        await self.seed_running()
+        service = self.p42(
+            MappingInterruptService(DialogueInterruptResult(
+                DialogueInterruptStatus.REJECTED, None, None, None, DialogueInterruptReason.JOB_NOT_RUNNING
+            )),
+            PassiveService(),
+        )
+        status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        token = await self.action_token(status.panel, "P42_INTERRUPT")
+        with self.assertRaises(PrivateDialogueError) as raised:
+            await service.handle_callback(PrivateCallbackRequest(71, 7, 7, "query", token))
+        self.assertEqual(PrivateDialogueErrorCategory.INVARIANT, raised.exception.category)
+
+    async def test_p34_canonical_rejected_and_blocked_results_map_safely(self):
+        for result, expected in (
+            (
+                DialogueInterruptResult(DialogueInterruptStatus.REJECTED, None, None, None, None),
+                (PrivateDialogueStatus.BLOCKED, None),
+            ),
+            (
+                DialogueInterruptResult(
+                    DialogueInterruptStatus.BLOCKED, None, None, None,
+                    DialogueInterruptReason.JOB_NOT_RUNNING,
+                ),
+                (PrivateDialogueStatus.BLOCKED, PrivateDialogueReason.JOB_NOT_RUNNING),
+            ),
+        ):
+            await self.clear_state()
+            await self.seed_running()
+            service = self.p42(MappingInterruptService(result), PassiveService())
+            status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+            token = await self.action_token(status.panel, "P42_INTERRUPT")
+            mapped = await service.handle_callback(PrivateCallbackRequest(72, 7, 7, "query", token))
+            self.assertEqual(expected, (mapped.status, mapped.reason))
+
+    async def test_p35_blocked_none_is_invariant(self):
+        await self.seed_idle()
+        service = self.p42(
+            PassiveService(),
+            MappingDeleteService(DialogueDeleteResult(DialogueDeleteStatus.BLOCKED, None, None, None)),
+        )
+        status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        begin = await self.action_token(status.panel, "P42_BEGIN_DELETE")
+        confirmation = await service.handle_callback(PrivateCallbackRequest(73, 7, 7, "query", begin))
+        confirm = await self.action_token(confirmation.panel, "P42_CONFIRM_DELETE")
+        with self.assertRaises(PrivateDialogueError) as raised:
+            await service.handle_callback(PrivateCallbackRequest(74, 7, 7, "query", confirm))
+        self.assertEqual(PrivateDialogueErrorCategory.INVARIANT, raised.exception.category)
+
+    async def test_p35_blocked_stale_request_is_invariant(self):
+        await self.seed_idle()
+        service = self.p42(
+            PassiveService(),
+            MappingDeleteService(DialogueDeleteResult(
+                DialogueDeleteStatus.BLOCKED, None, None, DialogueDeleteReason.STALE_REQUEST
+            )),
+        )
+        status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        begin = await self.action_token(status.panel, "P42_BEGIN_DELETE")
+        confirmation = await service.handle_callback(PrivateCallbackRequest(75, 7, 7, "query", begin))
+        confirm = await self.action_token(confirmation.panel, "P42_CONFIRM_DELETE")
+        with self.assertRaises(PrivateDialogueError) as raised:
+            await service.handle_callback(PrivateCallbackRequest(76, 7, 7, "query", confirm))
+        self.assertEqual(PrivateDialogueErrorCategory.INVARIANT, raised.exception.category)
+
+    async def test_p35_canonical_blocked_and_conflict_results_map_safely(self):
+        for result, expected in (
+            (
+                DialogueDeleteResult(
+                    DialogueDeleteStatus.BLOCKED, None, None, DialogueDeleteReason.DELETE_NOT_READY
+                ),
+                (PrivateDialogueStatus.BLOCKED, PrivateDialogueReason.DELETE_NOT_READY),
+            ),
+            (
+                DialogueDeleteResult(
+                    DialogueDeleteStatus.CONFLICT, None, None, DialogueDeleteReason.STALE_REQUEST
+                ),
+                (PrivateDialogueStatus.STALE, PrivateDialogueReason.STALE_ACTION),
+            ),
+        ):
+            await self.clear_state()
+            await self.seed_idle()
+            service = self.p42(PassiveService(), MappingDeleteService(result))
+            status = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+            begin = await self.action_token(status.panel, "P42_BEGIN_DELETE")
+            confirmation = await service.handle_callback(PrivateCallbackRequest(77, 7, 7, "query", begin))
+            confirm = await self.action_token(confirmation.panel, "P42_CONFIRM_DELETE")
+            mapped = await service.handle_callback(PrivateCallbackRequest(78, 7, 7, "query", confirm))
+            self.assertEqual(expected, (mapped.status, mapped.reason))
 
 
 if __name__ == "__main__":
