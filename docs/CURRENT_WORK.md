@@ -1,6 +1,6 @@
 # Current work authority
 
-Date: 2026-09-06
+Date: 2026-09-07
 
 ## Accepted facts
 
@@ -11,12 +11,11 @@ Date: 2026-09-06
 - Frozen schema-v1 DDL SHA-256 remains `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
 - P3.1 accepted at `9e0a86b311bb63d6a36a4641cb588321987e1550`; full suite 543.
 - P3.2 accepted at `c484c56db007569170363b3d08c24766148c3e30`; full suite 566.
-- P3.3 settings selection/dialogue linearization is architect-accepted after one repair at `66a37d8b8065ecd31e17351e8062f9ebf1ee8828`; full suite 596.
-- P3.3 acceptance authority: `docs/evidence/p3/P3_3_ARCHITECT_ACCEPTANCE_2026-09-06.md`.
-- ADR-0026/0027/0028/0029 remain binding accepted P3.1–P3.3 authority.
-- ADR-0030 is binding P3.4 authority.
-
-The exact P3.3 architect base was `fc0d57e665f0aad8044934b24396de7d07ee56ef`. Any textual report spelling with an extra trailing character is not authority.
+- P3.3 accepted at `66a37d8b8065ecd31e17351e8062f9ebf1ee8828`; full suite 596.
+- P3.4 durable interrupt orchestration/recovery is architect-accepted after one repair at `6460a449f861b7b86ab664e5ff877c108715082d`; full suite 633.
+- P3.4 acceptance authority: `docs/evidence/p3/P3_4_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
+- ADR-0026/0027/0028/0029/0030 remain binding accepted P3.1–P3.4 authority.
+- ADR-0031 is binding P3.5 authority.
 
 ## Accepted P3 application boundary
 
@@ -28,307 +27,172 @@ No-dialogue first prompt:
 
 `duplicate/static -> settings/model/workdir preflight -> tombstone guard -> guarded CREATING -> first JOB/RECEIVED/INPUT -> thread/start -> confirm IDLE -> same admitted job -> accepted turn runner`
 
-P3.2 first-dialogue create is atomically bound to the exact P3.3 settings snapshot. Stale selection yields `BLOCKED / SETTINGS_CHANGED`, with no delayed execution.
+Settings selection is linearized with first-dialogue creation. Already-admitted profile/model/effort snapshots remain immutable.
 
-P3.3 profile mutation is legal only with no live dialogue. Model/reasoning real mutation is legal only with no dialogue or an exact matching IDLE dialogue. Already-admitted job snapshots remain immutable.
+Interrupt:
 
-## P3.4 objective
+`exact version/job preflight -> exact ActiveTurnRegistry binding -> durable INTERRUPTING -> P1.8 interrupt/reconcile -> exact restore/terminal outcome`
 
-P3.4 adds durable operator interrupt orchestration over accepted P1.8.
+P3.4 requires exact in-memory `TurnBinding` identity, commits INTERRUPTING before P1 interrupt, never blindly retries, reconciles natural terminal races, and makes pre-existing INTERRUPTING restart recovery zero-P1/UNKNOWN.
 
-It must establish durable `INTERRUPTING` authority before the external interrupt effect, preserve the exact in-memory P1 `TurnBinding` object required by P1.8 identity checks, reconcile interrupt and natural-terminal races, and define startup recovery for pre-existing `INTERRUPTING` without repeating interrupt.
+## P3.5 objective
 
-P3.4 must not weaken accepted P1.8 or P2.4a behavior.
+P3.5 completes the dialogue application layer with:
 
-## P1.8 dependency authority
+1. hard-delete orchestration over accepted P1.9 + P2.5;
+2. composition with P3.4 when delete is requested during an exact running turn;
+3. safe explicit continuation from DELETE_PENDING but never blind replay from DELETING/DELETE_UNKNOWN;
+4. confirmed local purge+tombstone only after exact P1.9 DELETE_CONFIRMED;
+5. final no-P1 startup recovery for stranded admitted/running/delete states;
+6. final P3 fake/application acceptance before Telegram P4.
 
-Accepted P1.8 at `6d8a07b5b95ef377cf60762f4475128bdf810b22` owns exact `turn/interrupt` semantics.
+## P1.9 delete authority
 
-Important P1.8 facts:
+Accepted P1.9: `95b2a42e47aaddae6ec9bcbaf9f0f879362d993e`.
 
-- interrupt accepts only the exact active `TurnBinding` object retained by the adapter;
-- reconstructed equal-looking bindings are rejected before dispatch;
-- exactly one interrupt RPC is sent; no retry;
-- the existing P1.6 collector is the sole terminal evidence consumer;
-- `interrupt_turn` may return `CONFIRMED`, `RECONCILED`, `REJECTED`, or `UNKNOWN`;
-- CONFIRMED/RECONCILED can carry the exact definitive terminal result;
-- caller cancellation after dispatch remains owned;
-- ambiguous interrupt plus definitive collector terminal can reconcile;
-- ambiguous/no definitive terminal remains UNKNOWN.
+Exact facts:
 
-P3.4 must consume this contract rather than duplicate protocol behavior.
+- official external method is `thread/delete` with only exact `threadId`;
+- profile/thread binding is exact durable authority;
+- exactly one RPC per invocation;
+- schema-valid object response is the sole `DELETE_CONFIRMED` authority;
+- every dispatched non-success is `DELETE_UNKNOWN`;
+- no DELETE_REJECTED, no automatic second delete, no thread/read/list guessing, no notification inference;
+- pre-dispatch cancellation has zero effect; post-dispatch caller cancellation stays attached to the owned RPC.
 
-## P3.4 public application additions
+P3.5 consumes this contract; it does not modify adapter semantics.
 
-Add `DialogueInterruptService` with exact public callable surface:
+## P2.5 delete authority
 
-- `interrupt(request)`;
-- `recover_preexisting_interrupt()`.
+Accepted P2.5: `87ef37cf245d79f6d20b507b13c0f36014c1580f`.
 
-Add frozen:
+Exact durable sequence:
 
-`DialogueInterruptRequest(dialogue_id, job_id, expected_dialogue_version, expected_job_version)`.
+`IDLE -> DELETE_PENDING -> DELETING -> confirmed finalization / DELETE_UNKNOWN / ERROR`.
 
-Caller input deliberately contains no thread or turn ID.
+P2.5 remains sole local readiness/finalization authority:
 
-Add `DialogueInterruptStatus` exactly:
+- claim_delete_intent requires exact IDLE/version/thread, no tombstone, no pending approval, and terminal-safe retained jobs;
+- DELIVERED requires canonical all-confirmed delivery; FAILED history must be canonical;
+- claim_deleting rechecks the same safeguards before any external effect;
+- finalize_confirmed hashes the thread identity, records a bounded content-free tombstone, removes the exact live dialogue and cascades dialogue-owned jobs/payloads/delivery/approvals;
+- non-content ingress/callback/tombstone/error metadata remains according to accepted retention authority;
+- DELETE_UNKNOWN has no retry surface.
 
-- `CONFIRMED`;
-- `RECONCILED`;
-- `REJECTED`;
-- `UNKNOWN`;
-- `BLOCKED`;
-- `CONFLICT`.
+P3.5 must not weaken this readiness boundary. A normal CODEX_COMPLETED turn that has not reached safe delivery remains DELETE_NOT_READY.
 
-Add `DialogueInterruptReason` exactly:
+## P3.5 public hard-delete authority
 
-- `NO_DIALOGUE`;
-- `DIALOGUE_NOT_RUNNING`;
-- `JOB_NOT_RUNNING`;
-- `ACTIVE_BINDING_UNAVAILABLE`;
-- `INTERRUPT_IN_PROGRESS`;
-- `STALE_REQUEST`.
+Add `DialogueDeleteService.delete(DialogueDeleteRequest)`.
 
-Add frozen:
+Request exact fields:
 
-`DialogueInterruptResult(status, job, dialogue, output_payload, reason)`.
+`dialogue_id, expected_dialogue_version`.
 
-Add `InterruptRecoveryStatus` exactly:
+Status exactly:
 
-- `NO_ACTION`;
-- `MARKED_UNKNOWN`.
+`DELETED | FAILED | UNKNOWN | BLOCKED | CONFLICT`.
 
-Add frozen:
+Reason exactly:
 
-`InterruptRecoveryResult(status, job, dialogue)`.
+`NO_DIALOGUE | DIALOGUE_NOT_READY | DELETE_NOT_READY | INTERRUPT_IN_PROGRESS | INTERRUPT_UNRESOLVED | DELETE_IN_PROGRESS | STALE_REQUEST`.
 
-Add finite payload-free `DialogueInterruptError` with exact categories:
+Result exact fields:
 
-- `INVALID_ARGUMENT`;
-- `STORAGE`;
-- `INVARIANT`.
+`status, dialogue, tombstone, reason`.
 
-No thread/turn identity, CODEX_HOME, DB path, prompt/output content, raw adapter/repository errors or credentials may appear in generic request/error rendering.
+Error categories exactly:
 
-## Exact active TurnBinding registry
+`INVALID_ARGUMENT | STORAGE | INVARIANT`.
 
-P1.8 object-identity authority means a `TurnBinding` may not be reconstructed from SQLite for interrupt.
+No caller-supplied profile/thread identity.
 
-P3.4 adds a shared in-memory `ActiveTurnRegistry` keyed by durable job ID.
+## Hard-delete behavior
 
-Requirements:
+Tombstone replay with no live dialogue returns DELETED with zero effect. Tombstone/live collision is invariant corruption.
 
-- store the exact `TurnBinding` object returned by P1 `start_turn`;
-- publish it after exact start confirmation and before durable CODEX_RUNNING becomes externally usable;
-- lookup returns the same object identity;
-- retire only the exact owned entry;
-- stale cleanup cannot remove a replacement;
-- no profile/thread/turn values in registry repr;
-- registry is empty after restart.
+Matching IDLE:
 
-The admitted-turn runner must accept/integrate an optional registry. Existing P3.1/P3.2 service callable surfaces and default behavior remain unchanged.
+`claim_delete_intent -> claim_deleting -> P1.9 delete -> finalize/unknown/error`.
 
-Future runtime composition must inject the same registry instance into prompt execution and interrupt service.
+Matching exact DELETE_PENDING may continue only from its CURRENT version:
 
-A durable running job without the exact registry binding is `BLOCKED / ACTIVE_BINDING_UNAVAILABLE`; P3.4 never fabricates a replacement binding.
+`claim_deleting -> P1.9 delete -> finalize/unknown/error`.
 
-## Interrupt request authority
+DELETE_PENDING is never automatically resumed at startup. An old pre-intent version is stale.
 
-`DialogueInterruptRequest` binds the operator action to exact durable job/dialogue IDs and versions.
+DELETING never triggers a second delete invocation. A concurrent/repeated caller gets DELETE_IN_PROGRESS; after restart it becomes DELETE_UNKNOWN with zero P1.
 
-A stale request must never target a newer turn.
+DELETE_UNKNOWN is terminal uncertainty for P3.5 and has no retry.
 
-Required semantic precedence after static validation:
+TURN_RUNNING must compose with accepted P3.4 first. Only exact CODEX_RUNNING is interruptible. Definitive P3.4 reconciliation to IDLE re-enters P2.5 readiness; rejected/unknown interrupt does not proceed to delete. If the reconciled job is CODEX_COMPLETED but delivery is not terminal-safe, P2.5 blocks deletion and P3.5 reports DELETE_NOT_READY.
 
-1. no live dialogue -> `BLOCKED / NO_DIALOGUE`;
-2. dialogue ID or expected dialogue version mismatch -> `CONFLICT / STALE_REQUEST`;
-3. dialogue already INTERRUPTING -> `BLOCKED / INTERRUPT_IN_PROGRESS`;
-4. dialogue not TURN_RUNNING -> `BLOCKED / DIALOGUE_NOT_RUNNING`;
-5. missing/non-running referenced job -> `BLOCKED / JOB_NOT_RUNNING` unless persisted shape is corrupt;
-6. job version mismatch -> `CONFLICT / STALE_REQUEST`;
-7. job must be exact CODEX_RUNNING and match dialogue server/profile/thread with non-null codex turn ID;
-8. exact registry binding must exist and match durable profile/thread/turn;
-9. absent registry -> `BLOCKED / ACTIVE_BINDING_UNAVAILABLE`;
-10. registry/durable mismatch -> application INVARIANT.
+P1.9 is invoked only after durable DELETING. DELETE_CONFIRMED alone permits finalize_confirmed. DELETE_UNKNOWN/malformed/mismatched/uncertain result becomes durable DELETE_UNKNOWN. Deterministic local pre-dispatch request/precondition/busy failures become ERROR/CODEX_PROCESS. No retry.
 
-No P1 interrupt occurs before durable interrupt claim.
+Tombstone target is exactly seven days (`604800000` ms); P2.6a remains cleanup authority.
 
-## Ownership boundary
+## Final P3 startup recovery
 
-Preflight is effect-free and caller cancellation may propagate.
+Add `DialogueRecoveryService.recover_startup()` with no P1/Codex/Telegram port.
 
-After exact eligibility/registry binding is established, create one owned task before the durable interrupt claim. From that point caller cancellation is deferred through:
+Statuses exactly:
 
-`claim INTERRUPTING -> P1 interrupt/reconciliation -> durable restore/terminal result`.
+`NO_ACTION | CREATE_MARKED_UNKNOWN | PRE_EFFECT_FAILED | TURN_MARKED_UNKNOWN | INTERRUPT_MARKED_UNKNOWN | DELETE_MARKED_UNKNOWN`.
 
-Repeated cancellation must not cause duplicate interrupt RPCs.
+Recovery rules:
 
-## Atomic interrupt storage authority
+- CREATING -> CREATE_UNKNOWN / CODEX_AMBIGUOUS, same P3.2 semantics;
+- INTERRUPTING -> owning running job UNKNOWN + dialogue TURN_UNKNOWN / CODEX_AMBIGUOUS, same P3.4 semantics;
+- DELETING -> DELETE_UNKNOWN / DELETE_UNKNOWN, zero P1;
+- DELETE_PENDING -> preserve and NO_ACTION; only fresh explicit delete may continue;
+- IDLE + exact outstanding RECEIVED -> job FAILED / CODEX_PROCESS, dialogue stays IDLE;
+- TURN_RUNNING + exact CLAIMED -> job FAILED / CODEX_PROCESS and dialogue IDLE;
+- TURN_RUNNING + CODEX_STARTING or CODEX_RUNNING -> job UNKNOWN + dialogue TURN_UNKNOWN / CODEX_AMBIGUOUS;
+- already unknown/error/normal terminal states -> NO_ACTION unless persisted shape is corrupt.
 
-P3.4 may add one narrow storage module/repository using existing `SqliteStorage.write` and schema-v1 only.
+RECEIVED and CLAIMED are provably pre-effect because accepted runner persists CODEX_STARTING before P1 turn/start. CODEX_STARTING and CODEX_RUNNING are effect-possible and therefore UNKNOWN.
 
-Do not modify the semantics of accepted `TurnJobRepository.finish_codex`.
+Recovery performs no delayed prompt execution, no external interrupt, no thread/delete, no output generation and no deletion of ingress/input evidence. Repeated recovery is idempotent.
 
-### claim_interrupt
+A narrow additive schema-v1 storage coordinator may atomically implement the pre-effect/turn recovery transitions. No DDL change.
 
-Semantic method equivalent to:
+## P3.5 acceptance focus
 
-`claim_interrupt(dialogue_id, job_id, expected_dialogue_version, expected_job_version)`.
+Must prove:
 
-One transaction must materialize exact dialogue/job, enforce IDs/versions, require dialogue TURN_RUNNING + job CODEX_RUNNING + exact server/profile/thread/turn ownership, then:
-
-- dialogue -> INTERRUPTING;
-- dialogue version +1;
-- job unchanged;
-- one mutation clock after all guards.
-
-### restore_rejected_interrupt
-
-For a definitive P1 REJECTED result where the exact job is still running:
-
-- require exact claimed INTERRUPTING shape;
-- dialogue -> TURN_RUNNING;
-- dialogue version +1;
-- job unchanged;
-- no retry.
-
-If natural terminal already won, reconstruct terminal state rather than restoring.
-
-### terminal reconciliation
-
-P3.4 needs additive race-safe terminal coordination. Accepted P2.4a normal `finish_codex` stays first authority for ordinary TURN_RUNNING completion.
-
-Only when normal finish conflicts because the exact interrupt transition raced may the shared turn runner invoke the P3.4 reconciliation primitive.
-
-The coordinator must recognize only exact interrupt-induced version/state shapes, not arbitrary drift.
-
-Conceptual base: runner dialogue version V, job K.
-
-- interrupt claim: INTERRUPTING V+1, job K;
-- rejected restore: TURN_RUNNING V+2, job K;
-- interrupt terminalization: job K+1, dialogue terminal V+2;
-- natural terminal after restore: job K+1, dialogue terminal V+3.
-
-Canonical already-terminal state for the same job/binding may be reconstructed idempotently. Incompatible shape is INVARIANT/conflict, not normalization.
-
-## Terminal mapping after interrupt claim
-
-From durable INTERRUPTING:
-
-- definitive P1 terminal COMPLETED -> job CODEX_COMPLETED, dialogue IDLE;
-- definitive P1 terminal FAILED -> job FAILED with `CODEX_TURN_FAILED`, dialogue IDLE;
-- unprovable terminal -> job UNKNOWN, dialogue TURN_UNKNOWN, `CODEX_AMBIGUOUS`.
-
-Definitive FAILED returns dialogue IDLE because the accepted state machine says `INTERRUPTING -> IDLE` for definitive terminal/reconciled interrupt. Ordinary non-interrupt failure from TURN_RUNNING still uses accepted P2.4a mapping to dialogue ERROR.
-
-Reuse accepted P3 terminal message projection/output limits and retention. Do not create a second projection contract. Empty projected output creates no OUTPUT payload or ID.
-
-## P1 interrupt result mapping
-
-### CONFIRMED / RECONCILED
-
-Require exact `TurnInterruptResult`, exact same binding identity and exact definitive terminal result. Persist/reconstruct terminal state. Return matching application status.
-
-Malformed/mismatched result is uncertainty, not success.
-
-### REJECTED
-
-If exact running state remains, restore INTERRUPTING -> TURN_RUNNING and return REJECTED. No retry.
-
-If natural terminal already won, reconstruct it and return RECONCILED.
-
-### UNKNOWN / uncertain exception
-
-Never redispatch interrupt.
-
-Use the exact same registry binding to call `wait_turn(binding)` once where collector authority remains available.
-
-Definitive exact COMPLETED/FAILED -> durable reconcile and application RECONCILED.
-
-Otherwise -> job UNKNOWN + dialogue TURN_UNKNOWN and application UNKNOWN.
-
-### Local interrupt errors
-
-`TURN_INTERRUPT_NOT_ACTIVE` and `TURN_INTERRUPT_BUSY` are never retry triggers. Reconcile the exact collector once; definitive terminal -> RECONCILED, otherwise UNKNOWN.
-
-Other impossible/local mismatch paths fail closed. No raw adapter text.
-
-## Natural terminal race
-
-The shared admitted-turn runner remains the owner of ordinary natural terminal capture.
-
-It must publish the exact binding registry object during the active turn and retire it on exact terminal ownership completion.
-
-Normal finish calls existing `TurnJobRepository.finish_codex` first.
-
-If P3.4 has already changed the exact dialogue to INTERRUPTING/restored-turn shape, a narrowly-scoped interrupt-race fallback may finalize/reconstruct through the new coordinator.
-
-This must preserve normal P3.1/P3.2 behavior when no interrupt occurs.
-
-## Restart recovery
-
-`recover_preexisting_interrupt()` is startup-only and makes zero P1 calls.
-
-No live dialogue or non-INTERRUPTING -> `NO_ACTION`, no mutation.
-
-Canonical pre-existing INTERRUPTING must have one exact owning CODEX_RUNNING job. Atomically:
-
-- job -> UNKNOWN;
-- dialogue -> TURN_UNKNOWN;
-- `CODEX_AMBIGUOUS`;
-- preserve durable thread/turn/job/ingress/input evidence;
-- return `MARKED_UNKNOWN`.
-
-Registry is empty after restart, therefore never repeat the old interrupt.
-
-Repeated recovery is idempotent.
-
-P3.4 does not auto-recover a generic pre-existing TURN_RUNNING state.
-
-## Approval boundary
-
-No approval storage redesign is required. Existing callback authority requires job CODEX_RUNNING and dialogue TURN_RUNNING; after interrupt claim/terminalization old callbacks fail stale/closed.
-
-Do not add Telegram approval UX in P3.4.
-
-## P3.4 acceptance focus
-
-Tests must prove at minimum:
-
-- exact public surfaces/frozen records/error redaction;
-- exact binding object identity registry;
-- registry stale-cleanup safety;
-- durable INTERRUPTING before P1 dispatch;
-- stale request cannot interrupt newer turn;
-- one interrupt effect maximum;
-- post-claim repeated cancellation ownership;
-- CONFIRMED, RECONCILED, REJECTED, UNKNOWN mappings;
-- malformed/mismatched P1 result fail-closed;
-- rejection restore and no retry;
-- natural terminal before interrupt claim and after claim;
-- terminal/interrupt/restore race orderings;
-- no duplicate job/output terminalization;
-- output projection/retention remains accepted;
-- startup INTERRUPTING recovery is no-P1, idempotent, preserves evidence;
-- settings mutation remains blocked in INTERRUPTING;
-- stale approval callbacks do not become valid;
-- P3.1/P3.2/P3.3 no-interrupt behavior remains unchanged;
-- DDL/schema unchanged and full prior regressions green.
+- exact public surface/redaction;
+- tombstone idempotent replay;
+- stale generation cannot delete a newer/different live dialogue;
+- IDLE readiness delegated to P2.5;
+- prompt-admission/delete-intent races both orderings;
+- exact P3.4 composition for running delete;
+- no delete after unresolved interrupt;
+- explicit DELETE_PENDING continuation after reopen and stale old-version rejection;
+- DELETING/DELETE_UNKNOWN no second P1 effect;
+- DELETING committed before P1.9 call;
+- confirmed delete -> one finalize + exact tombstone/local purge;
+- uncertain/malformed -> DELETE_UNKNOWN; deterministic local pre-effect failure -> ERROR;
+- cancellation/concurrency one-effect maximum;
+- final recovery matrix and zero external recovery effects;
+- accepted P3.1–P3.4 and P1/P2 regressions; schema unchanged;
+- final fake/application P3 acceptance before P4.
 
 ## P3 split
 
 - **P3.1** — DONE.
 - **P3.2** — DONE.
 - **P3.3** — DONE.
-- **P3.4** — NEXT, durable interrupt orchestration/recovery under ADR-0030.
-- **P3.5** — planned hard-delete orchestration + final P3 recovery/application acceptance.
+- **P3.4** — DONE, accepted `6460a449f861b7b86ab664e5ff877c108715082d`.
+- **P3.5** — NEXT, hard-delete orchestration + final P3 startup/application acceptance under ADR-0031.
 
-## Out of scope for P3.4
+## Out of scope for P3.5
 
-No Telegram UI/callback wiring, group routing, hard-delete/thread-delete orchestration, CREATE_UNKNOWN reset, generic TURN_RUNNING restart scanner, delivery, real Codex acceptance, production state or deployment.
+No Telegram UI/callback wiring, group routing, delivery execution, live Codex/thread-delete call, physical Codex internal storage-erasure proof, production state, service/deployment work, P4+.
+
+P7 remains authority for real disposable thread/delete storage measurement.
 
 ## Execution authority
 
 Codex must not self-start work from this document.
 
-Only P3.4 may be implemented from the next explicit architect prompt.
+Only P3.5 may be implemented from the next explicit architect prompt.
