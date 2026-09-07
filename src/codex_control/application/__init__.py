@@ -45,6 +45,23 @@ from .dialogue_interrupt import (
     InterruptRecoveryResult,
     InterruptRecoveryStatus,
 )
+from .dialogue_delete import (
+    P3_DELETE_TOMBSTONE_RETENTION_MS,
+    DialogueDeleteError,
+    DialogueDeleteErrorCategory,
+    DialogueDeleteReason,
+    DialogueDeleteRequest,
+    DialogueDeleteResult,
+    DialogueDeleteService,
+    DialogueDeleteStatus,
+)
+from .dialogue_recovery import (
+    DialogueRecoveryError,
+    DialogueRecoveryErrorCategory,
+    DialogueRecoveryResult,
+    DialogueRecoveryService,
+    DialogueRecoveryStatus,
+)
 
 __all__ = [
     "P3_INPUT_PAYLOAD_RETENTION_MS",
@@ -83,4 +100,17 @@ __all__ = [
     "InterruptRecoveryStatus",
     "InterruptRecoveryResult",
     "DialogueInterruptService",
+    "P3_DELETE_TOMBSTONE_RETENTION_MS",
+    "DialogueDeleteError",
+    "DialogueDeleteErrorCategory",
+    "DialogueDeleteReason",
+    "DialogueDeleteRequest",
+    "DialogueDeleteResult",
+    "DialogueDeleteService",
+    "DialogueDeleteStatus",
+    "DialogueRecoveryError",
+    "DialogueRecoveryErrorCategory",
+    "DialogueRecoveryResult",
+    "DialogueRecoveryService",
+    "DialogueRecoveryStatus",
 ]
