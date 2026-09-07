@@ -16,109 +16,54 @@ Date: 2026-09-07
 - P3.5 accepted at `6145d262787465ac6b4a17327114211cd86e8104`; final P3 full suite authority 671.
 - P3 acceptance authority: `docs/evidence/p3/P3_5_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
 - P3 is complete at the fake/application boundary.
-- ADR-0032 is binding P4.1 authority.
+- P4.1 accepted after one repair at `5a7db46c6e06662c379149c454c06003d48feb30`; full suite 694.
+- P4.1 acceptance authority: `docs/evidence/p4/P4_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
+- ADR-0032 remains binding accepted P4.1 authority.
 
-## Accepted P3 boundary consumed by P4
+## Accepted P4.1 boundary
 
 P4.1 consumes accepted `SettingsSelectionService` only; it does not change P3 semantics.
 
-Profile mutation requires no live dialogue. Model/reasoning mutation requires no dialogue or exact IDLE and authenticated fresh catalog validation. Every mutation is optimistic-version bound. P4 must project these finite outcomes rather than duplicating/weakening them.
+The private Telegram-shaped trust edge is pure/fake: no Telegram HTTP, polling, webhook, token loading or network effect. Only the exact configured operator in exact private chat may become authorized COMMAND/CALLBACK input. Arbitrary authorized private text is UNSUPPORTED and never becomes a Codex prompt. Wrong principal/chat/type is fail-closed and raw Telegram content is not retained.
 
-The accepted P3.4/P3.5 interrupt/delete services remain out of scope until P4.2.
+Authorized private menu commands durably claim one completed `CONTROL` ingress without controller mode/epoch mutation. Duplicate update IDs create no new callback authority. Unauthorized private messages use the accepted no-content `IGNORED_UNAUTHORIZED` path.
+
+Opaque callbacks use exact `cc1:<32-char token>` data, SHA-256-only durable token hashes, exact 900000 ms TTL and one-time P2.3 callback claims. Business targets are server-side fingerprints, including 256-character model IDs. Wrong principal cannot consume the operator token; expired/replayed/stale actions are finite and non-retrying.
+
+Every actionable callback is bound to an exact existing settings version and exact dialogue-state snapshot. Missing settings return `BLOCKED / SETTINGS_MISSING` with no callback rows, so no fabricated version authority exists. Existing durable token-hash collision is an application invariant, not storage/caller failure.
+
+Profile/model/reasoning mutation delegates exactly once to accepted P3.3. Profile requires no live dialogue; model/reasoning require no dialogue or exact IDLE plus authenticated catalog authority.
+
+Private chat still cannot activate a controller. ADR-0002/0003 keep ACTIVE activation group-only because the same user-originated group message must force every non-target controller to SLEEP.
 
 ## P4 architecture split
 
-- **P4.1 — NEXT:** private Telegram trust edge + normalized private updates + durable private-menu dedupe + opaque one-time callback tokens + profile/model/reasoning settings panel.
-- **P4.2 — LATER:** private server/dialogue status and interrupt/hard-delete controls over accepted P3.4/P3.5, with explicit destructive confirmation.
+- **P4.1 — DONE:** private Telegram trust edge + normalized private updates + durable private-menu dedupe + opaque one-time callbacks + profile/model/reasoning settings panel. Accepted `5a7db46c6e06662c379149c454c06003d48feb30`; full suite 694.
+- **P4.2 — NEXT ARCHITECTURE WORK:** private server/dialogue status plus interrupt/hard-delete controls over accepted P3.4/P3.5, with explicit destructive confirmation.
 - **P4.3 — LATER:** private diagnostics/last sanitized error, approval projection/callback composition and final fake private-management acceptance.
 
-P5 group routing remains separate.
+P5 group routing remains separate. Live Telegram acceptance remains later roadmap authority.
 
-## P4.1 trust boundary
+## P4.2 boundary known before freeze
 
-Private management authorizes only the exact configured positive operator user ID in exact Telegram private chat `chat.id == operator_user_id`, with `chat.type == private` and non-bot sender. Callback authorization uses exact callback sender plus the callback message's exact private chat. Inline-message-only callbacks are rejected.
+P4.2 must consume accepted P3.4/P3.5 rather than reproduce interrupt/delete semantics. Destructive callback authority must remain opaque, one-time, exact-user/chat/version/state bound, and hard delete must require an explicit confirmation step distinct from merely opening the dialogue/status panel.
 
-Supported private commands are exact `/start`, `/menu`, `/settings`. Unknown authorized private text is not a Codex prompt and is not retained as content.
+Private ACTIVE remains forbidden under existing fleet ordering authority. P4.2 may display effective/requested mode and may only add any local mode control if separately architect-frozen without violating ADR-0002/0003.
 
-Private chat cannot activate a controller. ADR-0002/0003 keep ACTIVE activation group-only because the user-originated group message must be seen by all bots to force non-target controllers to SLEEP. P4.1 has no private ACTIVE/SLEEP mutation.
+No P4.2 implementation contract is frozen by this document yet. Exact public surfaces, status projection, destructive-confirmation state binding, refresh behavior, callback actions and tests require a separate architect ADR/authority commit before executor work.
 
-## P4.1 normalized adapter
+## Accepted P4.1 acceptance facts
 
-Add a pure Telegram private update normalizer with finite outcomes:
+Focused P4.1 counts after repair: 8 unit / 15 integration. Accepted pre-P4 baseline was 671; final expected/observed full discovery is 694.
 
-`COMMAND | CALLBACK | UNAUTHORIZED | UNSUPPORTED | MALFORMED`.
+Frozen DDL SHA remains unchanged. Known P1.6 pending-task warning remains pre-existing. GitHub has no attached CI/status checks for the accepted P4.1 SHA; acceptance used independent GitHub review plus executor focused/full-regression evidence under project governance.
 
-Application receives no raw Telegram JSON. Unauthorized/unsupported/malformed normalized values retain no arbitrary input text; callback tokens are redacted from generic repr.
+## Out of scope until separately authorized
 
-No Telegram HTTP/network/polling exists in P4.1.
-
-## P4.1 durable command/callback authority
-
-Authorized private command updates are deduped by one additive schema-v1 repository that inserts completed `ingress_updates` with `CONTROL` disposition and never mutates controller mode/epoch. Duplicate update ID produces no new panel callback rows.
-
-Unauthorized message updates use accepted `IGNORED_UNAUTHORIZED` ingress with no text retention.
-
-Callbacks use accepted `callback_actions` as their one-time idempotency authority rather than update-ID dedupe.
-
-Exact callback data:
-
-`cc1:<32-char URL-safe token>`
-
-Default token generation is `secrets.token_urlsafe(24)`; persist only SHA-256 of the token. Callback TTL is 900000 ms. Callback data carries no trusted action/profile/model/reasoning/page parameter.
-
-## P4.1 callback semantics
-
-Actions exactly:
-
-`OPEN_ROOT | OPEN_PROFILES | OPEN_MODELS | OPEN_REASONING | SELECT_PROFILE | SELECT_MODEL | SELECT_REASONING`.
-
-Choice target is stored only as SHA-256 fingerprint in callback `subject_id`; the handler re-resolves current configured/authenticated options and requires exactly one match. This permits accepted model IDs up to 256 characters without schema changes.
-
-Every action binds exact settings version plus exact dialogue-state snapshot (`NO_DIALOGUE` or current `DialogueState.value`). Selection callback creation is omitted when P3.3 says the class of mutation cannot be legal: profile only NO_DIALOGUE; model/reasoning only NO_DIALOGUE or IDLE.
-
-After callback claim, current version/state are rechecked before mutation. Mismatch is STALE and does not mutate settings.
-
-Wrong callback user/chat cannot consume the operator token under accepted P2.3 behavior.
-
-## P4.1 panel
-
-Semantic sections:
-
-`ROOT | PROFILES | MODELS | REASONING`.
-
-Page size: 8. Button label max: 64 characters. Panel text max: 3500 characters. Plain text only; no Telegram parse mode.
-
-Safe display may include server ID/display, profile/model display/ID, reasoning effort, dialogue state and catalog availability. Never expose CODEX_HOME, raw thread/turn IDs, prompt/output, callback token/hash, raw Telegram JSON or raw exception text.
-
-## P4.1 application result
-
-`PrivateSettingsManagementService` public methods exactly:
-
-- `handle_command(request)`
-- `handle_callback(request)`
-
-`PrivateAdminStatus` exactly:
-
-`RENDERED | UPDATED | NO_CHANGE | BLOCKED | STALE | EXPIRED | ALREADY_USED | DUPLICATE | UNAUTHORIZED | UNSUPPORTED`.
-
-`PrivateAdminErrorCategory` exactly:
-
-`INVALID_ARGUMENT | STORAGE | INVARIANT`.
-
-P3.3 result mapping is binding: UPDATED/NO_CHANGE preserve status, CONFLICT -> STALE, BLOCKED -> BLOCKED with finite safe reason, STORAGE -> STORAGE, and unexpected internal INVALID_ARGUMENT/INVARIANT from P4-owned validated values -> INVARIANT.
-
-## P4.1 acceptance focus
-
-Must prove exact auth/malformed handling, no private prompt path, durable CONTROL/IGNORED_UNAUTHORIZED semantics, duplicate command no duplicate callbacks, opaque token/hash-only persistence, callback authorization/expiry/replay/stale handling, real P3.3 profile/model/reasoning composition, 256-char model fingerprint resolution, hidden/unavailable option blocking, UI bounds/redaction, corruption fail-closed, zero real Telegram/Codex/network effects and full accepted regressions with unchanged DDL SHA.
-
-Accepted pre-P4 full suite authority is 671.
-
-## Out of scope
-
-No group routing, fleet keyboard, ACTIVE mutation, private interrupt/delete, approvals, diagnostics, response delivery, real Telegram API, production config/secrets/service work or P5+.
+No group routing/fleet keyboard, private ACTIVE mutation, P4.2 interrupt/delete, P4.3 approvals/diagnostics, response delivery, real Telegram API, production config/secrets/service work or P5+.
 
 ## Execution authority
 
-Codex must not self-start work from this document.
+Codex must not self-start P4.2 from this document.
 
-Only P4.1 may be implemented from the next explicit architect prompt, on the architect-created branch/issue from the exact authority commit containing ADR-0032.
+P4.1 is architect-accepted. The next task is architect research/freeze of P4.2 authority. No P4.2 implementation is authorized until a separate architect-owned authority commit, branch/issue and explicit executor prompt exist.
