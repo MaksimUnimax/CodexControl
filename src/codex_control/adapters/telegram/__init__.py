@@ -9,6 +9,8 @@ from .private_updates import (
     PrivateInboundUpdate,
     TelegramPrivateUpdateAdapter,
 )
+from .fleet_keyboard import TelegramFleetKeyboardRenderer
+from .group_updates import TelegramGroupUpdateAdapter
 
 __all__ = [
     "PrivateInboundKind",
@@ -18,4 +20,6 @@ __all__ = [
     "TelegramPrivatePanelRenderer",
     "TelegramPrivateDialoguePanelRenderer",
     "TelegramPrivateControlRenderer",
+    "TelegramFleetKeyboardRenderer",
+    "TelegramGroupUpdateAdapter",
 ]
