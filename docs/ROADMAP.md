@@ -42,7 +42,11 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 P3 is complete at the fake/application boundary. Acceptance authority: `docs/evidence/p3/P3_5_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
 
 ## P4 — Telegram private management
-[NEXT] Architect authority must be frozen before implementation. Target scope remains authorization edge, private panel, profile/model/reasoning/status, dialogue/delete/interrupt, diagnostics and opaque callback actions. No P4 production implementation is authorized yet.
+- [NEXT] P4.1 private Telegram auth/normalization + durable private-menu dedupe + opaque callbacks + profile/model/reasoning settings panel under ADR-0032.
+- [LATER] P4.2 private status/dialogue/interrupt/hard-delete controls with explicit destructive confirmation.
+- [LATER] P4.3 private diagnostics/last sanitized error + approval projection/callback composition + final fake private-management acceptance.
+
+No P4 live Telegram/network acceptance occurs here; T4/T5 live validation remains later roadmap authority.
 
 ## P5 — Telegram group routing
 Persistent fleet keyboard, serialized group updates, activation epoch/restart-SLEEP, SLEEP ignore, ACTIVE prompt ingress, BUSY, fleet status/version safeguards.
