@@ -43,8 +43,8 @@ P3 is complete at the fake/application boundary. Acceptance authority: `docs/evi
 
 ## P4 — Telegram private management
 - [DONE] P4.1 private Telegram auth/normalization + durable private-menu dedupe + opaque callbacks + profile/model/reasoning settings panel under ADR-0032. Accepted after one architect repair: `5a7db46c6e06662c379149c454c06003d48feb30`; final full suite 694. Acceptance authority: `docs/evidence/p4/P4_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
-- [NEXT] P4.2 private server/dialogue status + exact P3.4 interrupt + two-step confirmed P3.5 hard delete under ADR-0033. Architect authority frozen; implementation must use a separate branch/issue and may not modify accepted P4.1 exact enums/root settings surface.
-- [LATER] P4.3 private root/menu composition + diagnostics/last sanitized error + approval projection/callback composition + final fake private-management acceptance.
+- [DONE] P4.2 private server/dialogue status + exact P3.4 interrupt + mandatory two-step confirmed P3.5 hard delete under ADR-0033. Accepted after two architect repair reviews: `a5a8ee6773936b1dcbb777e36ffa33519cd8ab39`; final full suite 728. Acceptance authority: `docs/evidence/p4/P4_2_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
+- [NEXT] P4.3 private root/menu composition + diagnostics/last sanitized error + approval projection/callback composition + final fake private-management acceptance. Requires a separate architect authority freeze before implementation and must preserve accepted P4.1/P4.2 callback ownership/one-time semantics.
 
 No P4 live Telegram/network acceptance occurs here; T4/T5 live validation remains later roadmap authority.
 
