@@ -31,6 +31,7 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P2.6a bounded non-content metadata retention. Accepted `e6f59739b3091d00894d3434abb5a99e2af72885`.
 - [DONE] P2.6b crash/restart/idempotency harness and final P2 acceptance. Accepted `9db97f0dda109b4d0c0ecfa5f167733905df2766`; full 500.
 - [DONE] P2.C1 retention-compatible JOB duplicate replay correction. Accepted `4b6d226ce647fbf38a6ada7b82947be7ad3e30c2`; full 506.
+- [NEXT / AUTHORITY FROZEN] **P2.C2** terminal authorized pre-JOB rejection + schema-v2 migration under ADR-0036. Adds only durable `IGNORED_REJECTED`, exact v1→v2 migration/validation/rollback compatibility, and claim/materializer/retention support. Historical schema-v1/hash remains immutable. P5.2 is gated on this correction.
 
 ## P3 — Dialogue application service
 - [DONE] P3.1 existing-dialogue prompt admission + immutable authenticated selection + one-turn orchestration. Accepted `9e0a86b311bb63d6a36a4641cb588321987e1550`; full 543.
@@ -44,13 +45,13 @@ P3 is complete at the fake/application boundary.
 ## P4 — Telegram private management
 - [DONE] P4.1 private Telegram auth/normalization + durable private-menu dedupe + opaque callbacks + settings panel under ADR-0032. Accepted `5a7db46c6e06662c379149c454c06003d48feb30`; full 694.
 - [DONE] P4.2 private dialogue status + exact P3.4 interrupt + mandatory two-step P3.5 hard delete under ADR-0033. Accepted `a5a8ee6773936b1dcbb777e36ffa33519cd8ab39`; full 728.
-- [DONE] P4.3 final private facade/root + callback-family dispatch + diagnostics + approval projection/atomic P2.4b decisions + final fake P4 acceptance under ADR-0034. Accepted after one proof/contract repair at `d053f24061e20aa44e07e5b92c9b92c6506647fd`; final full 762. Acceptance authority: `docs/evidence/p4/P4_3_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
+- [DONE] P4.3 final private facade/root + callback-family dispatch + diagnostics + approval projection/atomic P2.4b decisions + final fake P4 acceptance under ADR-0034. Accepted `d053f24061e20aa44e07e5b92c9b92c6506647fd`; final full 762.
 
 P4 is complete at the fake/application private-management boundary. No live Telegram/network acceptance occurs in P4.
 
 ## P5 — Telegram group routing
-- [NEXT / AUTHORITY FROZEN] **P5.1** shared immutable fleet manifest + persistent reply keyboard + pure group normalization/auth + serialized durable activation/all-sleep routing + restart/current-boot SLEEP authority under ADR-0035. TEXT is classified only; no JOB/P3/Codex prompt execution yet.
-- [LATER] **P5.2** serialized ordinary group text admission: SLEEP terminal `IGNORED_SLEEP`, ACTIVE P3 turn admission, duplicates, BUSY/no delayed queue, control-before-prompt ordering.
+- [DONE] **P5.1** shared immutable fleet manifest + persistent reply keyboard + pure group normalization/auth + serialized durable activation/all-sleep routing + restart/current-boot SLEEP authority under ADR-0035. Accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777. Acceptance authority: `docs/evidence/p5/P5_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
+- [BLOCKED ON P2.C2] **P5.2** serialized ordinary group text admission: SLEEP terminal `IGNORED_SLEEP`, ACTIVE P3 turn admission, durable terminal rejection for BUSY/BLOCKED, duplicates, no delayed queue, control-before-prompt ordering.
 - [LATER] **P5.3** fleet status/version mismatch safeguards + final fake multi-controller group-routing acceptance, including self-active/non-target sleep/all-sleep/status/offline-restart safety.
 
 ## P6 — Response delivery/full local orchestration

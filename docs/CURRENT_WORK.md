@@ -6,7 +6,7 @@ Date: 2026-09-07
 
 - Repository: `MaksimUnimax/CodexControl`.
 - Installed server-80 Codex authority: `codex-cli 0.144.6`; app-server schema SHA-256 `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`.
-- Frozen schema-v1 DDL SHA-256: `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+- Historical schema-v1 DDL SHA-256 remains immutable: `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
 - P1 is complete through accepted P1.10 T0/T1/T2; isolated real-Codex T3 remains deferred to P7.
 - P2 historical final acceptance: `9db97f0dda109b4d0c0ecfa5f167733905df2766`; P2.C1 accepted `4b6d226ce647fbf38a6ada7b82947be7ad3e30c2`.
 - P3.1 accepted `9e0a86b311bb63d6a36a4641cb588321987e1550`; full 543.
@@ -15,177 +15,103 @@ Date: 2026-09-07
 - P3.4 accepted `6460a449f861b7b86ab664e5ff877c108715082d`; full 633.
 - P3.5 accepted `6145d262787465ac6b4a17327114211cd86e8104`; final P3 full 671.
 - P3 is complete at the fake/application boundary.
-- P4.1 accepted after one repair at `5a7db46c6e06662c379149c454c06003d48feb30`; full 694.
-- P4.2 accepted after two repairs at `a5a8ee6773936b1dcbb777e36ffa33519cd8ab39`; full 728.
-- P4.3 accepted after one proof/contract repair at `d053f24061e20aa44e07e5b92c9b92c6506647fd`; final P4 full 762, failures 0, errors 0, unittest `OK`.
-- P4.3 acceptance authority: `docs/evidence/p4/P4_3_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
-- P4.1/P4.2/P4.3 are accepted. **P4 is COMPLETE at the fake/application private-management boundary.**
-- No live Telegram/network acceptance has occurred; live T4/T5 remains later roadmap authority.
+- P4.1 accepted `5a7db46c6e06662c379149c454c06003d48feb30`; full 694.
+- P4.2 accepted `a5a8ee6773936b1dcbb777e36ffa33519cd8ab39`; full 728.
+- P4.3 accepted `d053f24061e20aa44e07e5b92c9b92c6506647fd`; final P4 full 762, failures 0, errors 0, unittest `OK`.
+- P4 is COMPLETE at the fake/application private-management boundary.
+- P5.1 accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777, failures 0, errors 0, unittest `OK`.
+- P5.1 acceptance authority: `docs/evidence/p5/P5_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
+- P5.1 is complete. No live Telegram/network acceptance has occurred.
 
 ## Current slice
 
-**P5.1 — NEXT / AUTHORITY FROZEN under ADR-0035.**
+**P2.C2 — NEXT / AUTHORITY FROZEN under ADR-0036.**
 
-P5.1 owns only the group/fleet control-plane foundation:
+P5.2 is deliberately gated on this correction.
 
-- shared immutable non-secret fleet manifest;
-- pure persistent Telegram reply-keyboard rendering;
-- fail-closed group update normalization and exact group/operator authorization;
-- activation/all-sleep parsing before any prompt classification;
-- unknown activation-prefix fail-safe local SLEEP;
-- serialized durable control claims over accepted P2.3;
-- current-boot effective-mode projection that never restores historical ACTIVE;
-- STATUS as read-only/no control-epoch mutation;
-- TEXT classification only, with no ingress/JOB/P3/Codex effect in P5.1.
+Independent architect research found that accepted P3 returns `BUSY` and several pre-admission `BLOCKED` results before creating an ingress/JOB record. Under historical schema-v1, a rejected update therefore has no durable terminal classification and the same Telegram update can be replayed later after the blocking condition changes. That violates the V1 rules “BUSY is rejected, not queued” and “duplicate update cannot later execute”.
 
-P5.2 later owns ACTIVE/SLEEP ordinary text admission, BUSY/no queue and P3 turn composition. P5.3 later owns fleet status/version safeguards and final fake multi-controller group-routing acceptance. P6 remains response delivery/full orchestration including live P1.7 approval-response coordination.
+Using `IGNORED_SLEEP` or `CONTROL` for BUSY/BLOCKED is forbidden because it would misstate the durable classification.
 
-## Binding existing fleet decisions
+P2.C2 therefore adds one exact non-content terminal disposition:
 
-ADR-0002: persistent reply-keyboard server presses are human messages visible to all bots; self activation -> ACTIVE, other/unknown activation -> SLEEP; inline callbacks cannot provide fleet-wide routing.
+`IGNORED_REJECTED`
 
-ADR-0003: every boot is effectively SLEEP; historical persisted ACTIVE is never restored; ordered supergroup `message_id` is control epoch; stale control cannot override newer control; local group processing is serialized.
+for authorized ordinary prompt updates rejected before JOB/external effect.
 
-ADR-0010: fleet identity/display labels/version are shared non-secret configuration; server-N addition is config/deployment only; activation prefix remains fail-safe across mismatch.
+## P2.C2 schema-v2 authority
 
-ADR-0020: accepted P2.3 `ControlIngressRepository.claim_control(update_id, control_epoch, requested_mode)` is the only durable control mutation primitive consumed by P5.1. STATUS never calls it.
+Historical schema-v1 remains immutable:
 
-## P5.1 frozen manifest/keyboard
+- version `1`;
+- migration ID `0001_initial_state`;
+- DDL SHA-256 `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`;
+- `SCHEMA_V1_STATEMENTS` and `SCHEMA_V1_DDL_SHA256` must not be edited or repurposed.
 
-Constants:
+Current schema target becomes version `2`.
 
-- `P5_ACTIVATION_PREFIX = "🖥 "`
-- `P5_ALL_SLEEP_LABEL = "💤 ВСЕ СПАТЬ"`
-- `P5_STATUS_LABEL = "📊 СТАТУС"`
-- max fleet members 32
-- server ID max 128
-- display name max 64
-- fleet version max 128
-- group text max 4096
+Exact v2 migration ID:
 
-Public immutable values:
+`0002_ingress_rejected_disposition`
 
-- `FleetMember(server_id, display_name)`
-- `FleetManifest(fleet_version, members)`
+Exact v2 migration statement SHA-256:
 
-Manifest server IDs and display names are unique. Server IDs/fleet version are sanitized non-secret identifiers. Display names are one-line normalized Unicode. Local server must occur exactly once and boot fleet version must equal manifest fleet version.
+`a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85`
 
-`TelegramFleetKeyboardRenderer.render(manifest)` renders activation buttons in manifest order, two per row, plus final `[💤 ВСЕ СПАТЬ] [📊 СТАТУС]`, with `resize_keyboard=True` and `is_persistent=True`. It performs no Telegram/network effect.
+The migration changes only the `ingress_updates.disposition` CHECK to permit `IGNORED_REJECTED`. It must preserve all existing ingress rows and all other table/index/FK/object SQL exactly.
 
-P5.1 deliberately does not extend `ServerConfiguration`/production TOML parsing; deployment/config-file composition remains later authority.
+After migration, the ledger contains exact v1 and v2 rows. `SqliteStorage.open` supports only user versions 0, 1 and 2: empty v0 is bootstrapped through v1 then v2; valid v1 is validated then migrated; valid v2 is validated directly; other versions fail unsupported. Failed migration rolls back to valid v1 with no backup table left behind.
 
-## P5.1 group normalization
+## P2.C2 ingress semantics
 
-`GroupInboundKind` exactly:
+`IngressDispositionKind` becomes exactly:
 
-`CONTROL | TEXT | UNAUTHORIZED | UNSUPPORTED | MALFORMED`.
+`CONTROL | IGNORED_SLEEP | IGNORED_UNAUTHORIZED | IGNORED_REJECTED | JOB`.
 
-`GroupControlKind` exactly:
+`IngressUpdateRepository.claim_ignored` accepts exactly:
 
-`ACTIVATE | ALL_SLEEP | STATUS`.
+- `IGNORED_SLEEP`;
+- `IGNORED_UNAUTHORIZED`;
+- `IGNORED_REJECTED`.
 
-Frozen `GroupInboundUpdate` fields exactly:
+Fresh ignored claim semantics stay unchanged and content-free. Duplicate semantics stay unchanged: the existing durable ingress record is returned exactly, with zero clock and no reclassification regardless of the newly requested ignored kind.
 
-`kind, update_id, message_id, user_id, chat_id, control, target_server_id, text`.
+This is the future P5.2 terminal replay guard for BUSY/BLOCKED/stale authorized prompt updates.
 
-TEXT is repr-redacted. CONTROL retains no raw label. Unauthorized/unsupported/malformed records retain no text/action target material.
+P2.C2 must not modify P3/P4/P5.1 business logic and must not start P5.2.
 
-`TelegramGroupUpdateAdapter(manifest, operator_user_id, control_chat_id).normalize(raw)` is pure and requires for authorized input:
+## Accepted P5.1 boundary consumed later by P5.2
 
-- valid update ID and positive message ID;
-- exact operator `from.id`;
-- `from.is_bot is False`;
-- no anonymous/channel `sender_chat`;
-- exact configured negative control chat;
-- `chat.type == "supergroup"`;
-- ordinary message surface.
+P5.1 freezes:
 
-Authorization is resolved before text inspection/retention.
+- `FleetMember` / `FleetManifest` and deterministic persistent reply keyboard;
+- exact operator + exact negative control-supergroup + human-origin group trust edge;
+- authorization before text access;
+- reserved activation/control namespace before TEXT;
+- self activation -> ACTIVE; other/unknown -> SLEEP; all-sleep -> SLEEP;
+- STATUS read-only/no control epoch mutation;
+- current-boot effective mode derived from durable epoch relative to captured boot baseline;
+- historical persisted ACTIVE is SLEEP after restart until a fresh current-boot self activation;
+- one local lock over group control/mode reads;
+- P5.1 TEXT classification only with zero ingress/JOB/P3/Codex effect.
 
-Classification order after auth:
+P5.2 later owns serialized ordinary group TEXT admission only after P2.C2 is accepted.
 
-1. exact known activation label -> ACTIVATE known server;
-2. other exact activation-prefix text -> ACTIVATE unknown target (`None`), therefore later local SLEEP;
-3. exact all-sleep;
-4. exact status;
-5. slash command -> UNSUPPORTED;
-6. other control-looking `🖥`/`💤`/`📊` variants -> UNSUPPORTED;
-7. invalid/empty/oversize text -> fail closed;
-8. otherwise TEXT.
+## P5 split
 
-Control-looking content never becomes a Codex prompt.
+- **P5.1 — DONE:** fleet manifest/keyboard/group normalization + durable activation/all-sleep/current-boot mode authority. Accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777.
+- **P5.2 — BLOCKED ON P2.C2:** SLEEP terminal ignore, ACTIVE P3 prompt admission, durable BUSY/BLOCKED rejection, duplicate/no queue and control-before-prompt ordering.
+- **P5.3 — LATER:** fleet status/version mismatch safeguards and final fake multi-controller group-routing acceptance.
 
-## P5.1 current-boot effective mode
-
-`FleetControlService` receives the exact current `ControllerBootResult` returned from `ControllerRuntimeRepository.begin_boot(manifest.fleet_version)`.
-
-It captures:
-
-- `boot_generation`;
-- `boot_baseline_control_epoch = boot.record.last_control_epoch`.
-
-It requires `boot.effective_mode == SLEEP`.
-
-Every authorized read/control path re-reads `controller_runtime` and requires same captured boot generation/fleet version and `last_control_epoch >= baseline`.
-
-Effective mode is derived only as:
-
-```text
-last_control_epoch <= boot_baseline_control_epoch -> SLEEP
-last_control_epoch >  boot_baseline_control_epoch -> current requested_mode
-```
-
-Therefore a persisted ACTIVE at boot baseline remains historical only. No process-local ACTIVE boolean is correctness authority.
-
-Public frozen `FleetModeSnapshot` fields:
-
-`server_id, effective_mode, boot_generation, last_control_epoch, fleet_version`.
-
-## P5.1 service
-
-`FleetControlService` public async methods exactly:
-
-- `handle(update)`
-- `current_mode()`
-
-`FleetControlStatus` exactly:
-
-`APPLIED | STALE | DUPLICATE | STATUS | TEXT | UNAUTHORIZED | UNSUPPORTED | MALFORMED`.
-
-Frozen `FleetControlResult(status, snapshot)` contains no content.
-
-`FleetControlErrorCategory` exactly:
-
-`INVALID_ARGUMENT | STORAGE | INVARIANT`.
-
-One application lock serializes local group control handling/mode reads.
-
-Control mapping:
-
-- ACTIVATE self -> P2.3 requested ACTIVE;
-- ACTIVATE other/unknown -> SLEEP;
-- ALL_SLEEP -> SLEEP;
-- STATUS -> no `claim_control`, no epoch/mode mutation.
-
-P2.3 `APPLIED/STALE/DUPLICATE` map directly to P5.1 statuses and then the service re-reads current durable mode snapshot.
-
-Unauthorized valid update IDs may be durably recorded only as `IGNORED_UNAUTHORIZED`, with no content/mode mutation.
-
-TEXT returns current mode snapshot only. It inserts no ingress, creates no JOB/payload and calls no P3/Codex service. P5.2 owns text execution policy.
-
-## Cancellation/restart rule
-
-P5.1 never depends on a process-local mode cache for correctness. If P2.3 commits a control and the caller is cancelled before P5.1 returns, the next mode read derives the committed mode from durable state relative to boot baseline. Tests must prove both ACTIVE and SLEEP post-commit cancellation cases.
-
-A service instance observing a different boot generation fails closed. No background retry or replay.
+P6 remains response delivery/full orchestration, including live P1.7 approval-response coordination. Live Telegram acceptance remains later roadmap authority.
 
 ## Current non-goals
 
 Do not start:
 
-- P5.2 prompt admission/BUSY;
-- P5.3 fleet status/final multi-controller acceptance;
-- P6 delivery/approval response orchestration;
+- P5.2 before P2.C2 acceptance;
+- P5.3;
+- P6 delivery/approval-response orchestration;
 - live Telegram transport;
 - production config/secrets/systemd;
 - P7+.
