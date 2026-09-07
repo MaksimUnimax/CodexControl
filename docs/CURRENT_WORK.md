@@ -19,51 +19,99 @@ Date: 2026-09-07
 - P4.1 accepted after one repair at `5a7db46c6e06662c379149c454c06003d48feb30`; full suite 694.
 - P4.1 acceptance authority: `docs/evidence/p4/P4_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
 - ADR-0032 remains binding accepted P4.1 authority.
+- ADR-0033 is binding P4.2 authority.
 
-## Accepted P4.1 boundary
+## Accepted P4.1 boundary consumed by P4.2
 
-P4.1 consumes accepted `SettingsSelectionService` only; it does not change P3 semantics.
+P4.1 owns exact private Telegram normalization/settings enums and action vocabulary. P4.2 must not add values to accepted `PrivateCommand`, `PrivatePanelSection` or P4.1 action enums. Final root/menu composition remains P4.3.
 
-The private Telegram-shaped trust edge is pure/fake: no Telegram HTTP, polling, webhook, token loading or network effect. Only the exact configured operator in exact private chat may become authorized COMMAND/CALLBACK input. Arbitrary authorized private text is UNSUPPORTED and never becomes a Codex prompt. Wrong principal/chat/type is fail-closed and raw Telegram content is not retained.
+P4.1 provides exact private principal checking, accepted `PrivateCallbackRequest`, opaque `cc1:<32-char token>` grammar, one-time P2.3 callback claims, callback batch storage, hash-only token persistence, 900000 ms TTL and content-safe buttons/rendering. P4.2 reuses these semantics but defines a separate dialogue-control surface.
 
-Authorized private menu commands durably claim one completed `CONTROL` ingress without controller mode/epoch mutation. Duplicate update IDs create no new callback authority. Unauthorized private messages use the accepted no-content `IGNORED_UNAUTHORIZED` path.
+Private ACTIVE remains forbidden. Group/fleet routing remains P5 authority.
 
-Opaque callbacks use exact `cc1:<32-char token>` data, SHA-256-only durable token hashes, exact 900000 ms TTL and one-time P2.3 callback claims. Business targets are server-side fingerprints, including 256-character model IDs. Wrong principal cannot consume the operator token; expired/replayed/stale actions are finite and non-retrying.
+## P4 split
 
-Every actionable callback is bound to an exact existing settings version and exact dialogue-state snapshot. Missing settings return `BLOCKED / SETTINGS_MISSING` with no callback rows, so no fabricated version authority exists. Existing durable token-hash collision is an application invariant, not storage/caller failure.
+- **P4.1 — DONE:** private Telegram trust edge + settings management. Accepted `5a7db46c6e06662c379149c454c06003d48feb30`; full suite 694.
+- **P4.2 — NEXT / FROZEN:** private server/dialogue status + exact P3.4 interrupt + two-step confirmed P3.5 hard delete under ADR-0033.
+- **P4.3 — LATER:** private root/menu composition, diagnostics/last sanitized error, approval projection/callback composition and final fake private-management acceptance.
 
-Profile/model/reasoning mutation delegates exactly once to accepted P3.3. Profile requires no live dialogue; model/reasoning require no dialogue or exact IDLE plus authenticated catalog authority.
+P5 group routing and P6 response delivery remain separate. Live Telegram acceptance remains later roadmap authority.
 
-Private chat still cannot activate a controller. ADR-0002/0003 keep ACTIVE activation group-only because the same user-originated group message must force every non-target controller to SLEEP.
+## P4.2 public boundary
 
-## P4 architecture split
+Add separate `PrivateDialogueManagementService` with exactly:
 
-- **P4.1 — DONE:** private Telegram trust edge + normalized private updates + durable private-menu dedupe + opaque one-time callbacks + profile/model/reasoning settings panel. Accepted `5a7db46c6e06662c379149c454c06003d48feb30`; full suite 694.
-- **P4.2 — NEXT ARCHITECTURE WORK:** private server/dialogue status plus interrupt/hard-delete controls over accepted P3.4/P3.5, with explicit destructive confirmation.
-- **P4.3 — LATER:** private diagnostics/last sanitized error, approval projection/callback composition and final fake private-management acceptance.
+- `open_status(request)`
+- `handle_callback(request)`.
 
-P5 group routing remains separate. Live Telegram acceptance remains later roadmap authority.
+P4.2 reuses accepted P4.1 `PrivateCallbackRequest` and opaque callback grammar.
 
-## P4.2 boundary known before freeze
+`PrivateDialogueStatus` exactly:
 
-P4.2 must consume accepted P3.4/P3.5 rather than reproduce interrupt/delete semantics. Destructive callback authority must remain opaque, one-time, exact-user/chat/version/state bound, and hard delete must require an explicit confirmation step distinct from merely opening the dialogue/status panel.
+`RENDERED | CONFIRM_REQUIRED | INTERRUPTED | DELETED | BLOCKED | STALE | UNKNOWN | FAILED | EXPIRED | ALREADY_USED | UNAUTHORIZED`.
 
-Private ACTIVE remains forbidden under existing fleet ordering authority. P4.2 may display effective/requested mode and may only add any local mode control if separately architect-frozen without violating ADR-0002/0003.
+`PrivateDialogueReason` exactly:
 
-No P4.2 implementation contract is frozen by this document yet. Exact public surfaces, status projection, destructive-confirmation state binding, refresh behavior, callback actions and tests require a separate architect ADR/authority commit before executor work.
+`CALLBACK_NOT_FOUND | STALE_ACTION | NO_DIALOGUE | DIALOGUE_NOT_RUNNING | JOB_NOT_RUNNING | ACTIVE_BINDING_UNAVAILABLE | INTERRUPT_IN_PROGRESS | INTERRUPT_UNRESOLVED | DIALOGUE_NOT_READY | DELETE_NOT_READY | DELETE_IN_PROGRESS | DELETE_UNKNOWN | ACTION_UNAVAILABLE`.
 
-## Accepted P4.1 acceptance facts
+`PrivateDialogueErrorCategory` exactly:
 
-Focused P4.1 counts after repair: 8 unit / 15 integration. Accepted pre-P4 baseline was 671; final expected/observed full discovery is 694.
+`INVALID_ARGUMENT | STORAGE | INVARIANT`.
 
-Frozen DDL SHA remains unchanged. Known P1.6 pending-task warning remains pre-existing. GitHub has no attached CI/status checks for the accepted P4.1 SHA; acceptance used independent GitHub review plus executor focused/full-regression evidence under project governance.
+Panel sections exactly:
 
-## Out of scope until separately authorized
+`STATUS | DELETE_CONFIRM`.
 
-No group routing/fleet keyboard, private ACTIVE mutation, P4.2 interrupt/delete, P4.3 approvals/diagnostics, response delivery, real Telegram API, production config/secrets/service work or P5+.
+## P4.2 status authority
+
+Read dialogue/active-job status only through accepted `ApplicationRecoveryRepository.inspect()`, which is the P3.5 canonical cross-table authority. Corrupt persisted state is INVARIANT.
+
+No dialogue -> static RENDERED/NO_DIALOGUE panel with zero callbacks. Never fabricate a dialogue version.
+
+For a live dialogue, safe display may include server identity, optional read-only effective mode, dialogue state, profile ID, active job state/model/reasoning. Never display raw thread/job/turn IDs, CODEX_HOME, prompt/output, callback token/hash or raw error body.
+
+## P4.2 actions
+
+Actions exactly:
+
+`P42_REFRESH | P42_INTERRUPT | P42_BEGIN_DELETE | P42_CONFIRM_DELETE | P42_CANCEL_DELETE`.
+
+All actions bind exact current dialogue version/state. Trusted context is SHA-256 fingerprinted server-side in callback subject IDs; Telegram callback data remains opaque.
+
+Interrupt button exists only for TURN_RUNNING + exactly one CODEX_RUNNING active job. It calls accepted `DialogueInterruptService.interrupt()` exactly once from current canonical IDs/versions.
+
+Delete begin exists only for IDLE with no active job, TURN_RUNNING + exact CODEX_RUNNING, or DELETE_PENDING. It performs no P3 effect and renders a distinct DELETE_CONFIRM panel with new one-time CONFIRM/CANCEL callbacks.
+
+Only `P42_CONFIRM_DELETE` may call accepted `DialogueDeleteService.delete()` exactly once. DELETE_PENDING confirmation uses the exact current version, preserving P3.5 fresh-explicit-continuation authority. DELETING/DELETE_UNKNOWN expose no second-delete authority.
+
+## Destructive confirmation
+
+Hard delete is always two-step:
+
+`status -> BEGIN_DELETE(no effect) -> new CONFIRM_DELETE callback -> exact P3.5 delete`.
+
+Confirmation is bound to the same exact current dialogue version/state/context. Any version/state/context drift before confirmation is STALE with zero delete effect. Confirmation text must not claim empirical erasure of all Codex internal traces; P7 remains the storage-measurement gate.
+
+Callback claim occurs before interrupt/delete. Cancellation/replay never causes P4 retry.
+
+## P4.2 accepted-service mapping
+
+P3.4 CONFIRMED/RECONCILED -> INTERRUPTED; UNKNOWN -> UNKNOWN/INTERRUPT_UNRESOLVED; CONFLICT -> STALE; finite blocked/rejected reasons map safely. P3.4 STORAGE -> P4.2 STORAGE, internally impossible INVALID_ARGUMENT/INVARIANT -> INVARIANT.
+
+P3.5 DELETED -> DELETED; FAILED -> FAILED; UNKNOWN -> UNKNOWN/DELETE_UNKNOWN; CONFLICT -> STALE; finite BLOCKED reasons map safely. P3.5 STORAGE -> P4.2 STORAGE, internally impossible INVALID_ARGUMENT/INVARIANT -> INVARIANT.
+
+No mandatory follow-up render after a committed interrupt/delete effect; rendering failure must not disguise an already completed effect.
+
+## P4.2 acceptance focus
+
+Must prove exact public contracts/redaction, canonical status inspection, no-dialogue zero callbacks, action matrix, exact context fingerprints, wrong-auth non-consumption, expiry/replay/stale handling, real accepted P3.4 one-interrupt composition, two-step delete confirmation, stale confirm zero effect, real accepted P3.5 IDLE delete, explicit DELETE_PENDING continuation, no delete authority in DELETING/DELETE_UNKNOWN, callback collision invariant/no retry, cancellation/replay no second effect, zero real Telegram/network/production effects, full P4.1/P3/P2/P1 regressions and unchanged DDL hash.
+
+Accepted pre-P4.2 full suite authority is 694.
+
+## Out of scope
+
+No changes to accepted P4.1 exact enums/root settings service; no group routing/private ACTIVE; no P4.3 diagnostics/approvals/root composition; no response delivery; no real Telegram/network/production work; no schema/DDL; no P5+.
 
 ## Execution authority
 
-Codex must not self-start P4.2 from this document.
-
-P4.1 is architect-accepted. The next task is architect research/freeze of P4.2 authority. No P4.2 implementation is authorized until a separate architect-owned authority commit, branch/issue and explicit executor prompt exist.
+Only P4.2 may be implemented from the next explicit architect prompt, on the architect-created branch/issue from the exact authority commit containing ADR-0033. Codex must not self-start P4.3/P5.
