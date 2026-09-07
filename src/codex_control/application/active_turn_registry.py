@@ -24,6 +24,38 @@ class _RegistryEntry:
     retired: asyncio.Event
 
 
+class _RetirementWatch:
+    """A one-generation watch captured while its exact entry is active."""
+
+    __slots__ = ("_registry", "_job_id", "_token", "_event", "_disposed")
+
+    def __init__(self, registry, job_id: str, token: object, event: asyncio.Event) -> None:
+        self._registry = registry
+        self._job_id = job_id
+        self._token = token
+        self._event = event
+        self._disposed = False
+
+    def dispose(self) -> None:
+        """Release the caller's watch without touching ownership."""
+
+        self._disposed = True
+
+    async def wait(self) -> None:
+        if self._disposed:
+            raise RuntimeError("retirement watch disposed")
+        await self._event.wait()
+        if self._disposed:
+            raise RuntimeError("retirement watch disposed")
+        current = self._registry._entries.get(self._job_id)
+        if current is not None:
+            raise RuntimeError("replacement active binding owns job")
+        self._disposed = True
+
+    def __await__(self):
+        return self.wait().__await__()
+
+
 class ActiveTurnRegistry:
     """A deliberately small, process-local exact-binding registry.
 
@@ -34,10 +66,6 @@ class ActiveTurnRegistry:
 
     def __init__(self) -> None:
         self._entries: dict[str, _RegistryEntry] = {}
-        # Keep exact object identities long enough to distinguish an already
-        # retired owner from an equal-looking binding that never owned this
-        # job.  This is intentionally process-local and content-free.
-        self._retired: dict[str, list[TurnBinding]] = {}
 
     def __repr__(self) -> str:
         return f"<ActiveTurnRegistry entries={len(self._entries)}>"
@@ -80,15 +108,14 @@ class ActiveTurnRegistry:
             owned = entry.binding is ownership
         if owned:
             self._entries.pop(job_id, None)
-            self._retired.setdefault(job_id, []).append(entry.binding)
             entry.retired.set()
 
-    async def wait_retired(self, job_id: str, binding: TurnBinding) -> None:
-        """Wait for retirement of this exact ownership generation.
+    def wait_retired(self, job_id: str, binding: TurnBinding) -> _RetirementWatch:
+        """Arm an exact-generation retirement watch synchronously.
 
-        A missing entry is success only when this exact object was previously
-        retired.  Any other owner, including an equal-looking clone or a
-        replacement generation, fails closed.
+        The active entry and its retirement event are captured before this
+        method returns.  Callers may then await the returned watch without a
+        post-retirement identity archive.
         """
         if not isinstance(job_id, str) or not job_id or "\x00" in job_id:
             raise ValueError("invalid registry key")
@@ -96,14 +123,7 @@ class ActiveTurnRegistry:
             raise ValueError("invalid registry binding")
         entry = self._entries.get(job_id)
         if entry is None:
-            if any(candidate is binding for candidate in self._retired.get(job_id, ())):
-                return
             raise RuntimeError("active binding ownership unavailable")
         if entry.binding is not binding:
             raise RuntimeError("different active binding owns job")
-        await entry.retired.wait()
-        current = self._entries.get(job_id)
-        if current is not None or not any(
-            candidate is binding for candidate in self._retired.get(job_id, ())
-        ):
-            raise RuntimeError("replacement active binding owns job")
+        return _RetirementWatch(self, job_id, entry.token, entry.retired)

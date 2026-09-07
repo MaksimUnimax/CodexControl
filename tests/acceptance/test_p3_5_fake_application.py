@@ -157,6 +157,8 @@ class FinalP3FakeApplicationAcceptance(unittest.IsolatedAsyncioTestCase):
         dialogue = await DialogueRepository(self.storage).get_live()
         self.assertEqual((DialogueState.IDLE, "thread-one"), (dialogue.state, dialogue.thread_id))
         self.assertEqual(1, len(lifecycle.start_calls))
+        self.assertEqual({}, registry._entries)
+        self.assertNotIn("_retired", vars(registry))
         # Keep the fake acceptance deletion-ready under the accepted P2.5
         # rule: this completed job is projected to a terminal failed path
         # with no delivery-owned segments.
@@ -262,6 +264,8 @@ class FinalP3FakeApplicationAcceptance(unittest.IsolatedAsyncioTestCase):
         runner_result = await second_task
         self.assertEqual("FAILED", runner_result.status.value)
         self.assertEqual("CODEX_TURN_FAILED", runner_result.job.error_class)
+        self.assertEqual({}, registry._entries)
+        self.assertNotIn("_retired", vars(registry))
 
         replay = await delete.delete(DialogueDeleteRequest(running.dialogue_id, running.version))
         self.assertEqual(DialogueDeleteStatus.DELETED, replay.status)

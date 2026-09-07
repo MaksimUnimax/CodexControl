@@ -322,3 +322,78 @@ architect acceptance, close Issue #27, mark P3 complete, or authorize P4.
   credentials, tokens, keys, or production paths were added to generic
   errors, reprs, logs, fixtures, evidence, or commit metadata.
 - No P4 work was started and no architect acceptance is claimed.
+
+## Architect third repair
+
+This section records factual third-repair evidence only. It does not claim
+architect acceptance, close Issue #27, mark P3 complete, or authorize P4.
+
+- Repair parent: `12f024f9900cadbf9f98724a7247418621d4f410`
+- Original architect base remains:
+  `3e19f1028916613f7d89b254fdd7bf04505a2fb5`
+- Architect review comment: Issue #27 comment `5565286591`.
+- Issue #27 comments `5564792583`, `5565047063`, and `5565286591` were read
+  from the repository API; the issue remains open.
+- No reset, rebase, merge, force-push, main change, ADR change, schema/DDL
+  change, P1/P2 change, or accepted prior-slice production rewrite was made.
+
+### Repair closure
+
+- `ActiveTurnRegistry` no longer contains `_retired` or any equivalent
+  historical job/binding collection. Successful retirement removes the
+  active entry and signals only the exact entry event. Ordinary retirement
+  therefore retains zero historical ownership after the active entry is
+  gone; no TTL, sweeper, or arbitrary eviction policy was added.
+- `wait_retired(job_id, binding)` is now a synchronous exact active-time arm:
+  it requires `type(binding) is TurnBinding`, captures the exact active
+  generation event, and returns an awaitable watch. A post-retirement caller
+  cannot obtain historical proof.
+- Equal-looking clones are rejected at watch arming and cannot retire the
+  exact owner. Wrong/stale retirement does not signal the exact watch.
+- If the old exact event fires and a replacement is published before the
+  watch resumes, the watch fails closed and the replacement remains active.
+- Running delete arms the watch immediately after exact registry lookup and
+  binding coherence validation, before calling P3.4 interrupt. Definitive
+  `CONFIRMED`/`RECONCILED` awaits that already-armed exact watch, verifies the
+  old job has no current registry owner, and only then proceeds to P2.5/P1.9
+  delete orchestration.
+- `REJECTED`, `UNKNOWN`, `BLOCKED`, `CONFLICT`, malformed results, and finite
+  interrupt errors dispose the armed watch without changing runner ownership,
+  creating registry history, or leaving a P3.5 task pending.
+- Unit and integration proofs cover exact retirement, clone rejection, stale
+  retirement, replacement fail-closed behavior, watch disposal, 1000 normal
+  publish/retire cycles with `vars(registry) == {"_entries": {}}`, and the
+  running-delete arm-before-interrupt/dispose path. The final fake acceptance
+  also asserts zero registry history after ordinary and delete retirement.
+
+### Verification
+
+- Final P3.5 focused counts: unit `11`, integration `24`, final fake
+  acceptance `1`.
+- Accepted pre-P3.5 full count: `633`; arithmetic is
+  `633 + 11 + 24 + 1 = 669`; observed full discovery is `669`, all passing.
+- Required prior focused counts passed: P3.4 `6/31`, P3.3 `5/25`, P3.2
+  `2/21`, P3.1 `11/26`, P2.C1 `5/1`, P2.6b `5/12/8/3`, P2.6a `4/28`,
+  P2.5 `4/18`, P2.4b `6/25`, P2.4a `8/31`, P2.3 `7/28`, P2.2 `6/20`,
+  P2.1 `8/31`, P1.9 `15`, P1.8 `28`, and P1.10 `6/1/4`.
+- `PYTHONPATH=src python3 -m compileall -q src tests`, the P3.5 public
+  import smoke, `git diff --check`, and the changed-line secret scan passed.
+- The frozen schema-v1 DDL SHA remains
+  `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+- Third-repair production changes are limited to
+  `src/codex_control/application/active_turn_registry.py` and
+  `src/codex_control/application/dialogue_delete.py`; test changes are the
+  P3.5 unit/integration/final-acceptance proofs and this evidence section.
+  No architecture-file drift was introduced.
+- The known P1.6 pending-task warning was observed in its focused regression
+  run and is pre-existing; no new P3.5 pending-task warning was observed.
+
+### Security and effects
+
+- Tests used temporary SQLite databases and fake lifecycle ports/events only.
+  No real Codex, interrupt, thread/delete, Telegram, production database,
+  production state root, service, `auth.json`, or `secrets.env` was opened or
+  changed. No real network effect occurred.
+- No raw binding/content/error values, prompts, outputs, credentials, tokens,
+  private keys, or production paths were added to diagnostics, evidence, or
+  commit metadata.

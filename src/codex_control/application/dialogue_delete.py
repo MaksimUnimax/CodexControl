@@ -352,6 +352,7 @@ class DialogueDeleteService:
             )
 
         active_binding = None
+        retirement_watch = None
         if dialogue.state is DialogueState.TURN_RUNNING:
             if len(snapshot.active_jobs) != 1:
                 raise _invariant()
@@ -385,6 +386,15 @@ class DialogueDeleteService:
                 or active_binding.turn_id != active.codex_turn_id
             ):
                 raise _invariant()
+            try:
+                # Arm synchronously while this exact active entry still owns
+                # the job; no await may occur between lookup/coherence and
+                # this capture.
+                retirement_watch = self._active_turn_registry.wait_retired(
+                    active.job_id, active_binding
+                )
+            except Exception:
+                raise _invariant() from None
         elif dialogue.state is DialogueState.DELETE_PENDING:
             pass
         elif dialogue.state is DialogueState.INTERRUPTING:
@@ -396,7 +406,9 @@ class DialogueDeleteService:
                 DialogueDeleteStatus.BLOCKED, dialogue, None, DialogueDeleteReason.DIALOGUE_NOT_READY
             )
 
-        task = asyncio.create_task(self._orchestrate(request, dialogue, snapshot, active_binding))
+        task = asyncio.create_task(
+            self._orchestrate(request, dialogue, snapshot, active_binding, retirement_watch)
+        )
         self._owned[dialogue.dialogue_id] = task
         try:
             return await self._await_owned(task)
@@ -404,114 +416,122 @@ class DialogueDeleteService:
             if self._owned.get(dialogue.dialogue_id) is task:
                 self._owned.pop(dialogue.dialogue_id, None)
 
-    async def _orchestrate(self, request, dialogue, snapshot, active_binding) -> DialogueDeleteResult:
+    async def _orchestrate(
+        self, request, dialogue, snapshot, active_binding, retirement_watch
+    ) -> DialogueDeleteResult:
         current = dialogue
-        if current.state is DialogueState.TURN_RUNNING:
-            if self._interrupt_service is None or snapshot is None or len(snapshot.active_jobs) != 1:
-                raise _invariant()
-            job = snapshot.active_jobs[0]
-            interrupt_request = DialogueInterruptRequest(
-                current.dialogue_id, job.job_id, current.version, job.version
-            )
-            try:
-                interrupt = await self._interrupt_service.interrupt(interrupt_request)
-            except DialogueInterruptError as error:
-                raise _interrupt_error(error) from None
-            if type(interrupt) is not DialogueInterruptResult:
-                raise _invariant()
-            if type(interrupt.status) is not DialogueInterruptStatus:
-                raise _invariant()
-            if interrupt.status in (DialogueInterruptStatus.CONFIRMED, DialogueInterruptStatus.RECONCILED):
-                if not _valid_interrupt_terminal_result(current, job, interrupt):
+        try:
+            if current.state is DialogueState.TURN_RUNNING:
+                if self._interrupt_service is None or snapshot is None or len(snapshot.active_jobs) != 1:
                     raise _invariant()
-                if self._active_turn_registry is None or active_binding is None:
-                    raise _invariant()
+                job = snapshot.active_jobs[0]
+                interrupt_request = DialogueInterruptRequest(
+                    current.dialogue_id, job.job_id, current.version, job.version
+                )
                 try:
-                    await self._active_turn_registry.wait_retired(job.job_id, active_binding)
-                    if self._active_turn_registry.lookup(job.job_id) is not None:
-                        raise RuntimeError("runner ownership remains active")
-                except Exception:
-                    raise _invariant() from None
-                current = interrupt.dialogue
-            elif interrupt.status in (DialogueInterruptStatus.REJECTED, DialogueInterruptStatus.UNKNOWN):
-                return DialogueDeleteResult(
-                    DialogueDeleteStatus.BLOCKED, interrupt.dialogue or current, None,
-                    DialogueDeleteReason.INTERRUPT_UNRESOLVED,
-                )
-            elif interrupt.status is DialogueInterruptStatus.BLOCKED:
-                reason = (
-                    DialogueDeleteReason.INTERRUPT_IN_PROGRESS
-                    if interrupt.reason is DialogueInterruptReason.INTERRUPT_IN_PROGRESS
-                    else DialogueDeleteReason.INTERRUPT_UNRESOLVED
-                )
-                return DialogueDeleteResult(DialogueDeleteStatus.BLOCKED, interrupt.dialogue or current, None, reason)
-            elif interrupt.status is DialogueInterruptStatus.CONFLICT:
-                return DialogueDeleteResult(
-                    DialogueDeleteStatus.CONFLICT, interrupt.dialogue, None, DialogueDeleteReason.STALE_REQUEST
-                )
-            else:
-                raise _invariant()
+                    interrupt = await self._interrupt_service.interrupt(interrupt_request)
+                except DialogueInterruptError as error:
+                    raise _interrupt_error(error) from None
+                if type(interrupt) is not DialogueInterruptResult:
+                    raise _invariant()
+                if type(interrupt.status) is not DialogueInterruptStatus:
+                    raise _invariant()
+                if interrupt.status in (DialogueInterruptStatus.CONFIRMED, DialogueInterruptStatus.RECONCILED):
+                    if not _valid_interrupt_terminal_result(current, job, interrupt):
+                        raise _invariant()
+                    if self._active_turn_registry is None or active_binding is None or retirement_watch is None:
+                        raise _invariant()
+                    try:
+                        await retirement_watch
+                        if self._active_turn_registry.lookup(job.job_id) is not None:
+                            raise RuntimeError("runner ownership remains active")
+                    except Exception:
+                        raise _invariant() from None
+                    retirement_watch.dispose()
+                    retirement_watch = None
+                    current = interrupt.dialogue
+                elif interrupt.status in (DialogueInterruptStatus.REJECTED, DialogueInterruptStatus.UNKNOWN):
+                    return DialogueDeleteResult(
+                        DialogueDeleteStatus.BLOCKED, interrupt.dialogue or current, None,
+                        DialogueDeleteReason.INTERRUPT_UNRESOLVED,
+                    )
+                elif interrupt.status is DialogueInterruptStatus.BLOCKED:
+                    reason = (
+                        DialogueDeleteReason.INTERRUPT_IN_PROGRESS
+                        if interrupt.reason is DialogueInterruptReason.INTERRUPT_IN_PROGRESS
+                        else DialogueDeleteReason.INTERRUPT_UNRESOLVED
+                    )
+                    return DialogueDeleteResult(DialogueDeleteStatus.BLOCKED, interrupt.dialogue or current, None, reason)
+                elif interrupt.status is DialogueInterruptStatus.CONFLICT:
+                    return DialogueDeleteResult(
+                        DialogueDeleteStatus.CONFLICT, interrupt.dialogue, None, DialogueDeleteReason.STALE_REQUEST
+                    )
+                else:
+                    raise _invariant()
 
-        if current.state is DialogueState.IDLE:
+            if current.state is DialogueState.IDLE:
+                try:
+                    current = await self._claim_intent(request, current)
+                except _ClaimRace as race:
+                    return race.result
+            elif current.state is not DialogueState.DELETE_PENDING:
+                raise _invariant()
             try:
-                current = await self._claim_intent(request, current)
+                deleting = await self._claim_deleting(request.dialogue_id, current.version)
             except _ClaimRace as race:
                 return race.result
-        elif current.state is not DialogueState.DELETE_PENDING:
-            raise _invariant()
-        try:
-            deleting = await self._claim_deleting(request.dialogue_id, current.version)
-        except _ClaimRace as race:
-            return race.result
-        try:
-            binding = ThreadBinding(deleting.profile_id, deleting.thread_id or "")
-        except Exception:
-            raise _invariant() from None
-        try:
-            result = await self._thread_lifecycle.delete(binding=binding)
-        except asyncio.CancelledError:
-            raise
-        except ThreadLifecycleError as error:
-            if _lifecycle_name(error) in {
-                "thread_request_invalid", "thread_precondition_changed", "thread_operation_busy",
-            }:
-                failed = await self._mark_error(deleting, "CODEX_PROCESS")
-                return DialogueDeleteResult(DialogueDeleteStatus.FAILED, failed, None, None)
-            unknown = await self._mark_unknown(deleting)
-            return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
-        except Exception:
-            unknown = await self._mark_unknown(deleting)
-            return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
-
-        if (
-            type(result) is not ThreadOperationResult
-            or type(result.status) is not ThreadOperationStatus
-            or result.binding is not binding
-        ):
-            unknown = await self._mark_unknown(deleting)
-            return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
-        if result.status is ThreadOperationStatus.DELETE_CONFIRMED:
-            now = self._clock_value()
-            if now > MAX_SQLITE_INT - P3_DELETE_TOMBSTONE_RETENTION_MS:
-                raise _invariant()
-            expiry = now + P3_DELETE_TOMBSTONE_RETENTION_MS
             try:
-                finalized = await DeletionRepository(self._storage, now_ms=self._clock).finalize_confirmed(
-                    dialogue_id=deleting.dialogue_id,
-                    expected_version=deleting.version,
-                    tombstone_expires_at_ms=expiry,
-                )
-            except (StorageError, RepositoryError) as error:
-                raise _post_confirmed_repository_error(error) from None
+                binding = ThreadBinding(deleting.profile_id, deleting.thread_id or "")
+            except Exception:
+                raise _invariant() from None
+            try:
+                result = await self._thread_lifecycle.delete(binding=binding)
+            except asyncio.CancelledError:
+                raise
+            except ThreadLifecycleError as error:
+                if _lifecycle_name(error) in {
+                    "thread_request_invalid", "thread_precondition_changed", "thread_operation_busy",
+                }:
+                    failed = await self._mark_error(deleting, "CODEX_PROCESS")
+                    return DialogueDeleteResult(DialogueDeleteStatus.FAILED, failed, None, None)
+                unknown = await self._mark_unknown(deleting)
+                return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
+            except Exception:
+                unknown = await self._mark_unknown(deleting)
+                return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
+
             if (
-                finalized.tombstone.dialogue_id != deleting.dialogue_id
-                or finalized.tombstone.stale_generation != deleting.version
-                or finalized.tombstone.expires_at_ms != expiry
+                type(result) is not ThreadOperationResult
+                or type(result.status) is not ThreadOperationStatus
+                or result.binding is not binding
             ):
-                raise _invariant()
-            return DialogueDeleteResult(DialogueDeleteStatus.DELETED, None, finalized.tombstone, None)
-        unknown = await self._mark_unknown(deleting)
-        return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
+                unknown = await self._mark_unknown(deleting)
+                return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
+            if result.status is ThreadOperationStatus.DELETE_CONFIRMED:
+                now = self._clock_value()
+                if now > MAX_SQLITE_INT - P3_DELETE_TOMBSTONE_RETENTION_MS:
+                    raise _invariant()
+                expiry = now + P3_DELETE_TOMBSTONE_RETENTION_MS
+                try:
+                    finalized = await DeletionRepository(self._storage, now_ms=self._clock).finalize_confirmed(
+                        dialogue_id=deleting.dialogue_id,
+                        expected_version=deleting.version,
+                        tombstone_expires_at_ms=expiry
+                    )
+                except (StorageError, RepositoryError) as error:
+                    raise _post_confirmed_repository_error(error) from None
+                if (
+                    finalized.tombstone.dialogue_id != deleting.dialogue_id
+                    or finalized.tombstone.stale_generation != deleting.version
+                    or finalized.tombstone.expires_at_ms != expiry
+                ):
+                    raise _invariant()
+                return DialogueDeleteResult(DialogueDeleteStatus.DELETED, None, finalized.tombstone, None)
+            unknown = await self._mark_unknown(deleting)
+            return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
+        finally:
+            if retirement_watch is not None:
+                retirement_watch.dispose()
 
     async def _claim_intent(self, request, dialogue: DialogueRecord) -> DialogueRecord:
         try:

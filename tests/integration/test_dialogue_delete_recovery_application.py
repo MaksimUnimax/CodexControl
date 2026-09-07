@@ -75,14 +75,18 @@ class FakeDeleteLifecycle:
 
 
 class FakeInterruptService:
-    def __init__(self, result_status=DialogueInterruptStatus.CONFIRMED, *, dialogue=None, job=None):
+    def __init__(self, result_status=DialogueInterruptStatus.CONFIRMED, *, dialogue=None, job=None,
+                 before_return=None):
         self.result_status = result_status
         self.dialogue = dialogue
         self.job = job
+        self.before_return = before_return
         self.calls = []
 
     async def interrupt(self, request):
         self.calls.append(request)
+        if self.before_return is not None:
+            self.before_return()
         return DialogueInterruptResult(self.result_status, self.job, self.dialogue, None, None)
 
 
@@ -372,8 +376,24 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
 
     async def test_running_delete_uses_interrupt_and_unresolved_interrupt_never_deletes(self):
         _, running_dialogue, running_job = await self.seed_running()
+        exact_binding = self.active_registry.lookup(running_job.job_id)
+        watches = []
+        original_arm = self.active_registry.wait_retired
+
+        def arm(job_id, binding):
+            watch = original_arm(job_id, binding)
+            watches.append(watch)
+            return watch
+
+        self.active_registry.wait_retired = arm
+
+        def assert_armed_before_interrupt():
+            self.assertEqual(1, len(watches))
+            self.assertIs(exact_binding, self.active_registry.lookup(running_job.job_id))
+
         unresolved = FakeInterruptService(DialogueInterruptStatus.UNKNOWN,
-                                          dialogue=running_dialogue, job=running_job)
+                                          dialogue=running_dialogue, job=running_job,
+                                          before_return=assert_armed_before_interrupt)
         life = FakeDeleteLifecycle()
         result = await self.delete_service(life, interrupt=unresolved).delete(
             DialogueDeleteRequest("dialogue", running_dialogue.version)
@@ -382,6 +402,11 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
                          (result.status, result.reason))
         self.assertEqual(1, len(unresolved.calls))
         self.assertEqual([], life.calls)
+        self.assertTrue(watches[0]._disposed)
+        self.assertIs(exact_binding, self.active_registry.lookup(running_job.job_id))
+        self.active_registry.retire(running_job.job_id, exact_binding)
+        self.assertIsNone(self.active_registry.lookup(running_job.job_id))
+        self.assertNotIn("_retired", vars(self.active_registry))
 
     async def test_running_delete_rejects_every_mismatched_definitive_interrupt_result(self):
         mutations = (

@@ -119,45 +119,54 @@ class DialogueDeleteRecoveryApplicationUnitTests(unittest.IsolatedAsyncioTestCas
         registry = ActiveTurnRegistry()
         binding = TurnBinding("profile", "thread", "turn")
         registry.publish("job", binding)
-        waiter = asyncio.create_task(registry.wait_retired("job", binding))
+        watch = registry.wait_retired("job", binding)
+        waiter = asyncio.create_task(watch.wait())
         await asyncio.sleep(0)
         self.assertFalse(waiter.done())
         registry.retire("job", binding)
         await waiter
+        self.assertIsNone(registry.lookup("job"))
+        self.assertNotIn("_retired", vars(registry))
 
     async def test_registry_stale_retirement_does_not_release_exact_waiter(self):
         registry = ActiveTurnRegistry()
         binding = TurnBinding("profile", "thread", "turn")
         clone = TurnBinding("profile", "thread", "turn")
         registry.publish("job", binding)
-        waiter = asyncio.create_task(registry.wait_retired("job", binding))
+        watch = registry.wait_retired("job", binding)
+        waiter = asyncio.create_task(watch.wait())
         await asyncio.sleep(0)
         registry.retire("job", clone)
         self.assertFalse(waiter.done())
         registry.retire("job", binding)
         await waiter
 
-    async def test_registry_already_retired_requires_exact_identity(self):
+    async def test_registry_equal_clone_cannot_arm_or_retire_exact_owner(self):
         registry = ActiveTurnRegistry()
         binding = TurnBinding("profile", "thread", "turn")
         clone = TurnBinding("profile", "thread", "turn")
         registry.publish("job", binding)
-        registry.retire("job", binding)
-        await registry.wait_retired("job", binding)
         with self.assertRaises(RuntimeError):
-            await registry.wait_retired("job", clone)
+            registry.wait_retired("job", clone)
+        watch = registry.wait_retired("job", binding)
+        registry.retire("job", clone)
+        self.assertIs(binding, registry.lookup("job"))
+        registry.retire("job", binding)
+        await watch
 
     async def test_registry_replacement_fails_old_waiter_closed(self):
         registry = ActiveTurnRegistry()
         old = TurnBinding("profile", "thread", "old")
         new = TurnBinding("profile", "thread", "new")
         registry.publish("job", old)
-        waiter = asyncio.create_task(registry.wait_retired("job", old))
+        watch = registry.wait_retired("job", old)
+        waiter = asyncio.create_task(watch.wait())
         await asyncio.sleep(0)
         registry.retire("job", old)
         registry.publish("job", new)
         with self.assertRaises(RuntimeError):
             await waiter
+        self.assertIs(new, registry.lookup("job"))
 
     async def test_registry_replacement_waits_for_new_exact_owner(self):
         registry = ActiveTurnRegistry()
@@ -166,13 +175,39 @@ class DialogueDeleteRecoveryApplicationUnitTests(unittest.IsolatedAsyncioTestCas
         registry.publish("job", old)
         registry.retire("job", old)
         registry.publish("job", new)
-        waiter = asyncio.create_task(registry.wait_retired("job", new))
+        watch = registry.wait_retired("job", new)
+        waiter = asyncio.create_task(watch.wait())
         await asyncio.sleep(0)
         self.assertFalse(waiter.done())
         registry.retire("job", old)
         self.assertFalse(waiter.done())
         registry.retire("job", new)
         await waiter
+
+    async def test_registry_normal_retirements_keep_zero_history(self):
+        registry = ActiveTurnRegistry()
+        for index in range(1000):
+            job_id = f"job-{index}"
+            binding = TurnBinding("profile", f"thread-{index}", f"turn-{index}")
+            registry.publish(job_id, binding)
+            registry.retire(job_id, binding)
+            self.assertIsNone(registry.lookup(job_id))
+        self.assertEqual({}, registry._entries)
+        self.assertNotIn("_retired", vars(registry))
+        self.assertEqual({"_entries": {}}, vars(registry))
+
+    async def test_registry_disposed_watch_has_no_ownership_or_pending_wait(self):
+        registry = ActiveTurnRegistry()
+        binding = TurnBinding("profile", "thread", "turn")
+        registry.publish("job", binding)
+        watch = registry.wait_retired("job", binding)
+        watch.dispose()
+        with self.assertRaises(RuntimeError):
+            await watch
+        self.assertIs(binding, registry.lookup("job"))
+        registry.retire("job", binding)
+        self.assertIsNone(registry.lookup("job"))
+        self.assertNotIn("_retired", vars(registry))
 
 
 if __name__ == "__main__":
