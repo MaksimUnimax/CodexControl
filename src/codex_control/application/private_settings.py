@@ -496,8 +496,20 @@ class PrivateSettingsManagementService:
             return _invariant() if internal or error.category is RepositoryErrorCategory.INVARIANT_VIOLATION else _invalid()
         return _storage()
 
+    @staticmethod
+    def _map_callback_batch_error(error: RepositoryError) -> PrivateAdminError:
+        if error.category in {
+            RepositoryErrorCategory.ALREADY_EXISTS,
+            RepositoryErrorCategory.INVARIANT_VIOLATION,
+            RepositoryErrorCategory.INVALID_ARGUMENT,
+        }:
+            return _invariant()
+        return _storage()
+
     async def _render(self, section: PrivatePanelSection, view: SettingsSelectionView, *, page: int) -> PrivateAdminPanel:
         panel_text = self._panel_text(section, view, page)
+        if view.settings is None:
+            return PrivateAdminPanel(section, panel_text, ())
         buttons: list[tuple[str, str, str, str]] = []
         if section is PrivatePanelSection.ROOT:
             if view.profiles:
@@ -535,7 +547,7 @@ class PrivateSettingsManagementService:
             specs.append(
                 PrivateCallbackActionSpec(
                     _hash_target(token), action, subject_type, subject_id,
-                    view.settings.version if view.settings is not None else 0,
+                    view.settings.version,
                     _expected_state(view), self._operator_user_id, self._operator_user_id,
                 )
             )
@@ -544,7 +556,7 @@ class PrivateSettingsManagementService:
                 actions=tuple(specs), created_at_ms=now, expires_at_ms=expires
             )
         except RepositoryError as error:
-            raise self._map_repository_error(error, internal=True) from None
+            raise self._map_callback_batch_error(error) from None
         except StorageError:
             raise _storage() from None
         return PrivateAdminPanel(section, panel_text, tuple(rows))

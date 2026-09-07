@@ -19,6 +19,8 @@ from codex_control.storage import (
     DialogueState,
     IngressDispositionKind,
     IngressUpdateRepository,
+    PrivateCallbackActionSpec,
+    PrivateManagementRepository,
     SCHEMA_V1_DDL_SHA256,
     SettingsRepository,
     SqliteStorage,
@@ -123,6 +125,72 @@ class PrivateTelegramSettingsIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, self.clock.calls)
         self.assertEqual(count, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM callback_actions").fetchone()[0]))
         self.assertIsNotNone(first.panel)
+
+    async def test_missing_settings_menu_has_no_callback_generation_or_authority(self):
+        service = self.service()
+        self.clock.calls = 0
+        result = await service.handle_command(PrivateCommandRequest(40, 7, 7, PrivateCommand.MENU))
+        self.assertEqual((PrivateAdminStatus.BLOCKED, PrivateAdminReason.SETTINGS_MISSING), (result.status, result.reason))
+        self.assertIsNotNone(result.panel)
+        self.assertEqual((), result.panel.rows)
+        self.assertEqual(IngressDispositionKind.CONTROL, (await IngressUpdateRepository(self.storage).get(40)).disposition)
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM ingress_updates WHERE disposition='CONTROL'").fetchone()[0]))
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM callback_actions").fetchone()[0]))
+        self.assertEqual(0, self.token_index)
+        self.assertEqual(1, self.clock.calls)
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM controller_runtime").fetchone()[0]))
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]))
+
+        duplicate = await service.handle_command(PrivateCommandRequest(40, 7, 7, PrivateCommand.SETTINGS))
+        self.assertEqual(PrivateAdminStatus.DUPLICATE, duplicate.status)
+        self.assertEqual(0, self.token_index)
+        self.assertEqual(1, self.clock.calls)
+
+    async def test_missing_settings_cannot_revive_callback_at_new_version_zero(self):
+        service = self.service()
+        first = await service.handle_command(PrivateCommandRequest(41, 7, 7, PrivateCommand.MENU))
+        self.assertEqual((), first.panel.rows)
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM callback_actions").fetchone()[0]))
+
+        initialized = await self.initialize_settings()
+        self.assertTrue(initialized.created)
+        self.assertEqual(0, initialized.record.version)
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM callback_actions").fetchone()[0]))
+
+        second = await service.handle_command(PrivateCommandRequest(42, 7, 7, PrivateCommand.MENU))
+        self.assertEqual(PrivateAdminStatus.RENDERED, second.status)
+        self.assertEqual(3, len(second.panel.rows))
+        rows = await self.storage.read(lambda c: tuple(tuple(row) for row in c.execute("SELECT token_hash_sha256, expected_version FROM callback_actions ORDER BY rowid").fetchall()))
+        self.assertEqual(3, len(rows))
+        self.assertEqual({0}, {row[1] for row in rows})
+        self.assertEqual({hashlib.sha256(button.callback_data[4:].encode()).hexdigest() for row in second.panel.rows for button in row}, {row[0] for row in rows})
+
+    async def test_existing_durable_callback_hash_collision_is_invariant_without_retry(self):
+        await self.initialize_settings()
+        self.catalog.available = False
+        token = "T" * 32
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        await PrivateManagementRepository(self.storage, now_ms=self.clock).create_callback_batch(
+            actions=(PrivateCallbackActionSpec(token_hash, "OPEN_PROFILES", "panel", "0", 0, "NO_DIALOGUE", 7, 7),),
+            created_at_ms=100,
+            expires_at_ms=900100,
+        )
+        calls = []
+
+        def colliding_token_factory():
+            calls.append(token)
+            return token
+
+        service = self.service(token_factory=colliding_token_factory)
+        with self.assertRaises(PrivateAdminError) as raised:
+            await service.handle_command(PrivateCommandRequest(43, 7, 7, PrivateCommand.MENU))
+        self.assertEqual(PrivateAdminErrorCategory.INVARIANT, raised.exception.category)
+        self.assertEqual([token], calls)
+        rows = await self.storage.read(lambda c: tuple(tuple(row) for row in c.execute("SELECT token_hash_sha256, action, subject_id FROM callback_actions")))
+        self.assertEqual(((token_hash, "OPEN_PROFILES", "0"),), rows)
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]))
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM controller_runtime").fetchone()[0]))
+        self.assertEqual(0, (await SettingsRepository(self.storage).get()).version)
 
     async def test_unauthorized_and_unsupported_paths_have_no_content_job_or_callback(self):
         service = self.service()

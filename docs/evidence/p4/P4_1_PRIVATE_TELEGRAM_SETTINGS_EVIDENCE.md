@@ -52,3 +52,33 @@ Callback claim precedes any possible P3.3 mutation. Cancellation after claim lea
 - Secret/effect scan: no credentials, bot tokens, private keys, production paths, raw callback token/hash persistence, raw Telegram JSON, content, environment dump, or external-effect path found in P4.1 production files. Test-only synthetic identifiers are isolated fixtures.
 
 The known P1.6 pending-task warning was observed during full discovery; it is pre-existing and no new P4.1 leak was identified. Prior regression counts remain the required authority: P3.5 `12/25/1`; P3.4 `6/31`; P3.3 `5/25`; P3.2 `2/21`; P3.1 `11/26`; P2.C1 `5/1`; P2.6b `5/12/8/3`; P2.6a `4/28`; P2.5 `4/18`; P2.4b `6/25`; P2.4a `8/31`; P2.3 `7/28`; P2.2 `6/20`; P2.1 `8/31`; P1.9 `15`; P1.8 `28`; P1.10 `6/1/4`. No architect acceptance is claimed.
+
+## Architect first repair
+
+This is factual first-repair evidence only. P4.1 remains not architect-accepted.
+
+- Rejected candidate: `3c4272b469df6a00d6ca4796eef42cb2be13695a`.
+- Architect review comment: `5567080615`.
+- Repair scope stayed within the two reviewed blockers; ADR-0032, schema/DDL, accepted prior production, roadmap/current-work authority and issue state were not changed.
+
+### Missing-settings callback authority
+
+The fresh authorized `/menu` proof claims exactly one `CONTROL` ingress, leaves controller runtime unchanged, creates no job, and returns `BLOCKED / SETTINGS_MISSING`. Its safe ROOT panel has `rows == ()`; callback rows and token-factory calls are zero. The duplicate replay is `DUPLICATE` with no clock/token/callback work. `_render()` returns this static panel before callback token generation, TTL clock reads, callback specs or batch insertion, so no fabricated expected version exists.
+
+The follow-on proof initializes the settings singleton at version `0` and confirms zero old callback rows remain. A new menu then creates only its new current-generation callbacks, all bound to exact version `0`. Therefore no authority emitted while settings were absent can revive when version `0` is later initialized.
+
+### Durable callback-hash collision
+
+A canonical repository-created callback row seeded the SHA-256 hash of the next generated token. With the fake catalog unavailable, ROOT required one callback and the deterministic factory was called once. The existing durable hash collision mapped to content-free `PrivateAdminError(INVARIANT)`, with no replacement-token retry. The pre-existing row remained unchanged, no new rows were committed, settings stayed at version `0`, and no job/runtime effect occurred.
+
+The existing in-batch duplicate-token proof remains present and passes independently: it fails `INVARIANT` before SQLite and leaves zero callback rows. Repository batch atomicity remains unchanged for both preflight collisions and insertion failures.
+
+### Verification and boundaries
+
+- Final focused P4.1 counts: unit `8`, integration `15` (the integration count increased by three independent repair proofs).
+- Accepted prior regressions passed unchanged at: P3.5 `12/25/1`; P3.4 `6/31`; P3.3 `5/25`; P3.2 `2/21`; P3.1 `11/26`; P2.C1 `5/1`; P2.6b `5/12/8/3`; P2.6a `4/28`; P2.5 `4/18`; P2.4b `6/25`; P2.4a `8/31`; P2.3 `7/28`; P2.2 `6/20`; P2.1 `8/31`; P1.9 `15`; P1.8 `28`; P1.10 `6/1/4`.
+- Accepted pre-P4 baseline `671`; expected full discovery `671 + 8 + 15 = 694`; observed full discovery `694`.
+- Frozen DDL SHA-256 remains `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+- Compileall, public import smoke, `git diff --check`, and targeted security/redaction checks passed. No raw token/hash, Telegram payload, prompt/output, catalog exception, SQLite path, environment, secret, production path or private key was added to production/evidence surfaces.
+- All proofs used temporary SQLite, fake catalogs and deterministic local factories. No real Telegram, network, Codex, thread, turn, interrupt, delete, approval or delivery effect occurred; production DB/state/services were not touched. The known P1.6 pending-task warning remains pre-existing and was not introduced by this repair.
+- `P4_2_STARTED=NO`, `P4_3_STARTED=NO`, `P5_STARTED=NO`. No architect acceptance is claimed and Issue #28 remains open.
