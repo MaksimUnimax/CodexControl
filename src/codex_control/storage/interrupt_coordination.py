@@ -383,12 +383,34 @@ class InterruptCoordinationRepository:
                 ingress = _materialize_ingress(ingress_row)
                 if ingress.disposition.value != "JOB" or ingress.job_id != job.job_id:
                     raise _invariant()
-                if job.state is TurnJobState.CODEX_COMPLETED and dialogue.state is not DialogueState.IDLE:
-                    raise _invariant()
-                if job.state is TurnJobState.UNKNOWN and dialogue.state is not DialogueState.TURN_UNKNOWN:
-                    raise _invariant()
-                if job.state is TurnJobState.FAILED and dialogue.state not in (DialogueState.IDLE, DialogueState.ERROR):
-                    raise _invariant()
+                if job.state is TurnJobState.CODEX_COMPLETED:
+                    if (
+                        job.error_class is not None
+                        or dialogue.state is not DialogueState.IDLE
+                        or dialogue.last_error_class is not None
+                    ):
+                        raise _invariant()
+                elif job.state is TurnJobState.FAILED:
+                    if job.error_class != "CODEX_TURN_FAILED":
+                        raise _invariant()
+                    if dialogue.state is DialogueState.IDLE:
+                        if dialogue.last_error_class is not None or dialogue.version != terminal_versions[0]:
+                            raise _invariant()
+                    elif dialogue.state is DialogueState.ERROR:
+                        if (
+                            dialogue.last_error_class != "CODEX_TURN_FAILED"
+                            or dialogue.version != terminal_versions[-1]
+                        ):
+                            raise _invariant()
+                    else:
+                        raise _invariant()
+                elif job.state is TurnJobState.UNKNOWN:
+                    if (
+                        job.error_class != "CODEX_AMBIGUOUS"
+                        or dialogue.state is not DialogueState.TURN_UNKNOWN
+                        or dialogue.last_error_class != "CODEX_AMBIGUOUS"
+                    ):
+                        raise _invariant()
                 if (
                     job.dialogue_id != dialogue.dialogue_id
                     or job.server_id != dialogue.server_id
@@ -398,14 +420,9 @@ class InterruptCoordinationRepository:
                     or job.codex_turn_id is None
                 ):
                     raise _invariant()
-                if job.state is TurnJobState.FAILED:
-                    if dialogue.state is DialogueState.ERROR and dialogue.version != terminal_versions[-1]:
-                        raise _invariant()
-                    if dialogue.state is DialogueState.IDLE and dialogue.version != terminal_versions[0]:
-                        raise _invariant()
                 return TurnJobFinishResult(job, dialogue, _existing_output(connection, job))
 
-            if job.version != expected_job_version or dialogue.version == MAX_SQLITE_INT:
+            if job.version != expected_job_version:
                 raise _state_conflict()
             if dialogue.state is DialogueState.INTERRUPTING:
                 if dialogue.version != interrupt_dialogue_version:
@@ -426,6 +443,12 @@ class InterruptCoordinationRepository:
                 pass
             elif terminal_mode == "interrupt" and mode == "interrupt":
                 pass
+
+            # Both rows are mutated by terminalization.  Exhaustion is a
+            # persisted invariant, and must be rejected before any output
+            # collision check, clock call, or SQL mutation.
+            if job.version == MAX_SQLITE_INT or dialogue.version == MAX_SQLITE_INT:
+                raise _invariant()
 
             next_job_state = {
                 TurnTerminalOutcome.COMPLETED: TurnJobState.CODEX_COMPLETED,

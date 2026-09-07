@@ -18,6 +18,7 @@ from codex_control.adapters.codex.turn_lifecycle import (
     TurnTerminalResult,
     TurnTerminalStatus,
 )
+from codex_control.adapters.codex.errors import CodexAdapterErrorCategory
 from codex_control.storage import (
     DialogueRecord,
     DialogueRepository,
@@ -37,6 +38,7 @@ from codex_control.storage.errors import StorageError
 
 from ._turn_common import _prepare_output, _project_terminal
 from .active_turn_registry import ActiveTurnRegistry
+from .existing_dialogue_turn import DialogueApplicationError, DialogueApplicationErrorCategory
 
 
 MAX_SIGNED_64 = 9_223_372_036_854_775_807
@@ -379,6 +381,13 @@ class DialogueInterruptService:
             interrupt_result = await self._turn_lifecycle.interrupt_turn(binding)
         except asyncio.CancelledError:
             interrupt_result = None
+        except TurnLifecycleError as error:
+            if error.category not in (
+                CodexAdapterErrorCategory.TURN_INTERRUPT_NOT_ACTIVE,
+                CodexAdapterErrorCategory.TURN_INTERRUPT_BUSY,
+            ):
+                raise _invariant() from None
+            interrupt_result = None
         except Exception:
             interrupt_result = None
 
@@ -473,6 +482,12 @@ class DialogueInterruptService:
             output_id, output_content, output_expiry = _prepare_output(
                 self._clock, self._id_factory, outcome, messages
             )
+        except DialogueApplicationError as error:
+            if error.category is DialogueApplicationErrorCategory.STORAGE:
+                raise _storage() from None
+            if error.category is DialogueApplicationErrorCategory.INVARIANT:
+                raise _invariant() from None
+            raise _invariant() from None
         except DialogueInterruptError:
             raise
         except Exception:
@@ -530,7 +545,7 @@ class DialogueInterruptService:
     def _valid_terminal_shape(value: object, binding: TurnBinding) -> bool:
         return (
             type(value) is TurnTerminalResult
-            and (value.binding is binding or value.binding == binding)
+            and value.binding is binding
             and type(value.status) is TurnTerminalStatus
         )
 

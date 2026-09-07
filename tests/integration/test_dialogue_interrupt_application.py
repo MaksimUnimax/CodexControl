@@ -3,13 +3,19 @@ import hashlib
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from codex_control.adapters.codex.approvals import ApprovalKind
+from codex_control.adapters.codex.errors import CodexAdapterErrorCategory
+from codex_control.adapters.codex.model_catalog import CodexModelCatalog, CodexModelDescriptor
 from codex_control.adapters.codex.turn_lifecycle import (
     AgentMessageCompleted,
     TurnBinding,
     TurnInterruptResult,
     TurnInterruptStatus,
     TurnLifecycleError,
+    TurnStartResult,
+    TurnStartStatus,
     TurnTerminalResult,
     TurnTerminalStatus,
 )
@@ -20,13 +26,27 @@ from codex_control.application import (
     DialogueInterruptRequest,
     DialogueInterruptService,
     DialogueInterruptStatus,
+    ExistingDialoguePromptRequest,
+    ExistingDialogueTurnService,
+    ExistingDialogueTurnStatus,
+    P3_COMPLETED_OUTPUT_RETENTION_MS,
+    P3_UNCERTAIN_OUTPUT_RETENTION_MS,
+    SettingsMutationReason,
+    SettingsMutationStatus,
+    SettingsSelectionService,
     InterruptRecoveryStatus,
 )
+from codex_control.domain import CodexProfile
 from codex_control.storage import (
+    ApprovalRepository,
+    ApprovalState,
+    ApprovalCallbackClaimStatus,
+    CallbackActionRepository,
     DialogueRepository,
     DialogueState,
     IngressUpdateRepository,
     RepositoryError,
+    RepositoryErrorCategory,
     SCHEMA_V1_DDL_SHA256,
     SettingsRepository,
     SqliteStorage,
@@ -34,13 +54,15 @@ from codex_control.storage import (
     TurnJobState,
     TurnTerminalOutcome,
 )
+from codex_control.storage.core_repositories import MAX_SQLITE_INT
 from codex_control.storage.interrupt_coordination import InterruptCoordinationRepository
 
 
 class FakeInterruptLifecycle:
     def __init__(self, *, interrupt_status=TurnInterruptStatus.CONFIRMED,
                  terminal_status=TurnTerminalStatus.COMPLETED, messages=(), interrupt_error=None,
-                 wait_result=None, interrupt_gate=None):
+                 wait_result=None, interrupt_gate=None, interrupt_terminal_binding=None,
+                 wait_terminal_binding=None):
         self.binding = None
         self.interrupt_status = interrupt_status
         self.terminal_status = terminal_status
@@ -48,11 +70,13 @@ class FakeInterruptLifecycle:
         self.interrupt_error = interrupt_error
         self.wait_result = wait_result
         self.interrupt_gate = interrupt_gate
+        self.interrupt_terminal_binding = interrupt_terminal_binding
+        self.wait_terminal_binding = wait_terminal_binding
         self.interrupt_calls = []
         self.wait_calls = []
 
-    def _terminal(self, binding):
-        return TurnTerminalResult(binding, self.terminal_status, self.messages)
+    def _terminal(self, binding, terminal_binding=None):
+        return TurnTerminalResult(terminal_binding or binding, self.terminal_status, self.messages)
 
     async def interrupt_turn(self, binding):
         self.interrupt_calls.append(binding)
@@ -62,14 +86,81 @@ class FakeInterruptLifecycle:
             raise self.interrupt_error
         result = TurnInterruptResult(self.interrupt_status, binding)
         if self.interrupt_status in (TurnInterruptStatus.CONFIRMED, TurnInterruptStatus.RECONCILED):
-            result = TurnInterruptResult(self.interrupt_status, binding, self._terminal(binding))
+            result = TurnInterruptResult(
+                self.interrupt_status, binding,
+                self._terminal(binding, self.interrupt_terminal_binding),
+            )
         return result
 
     async def wait_turn(self, binding):
         self.wait_calls.append(binding)
         if self.wait_result is not None:
             return self.wait_result
-        return self._terminal(binding)
+        return self._terminal(binding, self.wait_terminal_binding)
+
+
+class _CountingClock:
+    def __init__(self, value=1000):
+        self.value = value
+        self.calls = 0
+
+    def __call__(self):
+        self.calls += 1
+        if isinstance(self.value, BaseException):
+            raise self.value
+        return self.value
+
+
+class _SettingsCatalog:
+    async def get_catalog(self, profile_id, *, refresh=False):
+        return CodexModelCatalog(
+            profile_id, 1,
+            (
+                CodexModelDescriptor("model-a", "wire-a", "Model A", ("low", "high"), "high", True, False),
+                CodexModelDescriptor("model-b", "wire-b", "Model B", ("low",), "low", False, False),
+            ),
+            0.0, 100.0,
+        )
+
+
+class _RunnerWorkdir:
+    def resolve(self, profile_id):
+        from codex_control.adapters.codex.thread_lifecycle import TrustedWorkingDirectory
+        return TrustedWorkingDirectory("/trusted")
+
+
+class _RunnerLifecycle:
+    def __init__(self, binding, *, race=False):
+        self.binding = binding
+        self.race = race
+        self.start_calls = []
+        self.interrupt_calls = []
+        self.wait_calls = []
+        self.runner_wait_entered = asyncio.Event()
+        self.interrupt_called = asyncio.Event()
+        self.terminal_available = asyncio.Event()
+        self.fallback_done = asyncio.Event()
+
+    async def start_turn(self, **kwargs):
+        self.start_calls.append(kwargs)
+        return TurnStartResult(TurnStartStatus.CONFIRMED, self.binding)
+
+    async def interrupt_turn(self, binding):
+        self.interrupt_calls.append(binding)
+        self.interrupt_called.set()
+        return TurnInterruptResult(TurnInterruptStatus.UNKNOWN, binding)
+
+    async def wait_turn(self, binding):
+        self.wait_calls.append(binding)
+        if len(self.wait_calls) == 1:
+            self.runner_wait_entered.set()
+            await self.terminal_available.wait()
+        else:
+            await self.fallback_done.wait()
+        return TurnTerminalResult(
+            binding, TurnTerminalStatus.COMPLETED,
+            (AgentMessageCompleted(1, "item", "race-output"),),
+        )
 
 
 class DialogueInterruptApplicationIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -114,6 +205,14 @@ class DialogueInterruptApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
             self.storage, server_id="server", active_turn_registry=registry,
             turn_lifecycle=lifecycle, now_ms=lambda: 1000,
             id_factory=ids or (lambda kind: f"{kind}-interrupt"),
+        )
+
+    async def seed_idle_application(self):
+        dialogues = DialogueRepository(self.storage, now_ms=lambda: 1)
+        await dialogues.create_intent(dialogue_id="dialogue", server_id="server", profile_id="profile")
+        await dialogues.confirm_created(dialogue_id="dialogue", expected_version=0, thread_id="thread")
+        await SettingsRepository(self.storage, now_ms=lambda: 1).initialize_if_absent(
+            profile_id="profile", model_id="model-a", reasoning_effort="high"
         )
 
     async def reset_storage(self):
@@ -223,6 +322,113 @@ class DialogueInterruptApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         result = await self.service(registry, life).interrupt(DialogueInterruptRequest("dialogue", "job", claimed.dialogue.version, running.version))
         self.assertEqual(DialogueInterruptStatus.UNKNOWN, result.status)
         self.assertEqual((1, 1), (len(life.interrupt_calls), len(life.wait_calls)))
+
+    async def test_equal_but_cloned_direct_terminal_is_not_confirmed(self):
+        claimed, running, binding, registry = await self.seed_running()
+        clone = TurnBinding(binding.profile_id, binding.thread_id, binding.turn_id)
+        self.assertEqual(clone, binding)
+        self.assertIsNot(clone, binding)
+        life = FakeInterruptLifecycle(
+            interrupt_terminal_binding=clone,
+            wait_terminal_binding=clone,
+        )
+        result = await self.service(registry, life).interrupt(
+            DialogueInterruptRequest("dialogue", "job", claimed.dialogue.version, running.version)
+        )
+        self.assertEqual(DialogueInterruptStatus.UNKNOWN, result.status)
+        self.assertEqual(TurnJobState.UNKNOWN, result.job.state)
+        self.assertEqual(DialogueState.TURN_UNKNOWN, result.dialogue.state)
+        self.assertEqual((1, 1), (len(life.interrupt_calls), len(life.wait_calls)))
+
+    async def test_equal_but_cloned_collector_terminal_is_not_definitive(self):
+        claimed, running, binding, registry = await self.seed_running()
+        clone = TurnBinding(binding.profile_id, binding.thread_id, binding.turn_id)
+        life = FakeInterruptLifecycle(
+            interrupt_error=RuntimeError("PRIVATE_CLONED_COLLECTOR_ERROR"),
+            wait_terminal_binding=clone,
+        )
+        result = await self.service(registry, life).interrupt(
+            DialogueInterruptRequest("dialogue", "job", claimed.dialogue.version, running.version)
+        )
+        self.assertEqual(DialogueInterruptStatus.UNKNOWN, result.status)
+        self.assertEqual(TurnJobState.UNKNOWN, result.job.state)
+        self.assertEqual(DialogueState.TURN_UNKNOWN, result.dialogue.state)
+        self.assertEqual((1, 1), (len(life.interrupt_calls), len(life.wait_calls)))
+
+    async def test_not_active_exact_terminal_reconciles_once_without_retry(self):
+        claimed, running, binding, registry = await self.seed_running()
+        life = FakeInterruptLifecycle(
+            interrupt_error=TurnLifecycleError(CodexAdapterErrorCategory.TURN_INTERRUPT_NOT_ACTIVE),
+            terminal_status=TurnTerminalStatus.COMPLETED,
+        )
+        result = await self.service(registry, life).interrupt(
+            DialogueInterruptRequest("dialogue", "job", claimed.dialogue.version, running.version)
+        )
+        self.assertEqual(DialogueInterruptStatus.RECONCILED, result.status)
+        self.assertEqual((1, 1), (len(life.interrupt_calls), len(life.wait_calls)))
+
+    async def test_local_request_and_precondition_errors_fail_closed_without_collector(self):
+        for category in (
+            CodexAdapterErrorCategory.TURN_REQUEST_INVALID,
+            CodexAdapterErrorCategory.TURN_PRECONDITION_CHANGED,
+        ):
+            if category is not CodexAdapterErrorCategory.TURN_REQUEST_INVALID:
+                await self.reset_storage()
+            claimed, running, binding, registry = await self.seed_running(
+                job_id=f"job-{category.value}", update_id=10 + len(category.value)
+            )
+            life = FakeInterruptLifecycle(interrupt_error=TurnLifecycleError(category))
+            service = self.service(registry, life)
+            with self.assertRaises(DialogueInterruptError) as raised:
+                await service.interrupt(DialogueInterruptRequest(
+                    "dialogue", claimed.job.job_id, claimed.dialogue.version, running.version
+                ))
+            self.assertEqual("INVARIANT", str(raised.exception))
+            self.assertNotIn(category.value, str(raised.exception) + repr(raised.exception))
+            current_dialogue = await DialogueRepository(self.storage).get_live()
+            current_job = await TurnJobRepository(self.storage).get(claimed.job.job_id)
+            self.assertEqual(DialogueState.INTERRUPTING, current_dialogue.state)
+            self.assertEqual(TurnJobState.CODEX_RUNNING, current_job.state)
+            self.assertEqual(0, len(life.wait_calls))
+            self.assertEqual(0, await self.storage.read(
+                lambda connection: connection.execute(
+                    "SELECT COUNT(*) FROM transient_payloads WHERE kind = 'OUTPUT'"
+                ).fetchone()[0]
+            ))
+
+    async def test_output_clock_failure_is_storage_redacted_and_leaves_claim_running(self):
+        claimed, running, binding, registry = await self.seed_running()
+
+        class _SequenceClock:
+            def __init__(self):
+                self.calls = 0
+
+            def __call__(self):
+                self.calls += 1
+                if self.calls == 1:
+                    return 1000
+                raise RuntimeError("PRIVATE_P3_4_OUTPUT_CLOCK_MUST_NOT_LEAK")
+
+        clock = _SequenceClock()
+        life = FakeInterruptLifecycle(messages=(AgentMessageCompleted(1, "item", "partial"),))
+        with self.assertRaises(DialogueInterruptError) as raised:
+            await DialogueInterruptService(
+                self.storage, server_id="server", active_turn_registry=registry,
+                turn_lifecycle=life, now_ms=clock, id_factory=lambda kind: f"{kind}-clock",
+            ).interrupt(DialogueInterruptRequest("dialogue", "job", claimed.dialogue.version, running.version))
+        self.assertEqual("STORAGE", str(raised.exception))
+        self.assertNotIn("PRIVATE_P3_4_OUTPUT_CLOCK_MUST_NOT_LEAK", str(raised.exception) + repr(raised.exception))
+        self.assertEqual(2, clock.calls)
+        self.assertEqual((DialogueState.INTERRUPTING, TurnJobState.CODEX_RUNNING), (
+            (await DialogueRepository(self.storage).get_live()).state,
+            (await TurnJobRepository(self.storage).get("job")).state,
+        ))
+        self.assertEqual(1, len(life.interrupt_calls))
+        self.assertEqual(0, await self.storage.read(
+            lambda connection: connection.execute(
+                "SELECT COUNT(*) FROM transient_payloads WHERE kind = 'OUTPUT'"
+            ).fetchone()[0]
+        ))
         await self.reset_storage()
         claimed, running, binding, registry = await self.seed_running(job_id="job2", update_id=2)
         life = FakeInterruptLifecycle()
@@ -261,7 +467,11 @@ class DialogueInterruptApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         life.interrupt_gate.set()
         results = await asyncio.gather(first, second)
         self.assertEqual(1, len(life.interrupt_calls))
-        self.assertEqual({DialogueInterruptStatus.CONFIRMED, DialogueInterruptStatus.BLOCKED}, {r.status for r in results})
+        self.assertEqual(1, sum(r.status is DialogueInterruptStatus.CONFIRMED for r in results))
+        self.assertIn(
+            next(r.status for r in results if r.status is not DialogueInterruptStatus.CONFIRMED),
+            {DialogueInterruptStatus.BLOCKED, DialogueInterruptStatus.CONFLICT},
+        )
 
     async def test_stale_request_cannot_interrupt_next_turn(self):
         claimed, running, binding, registry = await self.seed_running()
@@ -388,6 +598,194 @@ class DialogueInterruptApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         self.assertIsNone(result.output_payload)
         self.assertEqual([], ids)
 
+    async def test_real_admitted_runner_publishes_and_retires_exact_start_binding(self):
+        await self.seed_idle_application()
+        binding = TurnBinding("profile", "thread", "runner-turn")
+        lifecycle = _RunnerLifecycle(binding)
+        registry = ActiveTurnRegistry()
+        service = ExistingDialogueTurnService(
+            self.storage, server_id="server",
+            profiles=(CodexProfile("profile", "/PRIVATE/CODEX_HOME", "Profile"),),
+            model_catalog=_SettingsCatalog(), turn_lifecycle=lifecycle,
+            working_directory_resolver=_RunnerWorkdir(), now_ms=lambda: 1000,
+            id_factory=lambda kind: f"{kind}-runner", active_turn_registry=registry,
+        )
+        task = asyncio.create_task(service.execute(
+            ExistingDialoguePromptRequest(20, -1, 20, "prompt")
+        ))
+        await lifecycle.runner_wait_entered.wait()
+        running = await TurnJobRepository(self.storage).get("job-runner")
+        self.assertEqual(TurnJobState.CODEX_RUNNING, running.state)
+        self.assertIs(binding, registry.lookup("job-runner"))
+        self.assertEqual(1, len(lifecycle.start_calls))
+        self.assertIs(binding, lifecycle.binding)
+        lifecycle.terminal_available.set()
+        result = await task
+        self.assertEqual(ExistingDialogueTurnStatus.COMPLETED, result.status)
+        self.assertIsNone(registry.lookup("job-runner"))
+        self.assertIs(binding, lifecycle.binding)
+
+    async def test_real_runner_interrupt_race_finishes_normally_first_then_falls_back_once(self):
+        await self.seed_idle_application()
+        binding = TurnBinding("profile", "thread", "race-turn")
+        lifecycle = _RunnerLifecycle(binding, race=True)
+        registry = ActiveTurnRegistry()
+        turn_service = ExistingDialogueTurnService(
+            self.storage, server_id="server",
+            profiles=(CodexProfile("profile", "/PRIVATE/CODEX_HOME", "Profile"),),
+            model_catalog=_SettingsCatalog(), turn_lifecycle=lifecycle,
+            working_directory_resolver=_RunnerWorkdir(), now_ms=lambda: 1000,
+            id_factory=lambda kind: f"{kind}-runner", active_turn_registry=registry,
+        )
+        interrupt_service = DialogueInterruptService(
+            self.storage, server_id="server", active_turn_registry=registry,
+            turn_lifecycle=lifecycle, now_ms=lambda: 1000,
+            id_factory=lambda kind: f"{kind}-interrupt",
+        )
+        events = []
+        original_finish = TurnJobRepository.finish_codex
+        original_fallback = InterruptCoordinationRepository.reconcile_natural_terminal
+
+        async def finish_spy(repository, *args, **kwargs):
+            events.append("finish_codex")
+            return await original_finish(repository, *args, **kwargs)
+
+        async def fallback_spy(repository, *args, **kwargs):
+            events.append("reconcile_natural_terminal")
+            result = await original_fallback(repository, *args, **kwargs)
+            lifecycle.fallback_done.set()
+            return result
+
+        with patch.object(TurnJobRepository, "finish_codex", finish_spy), \
+             patch.object(InterruptCoordinationRepository, "reconcile_natural_terminal", fallback_spy):
+            runner_task = asyncio.create_task(turn_service.execute(
+                ExistingDialoguePromptRequest(21, -1, 21, "race prompt")
+            ))
+            await lifecycle.runner_wait_entered.wait()
+            running = await TurnJobRepository(self.storage).get("job-runner")
+            interrupt_task = asyncio.create_task(interrupt_service.interrupt(
+                DialogueInterruptRequest("dialogue", "job-runner", 2, running.version)
+            ))
+            await lifecycle.interrupt_called.wait()
+            current = await DialogueRepository(self.storage).get_live()
+            self.assertEqual(DialogueState.INTERRUPTING, current.state)
+            self.assertIs(binding, lifecycle.interrupt_calls[0])
+            lifecycle.terminal_available.set()
+            runner_result, interrupt_result = await asyncio.gather(runner_task, interrupt_task)
+
+        self.assertEqual(ExistingDialogueTurnStatus.COMPLETED, runner_result.status)
+        self.assertEqual(DialogueInterruptStatus.RECONCILED, interrupt_result.status)
+        self.assertEqual(["finish_codex", "reconcile_natural_terminal"], events)
+        self.assertEqual(TurnJobState.CODEX_COMPLETED, (await TurnJobRepository(self.storage).get("job-runner")).state)
+        self.assertEqual(DialogueState.IDLE, (await DialogueRepository(self.storage).get_live()).state)
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute(
+            "SELECT COUNT(*) FROM transient_payloads WHERE kind = 'OUTPUT'"
+        ).fetchone()[0]))
+        self.assertEqual(runner_result.output_payload.payload_id, interrupt_result.output_payload.payload_id)
+        self.assertIsNone(registry.lookup("job-runner"))
+
+    async def test_legitimate_interrupt_claim_keeps_settings_mutations_blocked(self):
+        await self.seed_running()
+        await SettingsRepository(self.storage, now_ms=lambda: 1).initialize_if_absent(
+            profile_id="profile", model_id="model-a", reasoning_effort="high"
+        )
+        claimed = await DialogueRepository(self.storage).get_live()
+        running = await TurnJobRepository(self.storage).get("job")
+        interrupted = await InterruptCoordinationRepository(self.storage, now_ms=lambda: 1).claim_interrupt(
+            dialogue_id="dialogue", job_id="job", expected_dialogue_version=claimed.version,
+            expected_job_version=running.version,
+        )
+        self.assertEqual(DialogueState.INTERRUPTING, interrupted.dialogue.state)
+        settings_before = await SettingsRepository(self.storage).get()
+        selection = SettingsSelectionService(
+            self.storage, server_id="server",
+            profiles=(
+                CodexProfile("profile", "/PRIVATE/CODEX_HOME", "Profile"),
+                CodexProfile("profile-b", "/PRIVATE/CODEX_HOME/B", "Profile B"),
+            ), model_catalog=_SettingsCatalog(), now_ms=lambda: 1000,
+        )
+        profile = await selection.select_profile("profile-b", expected_version=settings_before.version)
+        model = await selection.select_model("model-b", expected_version=settings_before.version)
+        effort = await selection.select_reasoning_effort("low", expected_version=settings_before.version)
+        self.assertEqual((SettingsMutationStatus.BLOCKED, SettingsMutationReason.PROFILE_LOCKED), (profile.status, profile.reason))
+        self.assertEqual((SettingsMutationStatus.BLOCKED, SettingsMutationReason.DIALOGUE_NOT_IDLE), (model.status, model.reason))
+        self.assertEqual((SettingsMutationStatus.BLOCKED, SettingsMutationReason.DIALOGUE_NOT_IDLE), (effort.status, effort.reason))
+        self.assertEqual(settings_before, await SettingsRepository(self.storage).get())
+        self.assertEqual(DialogueState.INTERRUPTING, (await DialogueRepository(self.storage).get_live()).state)
+
+    async def test_approval_callback_created_before_interrupt_is_stale_and_one_time(self):
+        claimed, running, binding, registry = await self.seed_running()
+        approval = await ApprovalRepository(self.storage, now_ms=lambda: 1).create_pending(
+            approval_id="approval", profile_id="profile", wire_request_id=7,
+            kind=ApprovalKind.COMMAND_EXECUTION, job_id="job",
+            expected_job_version=running.version, expires_at_ms=10_000,
+        )
+        token_hash = hashlib.sha256(b"approval-token").hexdigest()
+        await CallbackActionRepository(self.storage, now_ms=lambda: 1).create(
+            token_hash_sha256=token_hash, action="approval_allow",
+            subject_type="approval", subject_id=approval.approval_id,
+            expected_version=running.version, expected_state="PENDING",
+            authorized_user_id=7, authorized_chat_id=-77, expires_at_ms=10_000,
+        )
+        interrupted = await InterruptCoordinationRepository(self.storage, now_ms=lambda: 1).claim_interrupt(
+            dialogue_id="dialogue", job_id="job",
+            expected_dialogue_version=claimed.dialogue.version,
+            expected_job_version=running.version,
+        )
+        self.assertEqual(DialogueState.INTERRUPTING, interrupted.dialogue.state)
+        approvals = ApprovalRepository(self.storage, now_ms=lambda: 1)
+        stale = await approvals.claim_callback(
+            token_hash_sha256=token_hash, authorized_user_id=7, authorized_chat_id=-77,
+        )
+        self.assertEqual(ApprovalCallbackClaimStatus.STALE, stale.status)
+        self.assertIsNone(stale.record)
+        self.assertEqual(ApprovalState.PENDING, (await approvals.get("approval")).state)
+        replay = await approvals.claim_callback(
+            token_hash_sha256=token_hash, authorized_user_id=7, authorized_chat_id=-77,
+        )
+        self.assertEqual(ApprovalCallbackClaimStatus.ALREADY_CONSUMED, replay.status)
+
+    async def test_partial_output_projection_and_accepted_retention(self):
+        async def check(status, terminal_status, interrupt_error, retention):
+            claimed, running, binding, registry = await self.seed_running()
+            life = FakeInterruptLifecycle(
+                terminal_status=terminal_status,
+                interrupt_error=interrupt_error,
+                messages=(
+                    AgentMessageCompleted(1, "item-a", "first"),
+                    AgentMessageCompleted(2, "item-b", "second"),
+                ),
+            )
+            result = await self.service(
+                registry, life, ids=lambda kind: f"{kind}-{status.value.lower()}"
+            ).interrupt(DialogueInterruptRequest("dialogue", "job", claimed.dialogue.version, running.version))
+            self.assertEqual(status, result.status)
+            self.assertIsNotNone(result.output_payload)
+            self.assertEqual(b"first\n\nsecond", result.output_payload.content)
+            self.assertEqual("OUTPUT", result.output_payload.kind.value)
+            self.assertEqual("job", result.output_payload.job_id)
+            self.assertEqual("dialogue", result.output_payload.dialogue_id)
+            self.assertEqual(retention, result.output_payload.expires_at_ms - result.output_payload.created_at_ms)
+            self.assertEqual(hashlib.sha256(b"first\n\nsecond").hexdigest(), result.output_payload.content_sha256)
+            self.assertEqual(len(b"first\n\nsecond"), result.output_payload.byte_length)
+            self.assertNotIn("first", repr(result))
+            self.assertNotIn("second", repr(result))
+
+        await check(
+            DialogueInterruptStatus.CONFIRMED, TurnTerminalStatus.COMPLETED, None,
+            P3_COMPLETED_OUTPUT_RETENTION_MS,
+        )
+        await self.reset_storage()
+        await check(
+            DialogueInterruptStatus.CONFIRMED, TurnTerminalStatus.FAILED, None,
+            P3_UNCERTAIN_OUTPUT_RETENTION_MS,
+        )
+        await self.reset_storage()
+        await check(
+            DialogueInterruptStatus.UNKNOWN, TurnTerminalStatus.UNKNOWN,
+            RuntimeError("PRIVATE_UNKNOWN_OUTPUT_ERROR"), P3_UNCERTAIN_OUTPUT_RETENTION_MS,
+        )
+
     async def test_startup_recovery_is_no_p1_idempotent_and_preserves_evidence(self):
         claimed, running, binding, registry = await self.seed_running()
         claimed_interrupt = await InterruptCoordinationRepository(self.storage, now_ms=lambda: 1).claim_interrupt(
@@ -420,6 +818,208 @@ class DialogueInterruptApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
             "SELECT content FROM transient_payloads WHERE payload_id = 'input-job'").fetchone()[0])
         self.assertEqual(b"input", payload)
         self.assertEqual(SCHEMA_V1_DDL_SHA256, "b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c")
+
+    async def test_terminal_reconstruction_requires_exact_canonical_error_semantics(self):
+        async def canonical(outcome, *, natural=False):
+            claimed, running, binding, registry = await self.seed_running()
+            coordinator = InterruptCoordinationRepository(self.storage, now_ms=lambda: 1)
+            interrupted = await coordinator.claim_interrupt(
+                dialogue_id="dialogue", job_id="job",
+                expected_dialogue_version=claimed.dialogue.version,
+                expected_job_version=running.version,
+            )
+            error_class = None if outcome is TurnTerminalOutcome.COMPLETED else (
+                "CODEX_TURN_FAILED" if outcome is TurnTerminalOutcome.FAILED else "CODEX_AMBIGUOUS"
+            )
+            if natural:
+                await coordinator.restore_rejected_interrupt(
+                    dialogue_id="dialogue", job_id="job",
+                    claimed_dialogue_version=interrupted.dialogue.version,
+                    expected_job_version=running.version,
+                )
+                terminal = await coordinator.reconcile_natural_terminal(
+                    dialogue_id="dialogue", job_id="job", profile_id="profile",
+                    thread_id="thread", codex_turn_id="turn-job",
+                    base_dialogue_version=claimed.dialogue.version,
+                    expected_job_version=running.version, outcome=outcome,
+                    error_class=error_class,
+                )
+            else:
+                terminal = await coordinator.terminalize_interrupt(
+                    dialogue_id="dialogue", job_id="job", profile_id="profile",
+                    thread_id="thread", codex_turn_id="turn-job",
+                    claimed_dialogue_version=interrupted.dialogue.version,
+                    expected_job_version=running.version, outcome=outcome,
+                    error_class=error_class,
+                )
+            return claimed, running, terminal
+
+        await canonical(TurnTerminalOutcome.COMPLETED)
+        await self.storage.write(lambda c: (
+            c.execute("UPDATE turn_jobs SET error_class = 'PRIVATE_CORRUPT_TERMINAL' WHERE job_id = 'job'"),
+            None,
+        )[-1])
+        clock = _CountingClock()
+        with self.assertRaises(RepositoryError) as raised:
+            await InterruptCoordinationRepository(self.storage, now_ms=clock).terminalize_interrupt(
+                dialogue_id="dialogue", job_id="job", profile_id="profile", thread_id="thread",
+                codex_turn_id="turn-job", claimed_dialogue_version=3,
+                expected_job_version=3, outcome=TurnTerminalOutcome.COMPLETED,
+                error_class=None,
+            )
+        self.assertEqual(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+        self.assertNotIn("PRIVATE_CORRUPT_TERMINAL", str(raised.exception) + repr(raised.exception))
+        self.assertEqual(0, clock.calls)
+
+        await self.reset_storage()
+        claimed, running, failed = await canonical(TurnTerminalOutcome.FAILED)
+        self.assertEqual(TurnJobState.FAILED, failed.job.state)
+        self.assertEqual(DialogueState.IDLE, failed.dialogue.state)
+        self.assertEqual("CODEX_TURN_FAILED", failed.job.error_class)
+        self.assertIsNone(failed.dialogue.last_error_class)
+        clock = _CountingClock()
+        rebuilt = await InterruptCoordinationRepository(self.storage, now_ms=clock).terminalize_interrupt(
+            dialogue_id="dialogue", job_id="job", profile_id="profile", thread_id="thread",
+            codex_turn_id="turn-job", claimed_dialogue_version=3,
+            expected_job_version=3, outcome=TurnTerminalOutcome.FAILED,
+            error_class="CODEX_TURN_FAILED",
+        )
+        self.assertEqual(failed, rebuilt)
+        self.assertEqual(0, clock.calls)
+        await self.storage.write(lambda c: (
+            c.execute("UPDATE turn_jobs SET error_class = 'WRONG_TERMINAL_ERROR' WHERE job_id = 'job'"),
+            None,
+        )[-1])
+        clock = _CountingClock()
+        with self.assertRaises(RepositoryError) as raised:
+            await InterruptCoordinationRepository(self.storage, now_ms=clock).terminalize_interrupt(
+                dialogue_id="dialogue", job_id="job", profile_id="profile", thread_id="thread",
+                codex_turn_id="turn-job", claimed_dialogue_version=3,
+                expected_job_version=3, outcome=TurnTerminalOutcome.FAILED,
+                error_class="CODEX_TURN_FAILED",
+            )
+        self.assertEqual(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+        self.assertEqual(0, clock.calls)
+
+        await self.reset_storage()
+        claimed, running, natural_failed = await canonical(TurnTerminalOutcome.FAILED, natural=True)
+        self.assertEqual(DialogueState.ERROR, natural_failed.dialogue.state)
+        self.assertEqual("CODEX_TURN_FAILED", natural_failed.dialogue.last_error_class)
+        clock = _CountingClock()
+        rebuilt_natural = await InterruptCoordinationRepository(self.storage, now_ms=clock).reconcile_natural_terminal(
+            dialogue_id="dialogue", job_id="job", profile_id="profile", thread_id="thread",
+            codex_turn_id="turn-job", base_dialogue_version=claimed.dialogue.version,
+            expected_job_version=running.version, outcome=TurnTerminalOutcome.FAILED,
+            error_class="CODEX_TURN_FAILED",
+        )
+        self.assertEqual(natural_failed, rebuilt_natural)
+        self.assertEqual(0, clock.calls)
+
+        for corrupt_job, corrupt_dialogue in (("WRONG_TERMINAL_ERROR", None), (None, "WRONG_TERMINAL_ERROR")):
+            await self.reset_storage()
+            await canonical(TurnTerminalOutcome.UNKNOWN)
+            await self.storage.write(lambda c, cj=corrupt_job, cd=corrupt_dialogue: (
+                c.execute("UPDATE turn_jobs SET error_class = ? WHERE job_id = 'job'", (cj,)) if cj else
+                c.execute("UPDATE dialogues SET last_error_class = ? WHERE dialogue_id = 'dialogue'", (cd,)),
+                None,
+            )[-1])
+            clock = _CountingClock()
+            with self.assertRaises(RepositoryError) as raised:
+                await InterruptCoordinationRepository(self.storage, now_ms=clock).terminalize_interrupt(
+                    dialogue_id="dialogue", job_id="job", profile_id="profile", thread_id="thread",
+                    codex_turn_id="turn-job", claimed_dialogue_version=3,
+                    expected_job_version=3, outcome=TurnTerminalOutcome.UNKNOWN,
+                    error_class="CODEX_AMBIGUOUS",
+                )
+            self.assertEqual(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+            self.assertNotIn("WRONG_TERMINAL_ERROR", str(raised.exception) + repr(raised.exception))
+            self.assertEqual(0, clock.calls)
+
+    async def test_terminal_version_overflow_is_invariant_before_clock_and_output(self):
+        async def overflow(axis):
+            claimed, running, binding, registry = await self.seed_running()
+            coordinator = InterruptCoordinationRepository(self.storage, now_ms=lambda: 1)
+            interrupted = await coordinator.claim_interrupt(
+                dialogue_id="dialogue", job_id="job",
+                expected_dialogue_version=claimed.dialogue.version,
+                expected_job_version=running.version,
+            )
+            if axis == "job":
+                await self.storage.write(lambda c: (
+                    c.execute("UPDATE turn_jobs SET version = ? WHERE job_id = 'job'", (MAX_SQLITE_INT,)), None
+                )[-1])
+                claimed_dialogue_version = interrupted.dialogue.version
+                expected_job_version = MAX_SQLITE_INT
+            else:
+                await self.storage.write(lambda c: (
+                    c.execute("UPDATE dialogues SET version = ? WHERE dialogue_id = 'dialogue'", (MAX_SQLITE_INT,)), None
+                )[-1])
+                claimed_dialogue_version = MAX_SQLITE_INT
+                expected_job_version = running.version
+            before = await self.storage.read(lambda c: tuple(c.execute(
+                "SELECT state, version, error_class FROM turn_jobs WHERE job_id = 'job'"
+            ).fetchone()) + tuple(c.execute(
+                "SELECT state, version, last_error_class FROM dialogues WHERE dialogue_id = 'dialogue'"
+            ).fetchone()))
+            clock = _CountingClock()
+            with self.assertRaises(RepositoryError) as raised:
+                await InterruptCoordinationRepository(self.storage, now_ms=clock).terminalize_interrupt(
+                    dialogue_id="dialogue", job_id="job", profile_id="profile", thread_id="thread",
+                    codex_turn_id="turn-job", claimed_dialogue_version=claimed_dialogue_version,
+                    expected_job_version=expected_job_version, outcome=TurnTerminalOutcome.COMPLETED,
+                    error_class=None, output_payload_id=f"output-{axis}", output_content=b"valid",
+                    output_expires_at_ms=MAX_SQLITE_INT,
+                )
+            self.assertEqual(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+            self.assertEqual(0, clock.calls)
+            after = await self.storage.read(lambda c: tuple(c.execute(
+                "SELECT state, version, error_class FROM turn_jobs WHERE job_id = 'job'"
+            ).fetchone()) + tuple(c.execute(
+                "SELECT state, version, last_error_class FROM dialogues WHERE dialogue_id = 'dialogue'"
+            ).fetchone()))
+            self.assertEqual(before, after)
+            self.assertEqual(0, await self.storage.read(lambda c: c.execute(
+                "SELECT COUNT(*) FROM transient_payloads WHERE kind = 'OUTPUT'"
+            ).fetchone()[0]))
+
+        await overflow("job")
+        await self.reset_storage()
+        await overflow("dialogue")
+
+    async def test_exact_max_terminal_reconstruction_is_idempotent_without_clock(self):
+        claimed, running, binding, registry = await self.seed_running()
+        coordinator = InterruptCoordinationRepository(self.storage, now_ms=lambda: 1)
+        interrupted = await coordinator.claim_interrupt(
+            dialogue_id="dialogue", job_id="job",
+            expected_dialogue_version=claimed.dialogue.version,
+            expected_job_version=running.version,
+        )
+        terminal = await coordinator.terminalize_interrupt(
+            dialogue_id="dialogue", job_id="job", profile_id="profile", thread_id="thread",
+            codex_turn_id="turn-job", claimed_dialogue_version=interrupted.dialogue.version,
+            expected_job_version=running.version, outcome=TurnTerminalOutcome.COMPLETED,
+            error_class=None,
+        )
+        await self.storage.write(lambda c: (
+            c.execute("UPDATE turn_jobs SET version = ? WHERE job_id = 'job'", (MAX_SQLITE_INT,)),
+            c.execute("UPDATE dialogues SET version = ? WHERE dialogue_id = 'dialogue'", (MAX_SQLITE_INT,)),
+            None,
+        )[-1])
+        clock = _CountingClock()
+        reconstructed = await InterruptCoordinationRepository(self.storage, now_ms=clock).terminalize_interrupt(
+            dialogue_id="dialogue", job_id="job", profile_id="profile", thread_id="thread",
+            codex_turn_id="turn-job", claimed_dialogue_version=MAX_SQLITE_INT - 1,
+            expected_job_version=MAX_SQLITE_INT - 1, outcome=TurnTerminalOutcome.COMPLETED,
+            error_class=None,
+        )
+        self.assertEqual(TurnJobState.CODEX_COMPLETED, reconstructed.job.state)
+        self.assertEqual(DialogueState.IDLE, reconstructed.dialogue.state)
+        self.assertEqual(MAX_SQLITE_INT, reconstructed.job.version)
+        self.assertEqual(MAX_SQLITE_INT, reconstructed.dialogue.version)
+        self.assertEqual(0, clock.calls)
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute(
+            "SELECT COUNT(*) FROM transient_payloads WHERE kind = 'OUTPUT'"
+        ).fetchone()[0]))
 
 
 if __name__ == "__main__":

@@ -154,3 +154,65 @@ Effect assertions:
 `PRODUCTION_CODEX_HOME_READ=NO`
 
 `PRODUCTION_SERVICES_CHANGED=NO`
+
+## Architect first repair
+
+This section is factual first-repair executor evidence only. P3.4 is not
+architect-accepted, Issue #26 remains open, and no P3.5 work was started.
+
+Rejected candidate: `2f63830c2e63e9a3564e1fed18eb7d55e36f8cd8`.
+
+Architect review comments: `5559617303`, `5559630444`.
+
+Repair closure:
+
+- Terminal proof now requires `TurnTerminalResult.binding is binding` for
+  direct CONFIRMED/RECONCILED results, rejected carried terminals, collector
+  results, and malformed-result fallback collection. Equal-looking cloned
+  bindings are rejected; both direct and collector clone tests finish as
+  `UNKNOWN` with one interrupt call, one collector call, and no redispatch.
+- `TURN_INTERRUPT_NOT_ACTIVE` and `TURN_INTERRUPT_BUSY` use exactly one exact
+  collector reconciliation attempt and never retry. `TURN_INTERRUPT_NOT_ACTIVE`
+  with an exact completed collector is `RECONCILED`; non-definitive collection
+  remains `UNKNOWN`.
+- Local `TURN_REQUEST_INVALID`, `TURN_PRECONDITION_CHANGED`, and other
+  non-authorized local `TurnLifecycleError` categories fail closed as
+  application `INVARIANT`, with no collector call, no output, and durable
+  `INTERRUPTING`/`CODEX_RUNNING` state preserved.
+- Application output-clock failures retain `STORAGE` classification and redact
+  the raw clock exception; invalid output ID generation remains `INVARIANT`.
+- Idempotent terminal reconstruction now requires the exact canonical error
+  semantics for completed, failed interrupt, failed natural-terminal, and
+  unknown shapes. Wrong and mismatched sanitized error classes are rejected as
+  `INVARIANT_VIOLATION` without a clock call or corrupt-row normalization.
+- Still-running terminalization rejects either job or dialogue version at
+  `MAX_SQLITE_INT` as `INVARIANT_VIOLATION` before output collision work,
+  clock, increment, or mutation. Exact canonical already-terminal rows remain
+  reconstructable at maximum version without a clock or duplicate output.
+- The real admitted-turn runner proof publishes the exact P1 start binding into
+  the shared registry while `CODEX_RUNNING` and retires it after terminal
+  ownership. The real runner/interrupt race proves `finish_codex` is invoked
+  first, then the narrow P3.4 reconciliation fallback, with one terminal
+  mutation and one OUTPUT payload.
+- A real interrupt claim leaves settings profile, model, and reasoning
+  mutations blocked under the accepted P3.3 locks. An approval and exact
+  callback created while running becomes `STALE` after the interrupt claim,
+  is consumed once, leaves approval `PENDING`, and replays as
+  `ALREADY_CONSUMED`.
+- Completed output preserves the accepted ordered separator projection and
+  one-hour retention. Failed and unknown partial output is preserved with
+  24-hour uncertain retention. Empty output still creates no output ID.
+
+Final repair focused counts are `6` unit and `31` integration tests. Prior
+regressions passed at the requested authority counts: P3.1 `11/26`, P3.2
+`2/21`, P3.3 `5/25`; P2.C1 `5/1`; P2.6b `5/12/8/3`; P2.6a `4/28`; P2.5
+`4/18`; P2.4b `6/25`; P2.4a `8/31`; P2.3 `7/28`; P2.2 `6/20`; P2.1
+`8/31`; P1.8 `28`; and P1.10 `6/1/4`. Full discovery arithmetic is
+`596 + 6 + 31 = 633`, with `633` observed passing tests.
+
+Compile/import, DDL hash, diff-boundary, and security/effect scans were run
+for the repair. The known P1.6 pending-task warning was observed during full
+discovery and remains pre-existing; `P1_6_WARNING_INTRODUCED_BY_P3_4_REPAIR=NO`.
+All tests used temporary SQLite and fake lifecycle/catalog/workdir ports. No
+real Codex, Telegram, network business effect, production database/state root,
+service mutation, credentials, or raw content diagnostics were used.
