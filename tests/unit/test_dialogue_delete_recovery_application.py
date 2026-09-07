@@ -1,3 +1,4 @@
+import asyncio
 import inspect
 import os
 import tempfile
@@ -5,6 +6,7 @@ import unittest
 from dataclasses import FrozenInstanceError, fields, is_dataclass
 
 from codex_control.application import (
+    ActiveTurnRegistry,
     DialogueDeleteError,
     DialogueDeleteErrorCategory,
     DialogueDeleteReason,
@@ -18,6 +20,7 @@ from codex_control.application import (
     DialogueRecoveryService,
     DialogueRecoveryStatus,
 )
+from codex_control.adapters.codex.turn_lifecycle import TurnBinding
 from codex_control.storage import SqliteStorage
 
 
@@ -111,6 +114,65 @@ class DialogueDeleteRecoveryApplicationUnitTests(unittest.IsolatedAsyncioTestCas
         result = await recovery.recover_startup()
         self.assertEqual(DialogueRecoveryStatus.NO_ACTION, result.status)
         self.assertEqual([], calls)
+
+    async def test_registry_waits_for_exact_active_lease(self):
+        registry = ActiveTurnRegistry()
+        binding = TurnBinding("profile", "thread", "turn")
+        registry.publish("job", binding)
+        waiter = asyncio.create_task(registry.wait_retired("job", binding))
+        await asyncio.sleep(0)
+        self.assertFalse(waiter.done())
+        registry.retire("job", binding)
+        await waiter
+
+    async def test_registry_stale_retirement_does_not_release_exact_waiter(self):
+        registry = ActiveTurnRegistry()
+        binding = TurnBinding("profile", "thread", "turn")
+        clone = TurnBinding("profile", "thread", "turn")
+        registry.publish("job", binding)
+        waiter = asyncio.create_task(registry.wait_retired("job", binding))
+        await asyncio.sleep(0)
+        registry.retire("job", clone)
+        self.assertFalse(waiter.done())
+        registry.retire("job", binding)
+        await waiter
+
+    async def test_registry_already_retired_requires_exact_identity(self):
+        registry = ActiveTurnRegistry()
+        binding = TurnBinding("profile", "thread", "turn")
+        clone = TurnBinding("profile", "thread", "turn")
+        registry.publish("job", binding)
+        registry.retire("job", binding)
+        await registry.wait_retired("job", binding)
+        with self.assertRaises(RuntimeError):
+            await registry.wait_retired("job", clone)
+
+    async def test_registry_replacement_fails_old_waiter_closed(self):
+        registry = ActiveTurnRegistry()
+        old = TurnBinding("profile", "thread", "old")
+        new = TurnBinding("profile", "thread", "new")
+        registry.publish("job", old)
+        waiter = asyncio.create_task(registry.wait_retired("job", old))
+        await asyncio.sleep(0)
+        registry.retire("job", old)
+        registry.publish("job", new)
+        with self.assertRaises(RuntimeError):
+            await waiter
+
+    async def test_registry_replacement_waits_for_new_exact_owner(self):
+        registry = ActiveTurnRegistry()
+        old = TurnBinding("profile", "thread", "old")
+        new = TurnBinding("profile", "thread", "new")
+        registry.publish("job", old)
+        registry.retire("job", old)
+        registry.publish("job", new)
+        waiter = asyncio.create_task(registry.wait_retired("job", new))
+        await asyncio.sleep(0)
+        self.assertFalse(waiter.done())
+        registry.retire("job", old)
+        self.assertFalse(waiter.done())
+        registry.retire("job", new)
+        await waiter
 
 
 if __name__ == "__main__":

@@ -32,6 +32,11 @@ _ACTIVE_STATES = frozenset(
     )
 )
 
+_UNBOUND_CREATE_ERROR_CLASSES = frozenset(
+    ("CODEX_PROCESS", "CODEX_THREAD_FAILED", "APPLICATION_ADMISSION_FAILED")
+)
+_BOUND_ERROR_CLASSES = frozenset(("CODEX_PROCESS", "CODEX_TURN_FAILED"))
+
 
 def _invalid() -> RepositoryError:
     return RepositoryError(RepositoryErrorCategory.INVALID_ARGUMENT)
@@ -93,6 +98,116 @@ def _validate_owner(dialogue: DialogueRecord, job: TurnJobRecord) -> None:
         raise _invariant()
 
 
+def _validate_received_job(job: TurnJobRecord, *, unbound: bool) -> None:
+    if (
+        job.state is not TurnJobState.RECEIVED
+        or (job.thread_id is not None if unbound else job.thread_id is None)
+        or job.codex_turn_id is not None
+        or job.error_class is not None
+        or job.model_id is None
+        or job.reasoning_effort is None
+    ):
+        raise _invariant()
+
+
+def _validate_canonical_dialogue(
+    dialogue: DialogueRecord, jobs: tuple[TurnJobRecord, ...]
+) -> None:
+    """Apply P3.5's complete cross-table dialogue state authority.
+
+    Core materialization validates schema shape.  This layer additionally
+    validates the application meaning of every state, including dialogue-side
+    binding and error fields.
+    """
+    state = dialogue.state
+    if state is DialogueState.CREATING:
+        if dialogue.thread_id is not None or dialogue.last_error_class is not None:
+            raise _invariant()
+        if len(jobs) > 1:
+            raise _invariant()
+        if jobs:
+            _validate_received_job(jobs[0], unbound=True)
+        return
+
+    if state is DialogueState.CREATE_UNKNOWN:
+        if dialogue.thread_id is not None or dialogue.last_error_class != "CODEX_AMBIGUOUS":
+            raise _invariant()
+        if len(jobs) > 1:
+            raise _invariant()
+        if jobs:
+            _validate_received_job(jobs[0], unbound=True)
+        return
+
+    if state is DialogueState.ERROR and dialogue.thread_id is None:
+        if dialogue.last_error_class not in _UNBOUND_CREATE_ERROR_CLASSES:
+            raise _invariant()
+        if len(jobs) > 1:
+            raise _invariant()
+        if jobs:
+            _validate_received_job(jobs[0], unbound=True)
+        return
+
+    if state is DialogueState.ERROR:
+        if dialogue.last_error_class not in _BOUND_ERROR_CLASSES or jobs:
+            raise _invariant()
+        return
+
+    if state is DialogueState.IDLE:
+        if dialogue.thread_id is None or dialogue.last_error_class is not None:
+            raise _invariant()
+        if len(jobs) > 1:
+            raise _invariant()
+        if jobs:
+            if jobs[0].state is not TurnJobState.RECEIVED:
+                raise _invariant()
+            _validate_received_job(jobs[0], unbound=False)
+            _validate_owner(dialogue, jobs[0])
+        return
+
+    if state is DialogueState.TURN_RUNNING:
+        if dialogue.thread_id is None or dialogue.last_error_class is not None or len(jobs) != 1:
+            raise _invariant()
+        if jobs[0].state not in (
+            TurnJobState.CLAIMED, TurnJobState.CODEX_STARTING, TurnJobState.CODEX_RUNNING
+        ):
+            raise _invariant()
+        _validate_owner(dialogue, jobs[0])
+        if jobs[0].state is TurnJobState.CODEX_STARTING and jobs[0].codex_turn_id is not None:
+            raise _invariant()
+        if jobs[0].state is TurnJobState.CODEX_RUNNING and jobs[0].codex_turn_id is None:
+            raise _invariant()
+        if jobs[0].error_class is not None:
+            raise _invariant()
+        return
+
+    if state is DialogueState.INTERRUPTING:
+        if dialogue.thread_id is None or dialogue.last_error_class is not None or len(jobs) != 1:
+            raise _invariant()
+        if jobs[0].state is not TurnJobState.CODEX_RUNNING or jobs[0].codex_turn_id is None:
+            raise _invariant()
+        _validate_owner(dialogue, jobs[0])
+        if jobs[0].error_class is not None:
+            raise _invariant()
+        return
+
+    if state is DialogueState.TURN_UNKNOWN:
+        if dialogue.thread_id is None or dialogue.last_error_class != "CODEX_AMBIGUOUS" or jobs:
+            raise _invariant()
+        return
+
+    if state in (DialogueState.DELETE_PENDING, DialogueState.DELETING):
+        if dialogue.thread_id is None or dialogue.last_error_class is not None or jobs:
+            raise _invariant()
+        return
+
+    if state is DialogueState.DELETE_UNKNOWN:
+        if dialogue.thread_id is None or dialogue.last_error_class != "DELETE_UNKNOWN" or jobs:
+            raise _invariant()
+        return
+
+    raise _invariant()
+
+
 def _snapshot(connection: Any) -> ApplicationRecoverySnapshot:
     row = _dialogue_row(connection)
     if row is None:
@@ -122,6 +237,7 @@ def _snapshot(connection: Any) -> ApplicationRecoverySnapshot:
         else:
             _validate_owner(dialogue, job)
         _validate_ingress_and_input(connection, job)
+    _validate_canonical_dialogue(dialogue, jobs)
     return ApplicationRecoverySnapshot(dialogue, jobs)
 
 

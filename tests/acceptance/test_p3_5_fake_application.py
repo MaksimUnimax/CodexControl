@@ -27,7 +27,6 @@ from codex_control.application import (
     DialogueDeleteService,
     DialogueDeleteRequest,
     DialogueDeleteStatus,
-    DialogueApplicationError,
     DialogueInterruptService,
     DialogueRecoveryService,
     DialogueRecoveryStatus,
@@ -74,31 +73,34 @@ class _Thread:
 
 class _FakeP3Lifecycle:
     def __init__(self):
-        self.turn_binding = TurnBinding("profile-a", "thread-one", "turn-one")
+        self.turn_binding = None
         self.start_calls = []
         self.wait_calls = []
         self.interrupt_calls = []
         self.wait_entered = asyncio.Event()
-        self.release_wait = asyncio.Event()
-        self.interrupt_terminal = False
+        self.collector_ready = asyncio.Event()
+        self.collector_ready.set()
 
     async def start_turn(self, **kwargs):
         self.start_calls.append(kwargs)
+        self.turn_binding = TurnBinding("profile-a", "thread-one", f"turn-{len(self.start_calls)}")
+        if len(self.start_calls) > 1:
+            self.collector_ready.clear()
         return TurnStartResult(TurnStartStatus.CONFIRMED, self.turn_binding)
 
     async def wait_turn(self, binding):
         self.wait_calls.append(binding)
         self.wait_entered.set()
-        if len(self.wait_calls) > 1:
-            await self.release_wait.wait()
+        await self.collector_ready.wait()
         return TurnTerminalResult(
-            binding, TurnTerminalStatus.FAILED if self.interrupt_terminal else TurnTerminalStatus.COMPLETED,
+            binding,
+            TurnTerminalStatus.FAILED if binding.turn_id == "turn-2" else TurnTerminalStatus.COMPLETED,
             (AgentMessageCompleted(1, "item", "fake output"),),
         )
 
     async def interrupt_turn(self, binding):
         self.interrupt_calls.append(binding)
-        self.interrupt_terminal = True
+        self.collector_ready.set()
         return TurnInterruptResult(
             TurnInterruptStatus.CONFIRMED,
             binding,
@@ -231,7 +233,7 @@ class FinalP3FakeApplicationAcceptance(unittest.IsolatedAsyncioTestCase):
         fake_delete = _FakeDelete()
         delete = DialogueDeleteService(
             self.storage, server_id="server", thread_lifecycle=fake_delete,
-            interrupt_service=interrupt, now_ms=lambda: 40,
+            interrupt_service=interrupt, active_turn_registry=registry, now_ms=lambda: 40,
         )
         delete_task = asyncio.create_task(
             delete.delete(DialogueDeleteRequest(running.dialogue_id, running.version))
@@ -241,6 +243,7 @@ class FinalP3FakeApplicationAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(DialogueState.DELETING, deleting.state)
         self.assertEqual(1, len(lifecycle.interrupt_calls))
         self.assertEqual(1, len(fake_delete.calls))
+        self.assertIsNone(registry.lookup(running_job.job_id))
         blocked_delete_prompt = await turns.execute(ExistingDialoguePromptRequest(4, -1, 4, "not-admitted"))
         self.assertEqual(ExistingDialogueTurnStatus.BLOCKED, blocked_delete_prompt.status)
         fake_delete.release.set()
@@ -256,11 +259,9 @@ class FinalP3FakeApplicationAcceptance(unittest.IsolatedAsyncioTestCase):
             await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM ingress_updates").fetchone()[0]),
             2,
         )
-        lifecycle.release_wait.set()
-        try:
-            await second_task
-        except DialogueApplicationError:
-            pass
+        runner_result = await second_task
+        self.assertEqual("FAILED", runner_result.status.value)
+        self.assertEqual("CODEX_TURN_FAILED", runner_result.job.error_class)
 
         replay = await delete.delete(DialogueDeleteRequest(running.dialogue_id, running.version))
         self.assertEqual(DialogueDeleteStatus.DELETED, replay.status)

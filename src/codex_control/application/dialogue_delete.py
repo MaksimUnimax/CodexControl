@@ -17,6 +17,7 @@ from codex_control.adapters.codex.thread_lifecycle import (
     ThreadOperationResult,
     ThreadOperationStatus,
 )
+from codex_control.adapters.codex.turn_lifecycle import TurnBinding
 from codex_control.storage import (
     DeletionRepository,
     DeletionTombstoneRecord,
@@ -26,6 +27,8 @@ from codex_control.storage import (
     RepositoryError,
     RepositoryErrorCategory,
     SqliteStorage,
+    TransientPayloadRecord,
+    TransientPayloadKind,
     TurnJobRecord,
     TurnJobState,
 )
@@ -41,6 +44,7 @@ from .dialogue_interrupt import (
     DialogueInterruptResult,
     DialogueInterruptStatus,
 )
+from .active_turn_registry import ActiveTurnRegistry
 
 
 P3_DELETE_TOMBSTONE_RETENTION_MS = 604800000
@@ -144,6 +148,17 @@ def _repository_error(error: BaseException) -> DialogueDeleteError:
     return _storage()
 
 
+def _post_confirmed_repository_error(error: BaseException) -> DialogueDeleteError:
+    """Map failures after DELETE_CONFIRMED without reviving caller blame."""
+    if isinstance(error, StorageError):
+        return _storage()
+    if isinstance(error, RepositoryError):
+        if error.category is RepositoryErrorCategory.CLOCK_INVALID:
+            return _storage()
+        return _invariant()
+    return _storage()
+
+
 def _interrupt_error(error: DialogueInterruptError) -> DialogueDeleteError:
     if error.category in (
         DialogueInterruptErrorCategory.INVALID_ARGUMENT,
@@ -196,12 +211,23 @@ def _valid_interrupt_terminal_result(
         or terminal_dialogue.profile_id != original_dialogue.profile_id
         or terminal_dialogue.thread_id != original_dialogue.thread_id
         or terminal_dialogue.state is not DialogueState.IDLE
-        or terminal_dialogue.version not in (original_dialogue.version + 2, original_dialogue.version + 3)
+        or terminal_dialogue.version != original_dialogue.version + 2
         or terminal_dialogue.created_at_ms != original_dialogue.created_at_ms
         or terminal_dialogue.updated_at_ms < original_dialogue.updated_at_ms
         or terminal_dialogue.last_error_class is not None
     ):
         return False
+    if result.reason is not None:
+        return False
+    if result.output_payload is not None:
+        payload = result.output_payload
+        if (
+            type(payload) is not TransientPayloadRecord
+            or payload.dialogue_id != original_dialogue.dialogue_id
+            or payload.job_id != original_job.job_id
+            or payload.kind is not TransientPayloadKind.OUTPUT
+        ):
+            return False
     return True
 
 
@@ -246,6 +272,7 @@ class DialogueDeleteService:
         server_id: str,
         thread_lifecycle: DeleteLifecyclePort,
         interrupt_service: object | None = None,
+        active_turn_registry: ActiveTurnRegistry | None = None,
         now_ms: Callable[[], int] | None = None,
         id_factory: Callable[[str], str] | None = None,
     ) -> None:
@@ -257,6 +284,8 @@ class DialogueDeleteService:
             raise _invalid()
         if interrupt_service is not None and not _async_callable(interrupt_service, "interrupt"):
             raise _invalid()
+        if active_turn_registry is not None and type(active_turn_registry) is not ActiveTurnRegistry:
+            raise _invalid()
         if now_ms is not None and not callable(now_ms):
             raise _invalid()
         if id_factory is not None and not callable(id_factory):
@@ -265,6 +294,7 @@ class DialogueDeleteService:
         self._server_id = server_id
         self._thread_lifecycle = thread_lifecycle
         self._interrupt_service = interrupt_service
+        self._active_turn_registry = active_turn_registry
         self._clock = now_ms if now_ms is not None else _default_clock
         self._id_factory = id_factory if id_factory is not None else _default_id_factory
         self._owned: dict[str, asyncio.Task[DialogueDeleteResult]] = {}
@@ -301,6 +331,12 @@ class DialogueDeleteService:
             )
         if dialogue.server_id != self._server_id:
             raise _invariant()
+        try:
+            snapshot = await ApplicationRecoveryRepository(self._storage, now_ms=self._clock).inspect()
+        except (StorageError, RepositoryError) as error:
+            raise _repository_error(error) from None
+        if snapshot.dialogue != dialogue:
+            raise _invariant()
         # These durable states are already post-claim authorities.  A replay
         # must report their finite state rather than accidentally becoming a
         # new request against an older optimistic version.
@@ -315,14 +351,8 @@ class DialogueDeleteService:
                 DialogueDeleteStatus.BLOCKED, dialogue, None, DialogueDeleteReason.DELETE_IN_PROGRESS
             )
 
-        snapshot = None
+        active_binding = None
         if dialogue.state is DialogueState.TURN_RUNNING:
-            try:
-                snapshot = await ApplicationRecoveryRepository(self._storage, now_ms=self._clock).inspect()
-            except (StorageError, RepositoryError) as error:
-                raise _repository_error(error) from None
-            if snapshot.dialogue != dialogue:
-                raise _invariant()
             if len(snapshot.active_jobs) != 1:
                 raise _invariant()
             active = snapshot.active_jobs[0]
@@ -331,6 +361,29 @@ class DialogueDeleteService:
                     DialogueDeleteStatus.BLOCKED, dialogue, None, DialogueDeleteReason.DIALOGUE_NOT_READY
                 )
             if active.state is not TurnJobState.CODEX_RUNNING:
+                raise _invariant()
+            if self._active_turn_registry is None:
+                return DialogueDeleteResult(
+                    DialogueDeleteStatus.BLOCKED, dialogue, None,
+                    DialogueDeleteReason.INTERRUPT_UNRESOLVED,
+                )
+            interrupt_registry = getattr(self._interrupt_service, "_registry", None)
+            if interrupt_registry is not None and interrupt_registry is not self._active_turn_registry:
+                raise _invariant()
+            try:
+                active_binding = self._active_turn_registry.lookup(active.job_id)
+            except Exception:
+                raise _invariant() from None
+            if active_binding is None:
+                return DialogueDeleteResult(
+                    DialogueDeleteStatus.BLOCKED, dialogue, None,
+                    DialogueDeleteReason.INTERRUPT_UNRESOLVED,
+                )
+            if type(active_binding) is not TurnBinding or (
+                active_binding.profile_id != active.profile_id
+                or active_binding.thread_id != active.thread_id
+                or active_binding.turn_id != active.codex_turn_id
+            ):
                 raise _invariant()
         elif dialogue.state is DialogueState.DELETE_PENDING:
             pass
@@ -343,7 +396,7 @@ class DialogueDeleteService:
                 DialogueDeleteStatus.BLOCKED, dialogue, None, DialogueDeleteReason.DIALOGUE_NOT_READY
             )
 
-        task = asyncio.create_task(self._orchestrate(request, dialogue, snapshot))
+        task = asyncio.create_task(self._orchestrate(request, dialogue, snapshot, active_binding))
         self._owned[dialogue.dialogue_id] = task
         try:
             return await self._await_owned(task)
@@ -351,7 +404,7 @@ class DialogueDeleteService:
             if self._owned.get(dialogue.dialogue_id) is task:
                 self._owned.pop(dialogue.dialogue_id, None)
 
-    async def _orchestrate(self, request, dialogue, snapshot) -> DialogueDeleteResult:
+    async def _orchestrate(self, request, dialogue, snapshot, active_binding) -> DialogueDeleteResult:
         current = dialogue
         if current.state is DialogueState.TURN_RUNNING:
             if self._interrupt_service is None or snapshot is None or len(snapshot.active_jobs) != 1:
@@ -371,6 +424,14 @@ class DialogueDeleteService:
             if interrupt.status in (DialogueInterruptStatus.CONFIRMED, DialogueInterruptStatus.RECONCILED):
                 if not _valid_interrupt_terminal_result(current, job, interrupt):
                     raise _invariant()
+                if self._active_turn_registry is None or active_binding is None:
+                    raise _invariant()
+                try:
+                    await self._active_turn_registry.wait_retired(job.job_id, active_binding)
+                    if self._active_turn_registry.lookup(job.job_id) is not None:
+                        raise RuntimeError("runner ownership remains active")
+                except Exception:
+                    raise _invariant() from None
                 current = interrupt.dialogue
             elif interrupt.status in (DialogueInterruptStatus.REJECTED, DialogueInterruptStatus.UNKNOWN):
                 return DialogueDeleteResult(
@@ -441,7 +502,7 @@ class DialogueDeleteService:
                     tombstone_expires_at_ms=expiry,
                 )
             except (StorageError, RepositoryError) as error:
-                raise _repository_error(error) from None
+                raise _post_confirmed_repository_error(error) from None
             if (
                 finalized.tombstone.dialogue_id != deleting.dialogue_id
                 or finalized.tombstone.stale_generation != deleting.version

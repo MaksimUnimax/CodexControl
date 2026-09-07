@@ -233,3 +233,92 @@ acceptance, close Issue #27, mark P3 complete, or authorize P4.
 - All tests used temporary SQLite and fake lifecycle ports. No real Codex,
   thread/delete, turn/interrupt, Telegram, network, production database,
   production state root, service, auth file, or secrets file was touched.
+
+## Architect second repair
+
+This section is factual second-repair evidence only. It does not claim
+architect acceptance, close Issue #27, mark P3 complete, or authorize P4.
+
+- Repair parent: `bcc84e6941752b7832b5f7608b44cab372b174e8`
+- Architect addendum: Issue #27 comment `5565047063`
+- Required original architect base remains:
+  `3e19f1028916613f7d89b254fdd7bf04505a2fb5`
+- Issue #27 comments were read from the repository API, including
+  `5564792583` and `5565047063`; the issue remains open.
+- No ADR, schema/DDL, P1.8/P1.9, P2.5, or accepted prior P3 production
+  source was changed. The only additive prior-slice composition change is
+  the identity-safe `ActiveTurnRegistry.wait_retired` primitive authorized by
+  the addendum.
+
+### Repair closure
+
+- `ApplicationRecoveryRepository` now validates the complete P3.5 dialogue
+  matrix before recovery reporting or delete state mapping: dialogue-side
+  thread/error semantics, exact creation-family errors, exact TURN_UNKNOWN
+  and DELETE_UNKNOWN errors, active-job cardinality/state, ownership,
+  ingress, and INPUT evidence.
+- Deterministic schema-valid corruption proofs cover dialogue-thread
+  corruption, creation-family error semantics, IDLE/TURN_RUNNING residual
+  errors, TURN_UNKNOWN missing/wrong ambiguity, and DELETE_UNKNOWN wrong
+  error. Recovery and matching-version delete preflight return INVARIANT;
+  no external effect or mutation occurs, and generic errors contain no raw
+  sentinels.
+- After exact `DELETE_CONFIRMED`, repository `INVALID_ARGUMENT` and other
+  semantic finalization failures map to application `INVARIANT`, while
+  storage and invalid repository clocks map to `STORAGE`. A stepped clock
+  proof uses claim-intent `t1`, claim-deleting `t2`, expiry clock `t3`, and
+  finalize clock `t4 >= t3 + 604800000`: one delete call, durable DELETING,
+  no tombstone/purge, retained job/INPUT evidence, then no-effect recovery to
+  DELETE_UNKNOWN and repeated NO_ACTION.
+- Definitive P3.4 `CONFIRMED`/`RECONCILED` continuation accepts exactly the
+  terminal job `K+1` and dialogue `V+2` shape. Synthetic `V+3` results for
+  both statuses are rejected as INVARIANT before any delete call. Exact job,
+  owner/thread/turn/model/effort/input/update identity, terminal semantics,
+  IDLE/no-error dialogue, and `reason is None` remain required; an optional
+  OUTPUT payload must have the same ordinary job/dialogue owner.
+- `ActiveTurnRegistry.wait_retired(job_id, binding)` uses exact
+  `TurnBinding` identity, per-entry events, ownership tokens, and exact
+  retired-generation tracking. Waiters block for the active lease; stale or
+  equal-clone retirement does not wake them; exact retirement does; an
+  already-retired exact binding returns immediately; replacement ownership
+  and mismatched identities fail closed. No positive-duration polling or
+  sleep was added, and registry representations remain content-safe.
+- Running delete captures the exact shared registry binding before P3.4
+  interrupt. After a validated definitive result it waits for that exact
+  admitted runner to retire, verifies no replacement owner remains, and only
+  then enters P2.5 delete intent/deleting and P1.9 composition. The final
+  fake collector releases the natural runner from the same event as the
+  interrupt result; the runner completes with finite FAILED/
+  `CODEX_TURN_FAILED` and no exception is swallowed. The fake observes
+  registry retirement before thread/delete; interrupt and delete effects are
+  each bounded to one and one tombstone is produced.
+
+### Verification
+
+- Final P3.5 focused counts: unit `9`, integration `24`, final fake
+  acceptance `1`.
+- Accepted pre-P3.5 full count: `633`; arithmetic is
+  `633 + 9 + 24 + 1 = 667`; observed discovery is `667`, all passing.
+- Required prior focused counts all passed: P3.4 `6/31`, P3.3 `5/25`,
+  P3.2 `2/21`, P3.1 `11/26`, P2.C1 `5/1`, P2.6b `5/12/8/3`, P2.6a
+  `4/28`, P2.5 `4/18`, P2.4b `6/25`, P2.4a `8/31`, P2.3 `7/28`,
+  P2.2 `6/20`, P2.1 `8/31`, P1.9 `15`, P1.8 `28`, and P1.10 `6/1/4`.
+- `PYTHONPATH=src python3 -m compileall -q src tests`, the required P3.5
+  public import smoke, and `git diff --check` passed.
+- Schema/DDL SHA remains
+  `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+- Repair-only and cumulative changed-file boundary checks contain only the
+  authorized P3.5 production/tests/evidence files; no architecture-file
+  drift was found. The secret scan passed. The known P1.6 pending-task
+  warning remains a pre-existing warning and is not introduced by this
+  repair.
+
+### Security and effects
+
+- All tests used temporary SQLite and fake ports/events only. No real Codex,
+  interrupt, thread/delete, Telegram, network, production DB, production
+  state root, service, `auth.json`, or `secrets.env` was opened or changed.
+- No raw corruption values, exception bodies, prompt/output content,
+  credentials, tokens, keys, or production paths were added to generic
+  errors, reprs, logs, fixtures, evidence, or commit metadata.
+- No P4 work was started and no architect acceptance is claimed.

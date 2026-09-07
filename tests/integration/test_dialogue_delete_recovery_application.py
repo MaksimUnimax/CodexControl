@@ -152,12 +152,19 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
         starting = await jobs.mark_codex_starting(job_id=job_id, expected_version=claimed.job.version)
         running = await jobs.mark_codex_running(job_id=job_id, expected_version=starting.version,
                                                 codex_turn_id="turn-" + job_id)
+        self.active_registry = ActiveTurnRegistry()
+        self.active_registry.publish(
+            job_id, TurnBinding("profile", "thread", "turn-" + job_id)
+        )
         return current, claimed.dialogue, running
 
-    def delete_service(self, lifecycle, *, interrupt=None, clock=lambda: 100):
+    def delete_service(self, lifecycle, *, interrupt=None, clock=lambda: 100, registry=None):
+        selected_registry = (
+            self.active_registry if registry is None and hasattr(self, "active_registry") else registry
+        )
         return DialogueDeleteService(
             self.storage, server_id="server", thread_lifecycle=lifecycle,
-            interrupt_service=interrupt, now_ms=clock,
+            interrupt_service=interrupt, active_turn_registry=selected_registry, now_ms=clock,
         )
 
     def creation_service(self, thread, turns):
@@ -426,6 +433,204 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
                     )
                 self.assertEqual("INVARIANT", str(raised.exception))
                 self.assertEqual([], lifecycle.calls)
+
+    async def test_synthetic_p34_v_plus_3_definitive_results_are_not_delete_authority(self):
+        for status in (DialogueInterruptStatus.CONFIRMED, DialogueInterruptStatus.RECONCILED):
+            await self.reset_storage()
+            _, running_dialogue, running_job = await self.seed_running()
+            terminal_job = replace(
+                running_job,
+                state=TurnJobState.FAILED,
+                version=running_job.version + 1,
+                error_class="CODEX_TURN_FAILED",
+                updated_at_ms=running_job.updated_at_ms + 1,
+            )
+            terminal_dialogue = replace(
+                running_dialogue,
+                state=DialogueState.IDLE,
+                version=running_dialogue.version + 3,
+                updated_at_ms=running_dialogue.updated_at_ms + 3,
+                last_error_class=None,
+            )
+            interrupt = FakeInterruptService(
+                status, dialogue=terminal_dialogue, job=terminal_job
+            )
+            lifecycle = FakeDeleteLifecycle()
+            with self.subTest(status=status.value):
+                with self.assertRaises(DialogueDeleteError) as raised:
+                    await self.delete_service(lifecycle, interrupt=interrupt).delete(
+                        DialogueDeleteRequest("dialogue", running_dialogue.version)
+                    )
+                self.assertEqual("INVARIANT", str(raised.exception))
+                self.assertEqual([], lifecycle.calls)
+
+    async def test_canonical_dialogue_matrix_rejects_schema_valid_corruption_everywhere(self):
+        async def make_creating(mutate):
+            dialogue = await DialogueRepository(self.storage, now_ms=lambda: 1).create_intent(
+                dialogue_id="dialogue", server_id="server", profile_id="profile"
+            )
+            await self.storage.write(lambda c: (mutate(c), None)[1])
+            return dialogue
+
+        async def make_create_unknown(mutate):
+            dialogue = await DialogueRepository(self.storage, now_ms=lambda: 1).create_intent(
+                dialogue_id="dialogue", server_id="server", profile_id="profile"
+            )
+            dialogue = await DialogueRepository(self.storage, now_ms=lambda: 1).mark_create_unknown(
+                dialogue_id="dialogue", expected_version=dialogue.version,
+                error_class="CODEX_AMBIGUOUS",
+            )
+            await self.storage.write(lambda c: (mutate(c), None)[1])
+            return dialogue
+
+        async def make_unbound_error(mutate):
+            dialogue = await DialogueRepository(self.storage, now_ms=lambda: 1).create_intent(
+                dialogue_id="dialogue", server_id="server", profile_id="profile"
+            )
+            await TurnJobRepository(self.storage, now_ms=lambda: 1).claim_ingress(
+                update_id=55, job_id="job", source_chat_id=-1, source_message_id=1,
+                dialogue_id="dialogue", server_id="server", profile_id="profile", thread_id=None,
+                model_id="model", reasoning_effort="high", input_payload_id="input",
+                input_content=b"input", input_expires_at_ms=1000,
+            )
+            dialogue = await DialogueRepository(self.storage, now_ms=lambda: 1).mark_create_error(
+                dialogue_id="dialogue", expected_version=dialogue.version,
+                error_class="CODEX_PROCESS",
+            )
+            await self.storage.write(lambda c: (mutate(c), None)[1])
+            return dialogue
+
+        async def make_idle(mutate):
+            dialogue = await self.seed_idle()
+            await self.storage.write(lambda c: (mutate(c), None)[1])
+            return dialogue
+
+        async def make_running(mutate):
+            _, dialogue, _ = await self.seed_running()
+            await self.storage.write(lambda c: (mutate(c), None)[1])
+            return dialogue
+
+        async def make_turn_unknown(mutate):
+            _, dialogue, job = await self.seed_running()
+            def terminalize(connection):
+                connection.execute(
+                    "UPDATE turn_jobs SET state = 'UNKNOWN', error_class = 'CODEX_AMBIGUOUS' "
+                    "WHERE job_id = ?", (job.job_id,)
+                )
+                connection.execute(
+                    "UPDATE dialogues SET state = 'TURN_UNKNOWN', last_error_class = NULL "
+                    "WHERE dialogue_id = 'dialogue'"
+                )
+                mutate(connection)
+            await self.storage.write(terminalize)
+            return dialogue
+
+        async def make_delete_unknown(mutate):
+            dialogue = await self.seed_idle()
+            pending = await DeletionRepository(self.storage, now_ms=lambda: 1).claim_delete_intent(
+                dialogue_id="dialogue", expected_version=dialogue.version
+            )
+            deleting = await DeletionRepository(self.storage, now_ms=lambda: 1).claim_deleting(
+                dialogue_id="dialogue", expected_version=pending.version
+            )
+            dialogue = await DeletionRepository(self.storage, now_ms=lambda: 1).mark_delete_unknown(
+                dialogue_id="dialogue", expected_version=deleting.version,
+                error_class="DELETE_UNKNOWN",
+            )
+            await self.storage.write(lambda c: (mutate(c), None)[1])
+            return dialogue
+
+        cases = (
+            ("creating_thread", make_creating,
+             lambda c: c.execute("UPDATE dialogues SET thread_id = 'thread'")),
+            ("create_unknown_thread", make_create_unknown,
+             lambda c: c.execute("UPDATE dialogues SET thread_id = 'thread'")),
+            ("creating_error", make_creating,
+             lambda c: c.execute("UPDATE dialogues SET last_error_class = 'CODEX_PROCESS'")),
+            ("create_unknown_error", make_create_unknown,
+             lambda c: c.execute("UPDATE dialogues SET last_error_class = 'WRONG_ERROR'")),
+            ("unbound_error_thread", make_unbound_error,
+             lambda c: c.execute("UPDATE dialogues SET thread_id = 'thread'")),
+            ("unbound_error_class", make_unbound_error,
+             lambda c: c.execute("UPDATE dialogues SET last_error_class = 'WRONG_ERROR'")),
+            ("idle_error", make_idle,
+             lambda c: c.execute("UPDATE dialogues SET last_error_class = 'WRONG_ERROR'")),
+            ("running_error", make_running,
+             lambda c: c.execute("UPDATE dialogues SET last_error_class = 'WRONG_ERROR'")),
+            ("turn_unknown_missing_error", make_turn_unknown, lambda c: None),
+            ("turn_unknown_wrong_error", make_turn_unknown,
+             lambda c: c.execute("UPDATE dialogues SET last_error_class = 'WRONG_ERROR'")),
+            ("delete_unknown_error", make_delete_unknown,
+             lambda c: c.execute("UPDATE dialogues SET last_error_class = 'WRONG_ERROR'")),
+        )
+        for name, maker, mutate in cases:
+            await self.reset_storage()
+            await maker(mutate)
+            dialogue_rows = await self.storage.read(
+                lambda c: [tuple(row) for row in c.execute(
+                    "SELECT state, version, last_error_class FROM dialogues"
+                ).fetchall()]
+            )
+            job_count = await self.storage.read(
+                lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]
+            )
+            raw = (dialogue_rows, job_count)
+            with self.subTest(corruption=name):
+                with self.assertRaises(DialogueRecoveryError) as recovery_error:
+                    await DialogueRecoveryService(
+                        self.storage, now_ms=lambda: (_ for _ in ()).throw(AssertionError("clock"))
+                    ).recover_startup()
+                self.assertEqual("INVARIANT", str(recovery_error.exception))
+                current_version = raw[0][0][1]
+                lifecycle = FakeDeleteLifecycle()
+                with self.assertRaises(DialogueDeleteError) as delete_error:
+                    await self.delete_service(
+                        lifecycle, registry=getattr(self, "active_registry", None)
+                    ).delete(DialogueDeleteRequest("dialogue", current_version))
+                self.assertEqual("INVARIANT", str(delete_error.exception))
+                self.assertNotIn("PRIVATE", repr(recovery_error.exception))
+                self.assertNotIn("PRIVATE", repr(delete_error.exception))
+                self.assertEqual([], lifecycle.calls)
+                after = (
+                    await self.storage.read(
+                        lambda c: [tuple(row) for row in c.execute(
+                            "SELECT state, version, last_error_class FROM dialogues"
+                        ).fetchall()]
+                    ),
+                    await self.storage.read(
+                        lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]
+                    ),
+                )
+                self.assertEqual(raw, after)
+
+    async def test_post_confirmed_expiry_failure_is_internal_and_retains_deleting_evidence(self):
+        current = await self.seed_idle()
+        admitted = await TurnJobRepository(self.storage, now_ms=lambda: 1).claim_ingress(
+            update_id=77, job_id="job", source_chat_id=-1, source_message_id=1,
+            dialogue_id="dialogue", server_id="server", profile_id="profile", thread_id="thread",
+            model_id="model", reasoning_effort="high", input_payload_id="input",
+            input_content=b"input", input_expires_at_ms=1000,
+        )
+        recovered = await DialogueRecoveryService(self.storage, now_ms=lambda: 2).recover_startup()
+        self.assertEqual(DialogueRecoveryStatus.PRE_EFFECT_FAILED, recovered.status)
+        clock_values = iter((10, 20, 30, 604800030))
+        lifecycle = FakeDeleteLifecycle()
+        with self.assertRaises(DialogueDeleteError) as raised:
+            await self.delete_service(
+                lifecycle, clock=lambda: next(clock_values)
+            ).delete(DialogueDeleteRequest("dialogue", current.version))
+        self.assertEqual("INVARIANT", str(raised.exception))
+        self.assertEqual(1, len(lifecycle.calls))
+        deleting = await DialogueRepository(self.storage).get_live()
+        self.assertEqual(DialogueState.DELETING, deleting.state)
+        self.assertIsNone(await DeletionRepository(self.storage).get_tombstone("dialogue"))
+        self.assertIsNotNone(await TurnJobRepository(self.storage).get(admitted.job.job_id))
+        self.assertIsNotNone(await TransientPayloadRepository(self.storage).get_input_for_job(admitted.job.job_id))
+        recovered_again = await DialogueRecoveryService(self.storage, now_ms=lambda: 999).recover_startup()
+        self.assertEqual(DialogueRecoveryStatus.DELETE_MARKED_UNKNOWN, recovered_again.status)
+        self.assertEqual(1, len(lifecycle.calls))
+        self.assertEqual(DialogueRecoveryStatus.NO_ACTION,
+                         (await DialogueRecoveryService(self.storage).recover_startup()).status)
 
     async def test_p34_invalid_argument_is_p35_invariant_and_never_deletes(self):
         _, running_dialogue, _ = await self.seed_running()
