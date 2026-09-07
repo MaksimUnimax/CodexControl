@@ -113,7 +113,10 @@ def _snapshot(connection: Any) -> ApplicationRecoverySnapshot:
             or job.profile_id != dialogue.profile_id
         ):
             raise _invariant()
-        if dialogue.state is DialogueState.CREATING and job.state is TurnJobState.RECEIVED:
+        if (
+            dialogue.state in (DialogueState.CREATING, DialogueState.CREATE_UNKNOWN, DialogueState.ERROR)
+            and job.state is TurnJobState.RECEIVED
+        ):
             if job.thread_id is not None or job.codex_turn_id is not None or job.error_class is not None:
                 raise _invariant()
         else:

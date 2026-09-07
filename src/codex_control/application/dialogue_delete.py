@@ -145,9 +145,64 @@ def _repository_error(error: BaseException) -> DialogueDeleteError:
 
 
 def _interrupt_error(error: DialogueInterruptError) -> DialogueDeleteError:
-    if error.category is DialogueInterruptErrorCategory.INVARIANT:
+    if error.category in (
+        DialogueInterruptErrorCategory.INVALID_ARGUMENT,
+        DialogueInterruptErrorCategory.INVARIANT,
+    ):
         return _invariant()
     return _storage()
+
+
+def _valid_interrupt_terminal_result(
+    original_dialogue: DialogueRecord,
+    original_job: TurnJobRecord,
+    result: DialogueInterruptResult,
+) -> bool:
+    """Require the exact terminal shape produced by accepted P3.4."""
+    if type(result.dialogue) is not DialogueRecord or type(result.job) is not TurnJobRecord:
+        return False
+    terminal_job = result.job
+    terminal_dialogue = result.dialogue
+    if original_job.state is not TurnJobState.CODEX_RUNNING:
+        return False
+    if (
+        terminal_job.job_id != original_job.job_id
+        or terminal_job.telegram_update_id != original_job.telegram_update_id
+        or terminal_job.source_chat_id != original_job.source_chat_id
+        or terminal_job.source_message_id != original_job.source_message_id
+        or terminal_job.dialogue_id != original_job.dialogue_id
+        or terminal_job.server_id != original_job.server_id
+        or terminal_job.profile_id != original_job.profile_id
+        or terminal_job.thread_id != original_job.thread_id
+        or terminal_job.codex_turn_id != original_job.codex_turn_id
+        or terminal_job.model_id != original_job.model_id
+        or terminal_job.reasoning_effort != original_job.reasoning_effort
+        or terminal_job.input_sha256 != original_job.input_sha256
+        or terminal_job.version != original_job.version + 1
+        or terminal_job.created_at_ms != original_job.created_at_ms
+        or terminal_job.updated_at_ms < original_job.updated_at_ms
+    ):
+        return False
+    if terminal_job.state not in (TurnJobState.CODEX_COMPLETED, TurnJobState.FAILED):
+        return False
+    if terminal_job.state is TurnJobState.CODEX_COMPLETED:
+        if terminal_job.error_class is not None:
+            return False
+    elif terminal_job.error_class != "CODEX_TURN_FAILED":
+        return False
+    if (
+        terminal_dialogue.dialogue_id != original_dialogue.dialogue_id
+        or terminal_dialogue.server_id != original_dialogue.server_id
+        or terminal_dialogue.profile_id != original_dialogue.profile_id
+        or terminal_dialogue.thread_id != original_dialogue.thread_id
+        or terminal_dialogue.state is not DialogueState.IDLE
+        or terminal_dialogue.version not in (original_dialogue.version + 2, original_dialogue.version + 3)
+        or terminal_dialogue.created_at_ms != original_dialogue.created_at_ms
+        or terminal_dialogue.updated_at_ms < original_dialogue.updated_at_ms
+        or terminal_dialogue.last_error_class is not None
+    ):
+        return False
+    return True
 
 
 @dataclass(frozen=True, repr=False)
@@ -240,6 +295,10 @@ class DialogueDeleteService:
             return DialogueDeleteResult(
                 DialogueDeleteStatus.CONFLICT, dialogue, None, DialogueDeleteReason.STALE_REQUEST
             )
+        if dialogue.version != request.expected_dialogue_version:
+            return DialogueDeleteResult(
+                DialogueDeleteStatus.CONFLICT, dialogue, None, DialogueDeleteReason.STALE_REQUEST
+            )
         if dialogue.server_id != self._server_id:
             raise _invariant()
         # These durable states are already post-claim authorities.  A replay
@@ -250,10 +309,6 @@ class DialogueDeleteService:
         if dialogue.state is DialogueState.DELETING:
             return DialogueDeleteResult(
                 DialogueDeleteStatus.BLOCKED, dialogue, None, DialogueDeleteReason.DELETE_IN_PROGRESS
-            )
-        if dialogue.version != request.expected_dialogue_version:
-            return DialogueDeleteResult(
-                DialogueDeleteStatus.CONFLICT, dialogue, None, DialogueDeleteReason.STALE_REQUEST
             )
         if dialogue.dialogue_id in self._owned and not self._owned[dialogue.dialogue_id].done():
             return DialogueDeleteResult(
@@ -314,16 +369,7 @@ class DialogueDeleteService:
             if type(interrupt.status) is not DialogueInterruptStatus:
                 raise _invariant()
             if interrupt.status in (DialogueInterruptStatus.CONFIRMED, DialogueInterruptStatus.RECONCILED):
-                if (
-                    type(interrupt.dialogue) is not DialogueRecord
-                    or interrupt.dialogue.dialogue_id != current.dialogue_id
-                    or interrupt.dialogue.server_id != current.server_id
-                    or interrupt.dialogue.profile_id != current.profile_id
-                    or interrupt.dialogue.state is not DialogueState.IDLE
-                    or interrupt.dialogue.version <= current.version
-                    or type(interrupt.job) is not TurnJobRecord
-                    or interrupt.job.dialogue_id != current.dialogue_id
-                ):
+                if not _valid_interrupt_terminal_result(current, job, interrupt):
                     raise _invariant()
                 current = interrupt.dialogue
             elif interrupt.status in (DialogueInterruptStatus.REJECTED, DialogueInterruptStatus.UNKNOWN):

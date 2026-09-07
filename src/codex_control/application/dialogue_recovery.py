@@ -155,6 +155,15 @@ class DialogueRecoveryService:
                 raise _invariant()
             return DialogueRecoveryResult(DialogueRecoveryStatus.NO_ACTION, None, current)
 
+        if current.state in (DialogueState.CREATE_UNKNOWN, DialogueState.ERROR):
+            if len(snapshot.active_jobs) > 1:
+                raise _invariant()
+            return DialogueRecoveryResult(
+                DialogueRecoveryStatus.NO_ACTION,
+                snapshot.active_jobs[0] if snapshot.active_jobs else None,
+                current,
+            )
+
         if current.state not in (DialogueState.IDLE, DialogueState.TURN_RUNNING):
             if snapshot.active_jobs:
                 raise _invariant()

@@ -2,13 +2,16 @@ import asyncio
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 
 from codex_control.adapters.codex.errors import CodexAdapterErrorCategory
+from codex_control.adapters.codex.model_catalog import CodexModelCatalog, CodexModelDescriptor
 from codex_control.adapters.codex.thread_lifecycle import (
     ThreadBinding,
     ThreadLifecycleError,
     ThreadOperationResult,
     ThreadOperationStatus,
+    TrustedWorkingDirectory,
 )
 from codex_control.adapters.codex.turn_lifecycle import TurnBinding
 from codex_control.application import (
@@ -23,16 +26,21 @@ from codex_control.application import (
     DialogueRecoveryError,
     DialogueRecoveryService,
     DialogueRecoveryStatus,
+    DialogueTurnService,
+    ExistingDialoguePromptRequest,
 )
+from codex_control.domain import CodexProfile
 from codex_control.storage import (
     DeletionRepository,
     DialogueRepository,
     DialogueState,
+    IngressUpdateRepository,
     RepositoryError,
     SettingsRepository,
     SqliteStorage,
     TurnJobRepository,
     TurnJobState,
+    TransientPayloadRepository,
     TurnTerminalOutcome,
 )
 
@@ -78,6 +86,42 @@ class FakeInterruptService:
         return DialogueInterruptResult(self.result_status, self.job, self.dialogue, None, None)
 
 
+class CreationCatalog:
+    async def get_catalog(self, profile_id, *, refresh=False):
+        return CodexModelCatalog(
+            profile_id, 1,
+            (CodexModelDescriptor("model", "wire-model", "Model", ("high",), "high", True, False),),
+            0.0, 100.0,
+        )
+
+
+class CreationWorkdir:
+    def resolve(self, profile_id):
+        return TrustedWorkingDirectory("/trusted")
+
+
+class CreationThread:
+    def __init__(self, status):
+        self.status = status
+        self.calls = []
+
+    async def start(self, profile_id, *, model_id, reasoning_effort, working_directory):
+        self.calls.append((profile_id, model_id, reasoning_effort, working_directory))
+        return ThreadOperationResult(self.status)
+
+
+class CreationTurns:
+    def __init__(self):
+        self.start_calls = []
+
+    async def start_turn(self, **kwargs):
+        self.start_calls.append(kwargs)
+        raise AssertionError("thread-start failure must precede turn/start")
+
+    async def wait_turn(self, binding):
+        raise AssertionError("thread-start failure must precede turn/wait")
+
+
 class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -115,6 +159,29 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
             self.storage, server_id="server", thread_lifecycle=lifecycle,
             interrupt_service=interrupt, now_ms=clock,
         )
+
+    def creation_service(self, thread, turns):
+        return DialogueTurnService(
+            self.storage,
+            server_id="server",
+            profiles=(CodexProfile("profile", "/private/CODEX_HOME", "Profile"),),
+            model_catalog=CreationCatalog(),
+            thread_lifecycle=thread,
+            turn_lifecycle=turns,
+            working_directory_resolver=CreationWorkdir(),
+            now_ms=lambda: 10,
+            id_factory=lambda kind: f"creation-{kind}",
+        )
+
+    async def reset_storage(self):
+        def clear(connection):
+            for table in (
+                "delivery_segments", "approvals", "transient_payloads", "turn_jobs",
+                "ingress_updates", "callback_actions", "errors", "dialogues",
+                "deletion_tombstones",
+            ):
+                connection.execute(f"DELETE FROM {table}")
+        await self.storage.write(clear)
 
     async def test_no_dialogue_and_stale_requests_are_effect_free(self):
         life = FakeDeleteLifecycle()
@@ -173,11 +240,57 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
         result = await self.delete_service(unknown).delete(DialogueDeleteRequest("dialogue", current.version))
         self.assertEqual(DialogueDeleteStatus.UNKNOWN, result.status)
         self.assertEqual(DialogueState.DELETE_UNKNOWN, result.dialogue.state)
+        current_unknown = await DialogueRepository(self.storage).get_live()
         replay = await self.delete_service(FakeDeleteLifecycle()).delete(
-            DialogueDeleteRequest("dialogue", current.version)
+            DialogueDeleteRequest("dialogue", current_unknown.version)
         )
         self.assertEqual(DialogueDeleteStatus.UNKNOWN, replay.status)
         self.assertIsNone(replay.tombstone)
+
+    async def test_stale_and_current_versions_precede_deleting_and_unknown_state_mapping(self):
+        current = await self.seed_idle()
+        pending = await DeletionRepository(self.storage, now_ms=lambda: 2).claim_delete_intent(
+            dialogue_id="dialogue", expected_version=current.version
+        )
+        deleting = await DeletionRepository(self.storage, now_ms=lambda: 3).claim_deleting(
+            dialogue_id="dialogue", expected_version=pending.version
+        )
+        clock_calls = []
+        lifecycle = FakeDeleteLifecycle()
+        stale = await self.delete_service(lifecycle, clock=lambda: clock_calls.append(1) or 100).delete(
+            DialogueDeleteRequest("dialogue", deleting.version - 1)
+        )
+        self.assertEqual((DialogueDeleteStatus.CONFLICT, DialogueDeleteReason.STALE_REQUEST),
+                         (stale.status, stale.reason))
+        current_result = await self.delete_service(lifecycle, clock=lambda: clock_calls.append(1) or 100).delete(
+            DialogueDeleteRequest("dialogue", deleting.version)
+        )
+        self.assertEqual((DialogueDeleteStatus.BLOCKED, DialogueDeleteReason.DELETE_IN_PROGRESS),
+                         (current_result.status, current_result.reason))
+        self.assertEqual([], lifecycle.calls)
+        self.assertEqual([], clock_calls)
+
+        await self.reset_storage()
+        current = await self.seed_idle()
+        pending = await DeletionRepository(self.storage, now_ms=lambda: 2).claim_delete_intent(
+            dialogue_id="dialogue", expected_version=current.version
+        )
+        deleting = await DeletionRepository(self.storage, now_ms=lambda: 3).claim_deleting(
+            dialogue_id="dialogue", expected_version=pending.version
+        )
+        unknown = await DeletionRepository(self.storage, now_ms=lambda: 4).mark_delete_unknown(
+            dialogue_id="dialogue", expected_version=deleting.version, error_class="DELETE_UNKNOWN"
+        )
+        stale = await self.delete_service(FakeDeleteLifecycle(), clock=lambda: clock_calls.append(1) or 100).delete(
+            DialogueDeleteRequest("dialogue", unknown.version - 1)
+        )
+        self.assertEqual((DialogueDeleteStatus.CONFLICT, DialogueDeleteReason.STALE_REQUEST),
+                         (stale.status, stale.reason))
+        exact = await self.delete_service(FakeDeleteLifecycle(), clock=lambda: clock_calls.append(1) or 100).delete(
+            DialogueDeleteRequest("dialogue", unknown.version)
+        )
+        self.assertEqual(DialogueDeleteStatus.UNKNOWN, exact.status)
+        self.assertEqual([], clock_calls)
 
     async def test_codex_completed_without_terminal_delivery_is_delete_not_ready(self):
         _, claimed_dialogue, running = await self.seed_running()
@@ -263,6 +376,73 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
         self.assertEqual(1, len(unresolved.calls))
         self.assertEqual([], life.calls)
 
+    async def test_running_delete_rejects_every_mismatched_definitive_interrupt_result(self):
+        mutations = (
+            ("job_id", lambda job, dialogue: replace(job, job_id="other-job")),
+            ("server_id", lambda job, dialogue: replace(job, server_id="other-server")),
+            ("profile_id", lambda job, dialogue: replace(job, profile_id="other-profile")),
+            ("thread_id", lambda job, dialogue: replace(job, thread_id="other-thread")),
+            ("codex_turn_id", lambda job, dialogue: replace(job, codex_turn_id="other-turn")),
+            ("state", lambda job, dialogue: replace(job, state=TurnJobState.UNKNOWN)),
+            ("error", lambda job, dialogue: replace(job, error_class="WRONG_ERROR")),
+            ("version", lambda job, dialogue: replace(job, version=job.version + 9)),
+            ("dialogue_thread", lambda job, dialogue: (job, replace(dialogue, thread_id="other-thread"))),
+            ("dialogue_profile", lambda job, dialogue: (job, replace(dialogue, profile_id="other-profile"))),
+            ("dialogue_server", lambda job, dialogue: (job, replace(dialogue, server_id="other-server"))),
+            ("dialogue_version", lambda job, dialogue: (job, replace(dialogue, version=dialogue.version + 9))),
+        )
+        for name, mutate in mutations:
+            await self.reset_storage()
+            _, running_dialogue, running_job = await self.seed_running()
+            terminal_job = replace(
+                running_job,
+                state=TurnJobState.CODEX_COMPLETED,
+                version=running_job.version + 1,
+                error_class=None,
+                updated_at_ms=running_job.updated_at_ms + 1,
+            )
+            terminal_dialogue = replace(
+                running_dialogue,
+                state=DialogueState.IDLE,
+                version=running_dialogue.version + 2,
+                updated_at_ms=running_dialogue.updated_at_ms + 2,
+                last_error_class=None,
+            )
+            mutated = mutate(terminal_job, terminal_dialogue)
+            if isinstance(mutated, tuple):
+                terminal_job, terminal_dialogue = mutated
+            else:
+                terminal_job = mutated
+            interrupt = FakeInterruptService(
+                DialogueInterruptStatus.CONFIRMED,
+                dialogue=terminal_dialogue,
+                job=terminal_job,
+            )
+            lifecycle = FakeDeleteLifecycle()
+            with self.subTest(mismatch=name):
+                with self.assertRaises(DialogueDeleteError) as raised:
+                    await self.delete_service(lifecycle, interrupt=interrupt).delete(
+                        DialogueDeleteRequest("dialogue", running_dialogue.version)
+                    )
+                self.assertEqual("INVARIANT", str(raised.exception))
+                self.assertEqual([], lifecycle.calls)
+
+    async def test_p34_invalid_argument_is_p35_invariant_and_never_deletes(self):
+        _, running_dialogue, _ = await self.seed_running()
+
+        class InvalidInterrupt:
+            async def interrupt(self, request):
+                from codex_control.application import DialogueInterruptError
+                raise DialogueInterruptError("INVALID_ARGUMENT")
+
+        lifecycle = FakeDeleteLifecycle()
+        with self.assertRaises(DialogueDeleteError) as raised:
+            await self.delete_service(lifecycle, interrupt=InvalidInterrupt()).delete(
+                DialogueDeleteRequest("dialogue", running_dialogue.version)
+            )
+        self.assertEqual("INVARIANT", str(raised.exception))
+        self.assertEqual([], lifecycle.calls)
+
     async def test_running_claimed_is_not_fabricated_into_an_interrupt(self):
         current = await self.seed_idle()
         jobs = TurnJobRepository(self.storage, now_ms=lambda: 1)
@@ -330,6 +510,125 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
         self.assertEqual(DialogueRecoveryStatus.INTERRUPT_MARKED_UNKNOWN, interrupted.status)
         self.assertEqual(DialogueState.TURN_UNKNOWN, interrupted.dialogue.state)
         self.assertEqual(TurnJobState.UNKNOWN, interrupted.job.state)
+
+    async def test_creating_with_admitted_received_recovers_once_and_reopens_no_action(self):
+        dialogue = await DialogueRepository(self.storage, now_ms=lambda: 1).create_intent(
+            dialogue_id="creating-dialogue", server_id="server", profile_id="profile"
+        )
+        admitted = await TurnJobRepository(self.storage, now_ms=lambda: 1).claim_ingress(
+            update_id=43, job_id="creating-job", source_chat_id=-1, source_message_id=1,
+            dialogue_id=dialogue.dialogue_id, server_id="server", profile_id="profile", thread_id=None,
+            model_id="model", reasoning_effort="high", input_payload_id="creating-input",
+            input_content=b"first", input_expires_at_ms=1000,
+        )
+        recovery = DialogueRecoveryService(self.storage, now_ms=lambda: 10)
+        marked = await recovery.recover_startup()
+        self.assertEqual(DialogueRecoveryStatus.CREATE_MARKED_UNKNOWN, marked.status)
+        self.assertEqual(DialogueState.CREATE_UNKNOWN, marked.dialogue.state)
+        self.assertEqual(admitted.job, marked.job)
+        repeated = await recovery.recover_startup()
+        self.assertEqual(DialogueRecoveryStatus.NO_ACTION, repeated.status)
+        self.assertEqual(DialogueState.CREATE_UNKNOWN, repeated.dialogue.state)
+        self.assertEqual(admitted.job, repeated.job)
+        await self.storage.close()
+        self.storage = await SqliteStorage.open(self.path, now_ms=lambda: 1)
+        reopened = await DialogueRecoveryService(self.storage, now_ms=lambda: (_ for _ in ()).throw(AssertionError("clock"))).recover_startup()
+        self.assertEqual(DialogueRecoveryStatus.NO_ACTION, reopened.status)
+        self.assertEqual(DialogueState.CREATE_UNKNOWN, reopened.dialogue.state)
+        self.assertEqual(TurnJobState.RECEIVED, reopened.job.state)
+
+    async def test_real_p32_create_unknown_received_is_no_action_repeat_and_restart_safe(self):
+        await SettingsRepository(self.storage, now_ms=lambda: 1).initialize_if_absent(
+            profile_id="profile", model_id="model", reasoning_effort="high"
+        )
+        thread = CreationThread(ThreadOperationStatus.START_UNKNOWN)
+        turns = CreationTurns()
+        result = await self.creation_service(thread, turns).execute(
+            ExistingDialoguePromptRequest(41, -1, 41, "first")
+        )
+        self.assertEqual("UNKNOWN", result.status.value)
+        dialogue = await DialogueRepository(self.storage).get_live()
+        self.assertEqual((DialogueState.CREATE_UNKNOWN, None), (dialogue.state, dialogue.thread_id))
+        ingress = await IngressUpdateRepository(self.storage).get(41)
+        job = await TurnJobRepository(self.storage).get(ingress.job_id)
+        payload = await TransientPayloadRepository(self.storage).get_input_for_job(job.job_id)
+        self.assertEqual((TurnJobState.RECEIVED, None, None, None),
+                         (job.state, job.thread_id, job.codex_turn_id, job.error_class))
+        self.assertEqual(job.job_id, ingress.job_id)
+        self.assertEqual(b"first", payload.content)
+        self.assertEqual([], turns.start_calls)
+
+        clock_calls = []
+        recovery = DialogueRecoveryService(self.storage, now_ms=lambda: clock_calls.append(1) or 50)
+        first = await recovery.recover_startup()
+        self.assertEqual(DialogueRecoveryStatus.NO_ACTION, first.status)
+        self.assertEqual(dialogue, first.dialogue)
+        self.assertEqual(job, first.job)
+        self.assertEqual([], clock_calls)
+        await self.storage.close()
+        self.storage = await SqliteStorage.open(self.path, now_ms=lambda: 1)
+        reopened = await DialogueRecoveryService(self.storage, now_ms=lambda: clock_calls.append(1) or 60).recover_startup()
+        self.assertEqual(DialogueRecoveryStatus.NO_ACTION, reopened.status)
+        self.assertEqual(DialogueState.CREATE_UNKNOWN, reopened.dialogue.state)
+        self.assertEqual([], clock_calls)
+        self.assertEqual(1, len(thread.calls))
+
+    async def test_real_p32_error_received_is_no_action_and_restart_safe(self):
+        await SettingsRepository(self.storage, now_ms=lambda: 1).initialize_if_absent(
+            profile_id="profile", model_id="model", reasoning_effort="high"
+        )
+        thread = CreationThread(ThreadOperationStatus.START_REJECTED)
+        turns = CreationTurns()
+        result = await self.creation_service(thread, turns).execute(
+            ExistingDialoguePromptRequest(42, -1, 42, "first")
+        )
+        self.assertEqual("FAILED", result.status.value)
+        dialogue = await DialogueRepository(self.storage).get_live()
+        self.assertEqual((DialogueState.ERROR, None), (dialogue.state, dialogue.thread_id))
+        ingress = await IngressUpdateRepository(self.storage).get(42)
+        job = await TurnJobRepository(self.storage).get(ingress.job_id)
+        self.assertEqual((TurnJobState.RECEIVED, None, None, None),
+                         (job.state, job.thread_id, job.codex_turn_id, job.error_class))
+        recovery = DialogueRecoveryService(self.storage, now_ms=lambda: (_ for _ in ()).throw(AssertionError("clock")))
+        first = await recovery.recover_startup()
+        self.assertEqual(DialogueRecoveryStatus.NO_ACTION, first.status)
+        self.assertEqual(dialogue, first.dialogue)
+        await self.storage.close()
+        self.storage = await SqliteStorage.open(self.path, now_ms=lambda: 1)
+        reopened = await DialogueRecoveryService(self.storage, now_ms=lambda: (_ for _ in ()).throw(AssertionError("clock"))).recover_startup()
+        self.assertEqual(DialogueRecoveryStatus.NO_ACTION, reopened.status)
+        self.assertEqual(DialogueState.ERROR, reopened.dialogue.state)
+
+    async def test_creation_family_corruption_variants_fail_closed(self):
+        variants = (
+            ("claimed", lambda c, job: c.execute("UPDATE turn_jobs SET state = 'CLAIMED' WHERE job_id = ?", (job.job_id,))),
+            ("starting", lambda c, job: c.execute("UPDATE turn_jobs SET state = 'CODEX_STARTING' WHERE job_id = ?", (job.job_id,))),
+            ("thread", lambda c, job: c.execute("UPDATE turn_jobs SET thread_id = 'thread' WHERE job_id = ?", (job.job_id,))),
+            ("turn", lambda c, job: c.execute("UPDATE turn_jobs SET codex_turn_id = 'turn' WHERE job_id = ?", (job.job_id,))),
+            ("job_ingress", lambda c, job: c.execute("UPDATE ingress_updates SET disposition = 'JOB:other' WHERE update_id = ?", (job.telegram_update_id,))),
+            ("input", lambda c, job: c.execute("DELETE FROM transient_payloads WHERE job_id = ?", (job.job_id,))),
+            ("multiple", lambda c, job: c.execute(
+                "INSERT INTO turn_jobs (job_id, telegram_update_id, source_chat_id, source_message_id, dialogue_id, server_id, profile_id, thread_id, model_id, reasoning_effort, input_sha256, codex_turn_id, state, version, created_at_ms, updated_at_ms, error_class) "
+                "SELECT 'other-job', telegram_update_id + 100, source_chat_id, source_message_id + 100, dialogue_id, server_id, profile_id, NULL, model_id, reasoning_effort, input_sha256, NULL, 'RECEIVED', 0, created_at_ms, updated_at_ms, NULL FROM turn_jobs WHERE job_id = ?",
+                (job.job_id,),
+            )),
+        )
+        for name, mutate in variants:
+            await self.reset_storage()
+            await SettingsRepository(self.storage, now_ms=lambda: 1).initialize_if_absent(
+                profile_id="profile", model_id="model", reasoning_effort="high"
+            )
+            thread = CreationThread(ThreadOperationStatus.START_UNKNOWN)
+            await self.creation_service(thread, CreationTurns()).execute(
+                ExistingDialoguePromptRequest(100 + len(name), -1, 100 + len(name), "first")
+            )
+            ingress = await IngressUpdateRepository(self.storage).get(100 + len(name))
+            job = await TurnJobRepository(self.storage).get(ingress.job_id)
+            await self.storage.write(lambda c: (mutate(c, job), None)[1])
+            with self.subTest(corruption=name):
+                with self.assertRaises(DialogueRecoveryError) as raised:
+                    await DialogueRecoveryService(self.storage, now_ms=lambda: (_ for _ in ()).throw(AssertionError("clock"))).recover_startup()
+                self.assertEqual("INVARIANT", str(raised.exception))
 
     async def test_recovery_running_effect_possible_marks_both_unknown(self):
         _, claimed_dialogue, running = await self.seed_running()

@@ -175,3 +175,61 @@ private keys, raw Telegram JSON, raw prompts/outputs in production diagnostics,
 hidden reasoning, raw adapter exceptions, environment dumps, or production
 paths were added. Test-only fake data and temporary paths are confined to test
 fixtures. No P4 or later work was started.
+
+## Architect first repair
+
+This section records the first repair pass only. It does not claim architect
+acceptance, close Issue #27, mark P3 complete, or authorize P4.
+
+- Rejected candidate: `4e5cbbf6cc4df1ffc33df9c06be4cea7d3a11494`
+- Architect review comment: `5564792583`
+- Repair parent remained exactly the rejected candidate; no reset, rebase,
+  merge, force-push, main change, ADR change, or schema change was made.
+
+### Repair closure
+
+- Canonical `CREATE_UNKNOWN + RECEIVED` and `ERROR + RECEIVED` shapes are
+  materialized only when the dialogue/job/server/profile IDs cohere, the
+  dialogue and job thread IDs are NULL, the job Codex turn/error fields are
+  NULL, and exact JOB ingress plus matching INPUT evidence exists.
+- Real accepted `DialogueTurnService` `START_UNKNOWN` and `START_REJECTED`
+  paths proved the canonical `CREATE_UNKNOWN + RECEIVED` and
+  `ERROR + RECEIVED` shapes. Fresh recovery, repeated recovery, and
+  close/reopen recovery return `NO_ACTION` without clock or external effect.
+- A canonical admitted `CREATING + RECEIVED` state recovers once to
+  `CREATE_UNKNOWN`; repeated and reopened recovery return `NO_ACTION` while
+  retaining the RECEIVED job, ingress, and INPUT evidence.
+- Corrupt creation-family variants were rejected as `INVARIANT`, including
+  CLAIMED/CODEX_STARTING, non-NULL thread/turn identity, wrong JOB ingress,
+  missing INPUT, and multiple active first jobs.
+- Delete preflight now checks the matching dialogue version before
+  `DELETING`, `DELETE_UNKNOWN`, `INTERRUPTING`, `DIALOGUE_NOT_READY`, or
+  `UNKNOWN` state mapping. Stale `DELETING` and `DELETE_UNKNOWN` requests
+  return `CONFLICT / STALE_REQUEST` with zero clock, mutation, and P1 effect;
+  exact current versions retain `DELETE_IN_PROGRESS` and `UNKNOWN`.
+- P3.4 `CONFIRMED`/`RECONCILED` results are validated against the originally
+  inspected active job and dialogue: exact job/update/owner/thread/turn
+  identity, exact terminal job version/state/error semantics, exact dialogue
+  owner/thread/IDLE terminal shape, and only accepted P3.4 terminal version
+  advancement. Ten-plus controlled mismatch cases produced `INVARIANT` before
+  any delete call.
+- P3.4 `INVALID_ARGUMENT` and `INVARIANT` errors map to P3.5 `INVARIANT`;
+  P3.4 `STORAGE` remains `STORAGE`. The focused proof is finite and redacted.
+
+### Verification
+
+- Focused P3.5 counts: unit `4`, integration `21`, final fake acceptance `1`.
+- Full arithmetic: `633 + 4 + 21 + 1 = 659`; observed full discovery: `659`,
+  all passing.
+- Required prior regressions passed: P3.4 `6/31`, P3.3 `5/25`, P3.2
+  `2/21`, P3.1 `11/26`, P2.C1 `5/1`, P2.6b `5/12/8/3`, P2.6a `4/28`,
+  P2.5 `4/18`, P2.4b `6/25`, P2.4a `8/31`, P2.3 `7/28`, P2.2 `6/20`,
+  P2.1 `8/31`, P1.9 `15`, P1.8 `28`, and P1.10 `6/1/4`.
+- `SCHEMA_V1_DDL_SHA256` remains
+  `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+- Compileall, required P3.5 public import smoke, `git diff --check`, and the
+  repair diff security scan passed. The known P1.6 pending-task warning was
+  observed during full discovery and is not introduced by this repair.
+- All tests used temporary SQLite and fake lifecycle ports. No real Codex,
+  thread/delete, turn/interrupt, Telegram, network, production database,
+  production state root, service, auth file, or secrets file was touched.
