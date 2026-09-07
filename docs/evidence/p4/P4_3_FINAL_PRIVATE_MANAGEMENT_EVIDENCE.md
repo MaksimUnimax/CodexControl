@@ -58,3 +58,30 @@ P43 callbacks are consumed once and become `STALE/STALE_ACTION` after boot-gener
 - `git diff --check`: PASS.
 - Changed-path review: only P4.3 production, narrow repository/export, focused test, acceptance, and evidence paths.
 - Secret/effect review: no credentials, private keys, tokens, raw callback values, raw approval/entity IDs in UI/evidence, production state/config/service access, or external effect path added.
+
+## Architect first repair
+
+This is the first repair pass for the rejected P4.3 candidate. It does not claim architect acceptance, mark P4 complete, close Issue #30, or begin P5/P6.
+
+- Rejected candidate: `701c817e93ad101b9c775d428743fc7a57a436e5`.
+- Architect review/addendum: `5569738879`.
+- The original candidate ran 741 tests with 4 failures; it was not a passing full suite.
+- Those four failures were stale exact-surface assertions, not a reason to remove the ADR-0034-authorized reads.
+- Exactly these three old test files were updated: `tests/unit/test_delivery_approval_records.py`, `tests/integration/test_hard_delete_tombstones_errors.py`, and `tests/acceptance/test_p2_6b_contract_snapshot.py`.
+- Only `list_pending_for_job` was added to the old ApprovalRepository expected sets and only `latest` was added to the old ErrorFingerprintRepository expected sets. Exact equality, forbidden-method, async, schema, enum and record assertions remain intact.
+- No old production code was modified. The repair production-source change count is zero.
+
+The P4.3 proof expansion adds independent unit/integration coverage for accepted P4.1/P4.2 enum contracts, exact Settings `OPEN_ROOT` binding and non-consuming delegation, P4.2 callback delegation and zero-effect BEGIN_DELETE/CANCEL_DELETE, deterministic pending-approval reads, complete and fail-closed approval projection, wrong-principal ordering, atomic Allow/Deny, sibling/replay/stale/expiry behavior, project-approval terminal blocking, deterministic latest-error reads, diagnostics provider states/failures/redaction, and boot-generation staleness. The final fake acceptance now uses `TelegramPrivateUpdateAdapter`, composes the accepted settings/dialogue/approval/diagnostics authorities, proves MENU dedupe/no JOB/no mode mutation, unknown-action non-consumption, diagnostics redaction, approval replay/sibling behavior, boot stale behavior, and P4.2 cancel-only destructive routing.
+
+Final repair verification:
+
+- P4.3 focused counts: unit `7`, integration `26`, final fake acceptance `1`.
+- Final full discovery count: `762`.
+- Full-suite failures: `0`.
+- Full-suite errors: `0`.
+- Final unittest result: `OK`.
+- Arithmetic: `728 + 7 + 26 + 1 = 762`.
+- Frozen schema-v1 DDL SHA-256 is unchanged: `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+- Prior regression counts remained unchanged: P4.2 `5/29`; P4.1 `8/15`; P3.5 `12/25/1`; P3.4 `6/31`; P3.3 `5/25`; P3.2 `2/21`; P3.1 `11/26`; P2.C1 `5/1`; P2.6b `5/12/8/3`; P2.6a `4/28`; P2.5 `4/18`; P2.4b `6/25`; P2.4a `8/31`; P2.3 `7/28`; P2.2 `6/20`; P2.1 `8/31`; P1.9 `15`; P1.8 `28`; P1.10 `6/1/4`.
+- Compile, P4.3 public import smoke, `git diff --check`, and changed-path review pass. The repair diff contains only the three authorized stale-surface test files, the two P4.3 proof modules, the final fake acceptance, and this evidence file; no production source or ADR changed.
+- Security/effect review passes. Tests use temporary SQLite, synthetic catalog/effect ports and deterministic clocks only. No real Telegram, network, Codex, thread/turn/delete, interrupt, delivery, P1.7 response, production database/state root or service was touched. No evidence or test output contains real credentials, keys, tokens, private paths, raw exceptions, prompts, outputs, or live entity identifiers.

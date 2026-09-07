@@ -3,7 +3,7 @@ import os
 import tempfile
 import unittest
 
-from codex_control.adapters.telegram import PrivateCommand
+from codex_control.adapters.telegram import PrivateCommand, PrivateInboundKind, TelegramPrivateUpdateAdapter
 from codex_control.application import (
     PrivateCallbackRequest,
     PrivateCommandRequest,
@@ -13,28 +13,49 @@ from codex_control.application import (
 from codex_control.storage import (
     ApprovalKind,
     ApprovalRepository,
+    ApprovalState,
+    ControllerRuntimeRepository,
     DialogueRepository,
+    ErrorFingerprintRepository,
     PrivateCallbackActionSpec,
     PrivateManagementRepository,
     TransientPayloadKind,
     TransientPayloadRepository,
     TurnJobRepository,
+    TurnJobState,
 )
 
-from tests.integration.test_private_control import Catalog, PassiveEffects
+from tests.integration.test_private_control import Catalog
+
+
+class RecordingEffects:
+    def __init__(self):
+        self.interrupt_calls = []
+        self.delete_calls = []
+
+    async def interrupt(self, request):
+        self.interrupt_calls.append(request)
+        raise AssertionError("real interrupt effect is forbidden in P4 acceptance")
+
+    async def delete(self, request):
+        self.delete_calls.append(request)
+        raise AssertionError("real delete effect is forbidden in P4 acceptance")
 
 
 class FinalFakeP4AcceptanceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
-        self.clock = lambda: 100
-        from codex_control.storage import ControllerRuntimeRepository, SettingsRepository, SqliteStorage
+        self.now = 100
+        self.clock = lambda: self.now
+        from codex_control.storage import SettingsRepository, SqliteStorage
         self.storage = await SqliteStorage.open(os.path.join(self.tempdir.name, "state.sqlite3"), now_ms=self.clock)
         await ControllerRuntimeRepository(self.storage, now_ms=self.clock).begin_boot("fleet")
         await SettingsRepository(self.storage, now_ms=self.clock).initialize_if_absent(
             profile_id="profile-a", model_id="model-a", reasoning_effort="high"
         )
         self.number = 0
+        self.effects = RecordingEffects()
+        self.adapter = TelegramPrivateUpdateAdapter(7)
 
         def token_factory():
             self.number += 1
@@ -45,7 +66,7 @@ class FinalFakeP4AcceptanceTests(unittest.IsolatedAsyncioTestCase):
         self.service = PrivateControlService(
             self.storage, server_id="server-80", server_display_name="Server 80", operator_user_id=7,
             profiles=(CodexProfile("profile-a", "/synthetic/profile-a", "Profile A"),),
-            model_catalog=Catalog(), interrupt_service=PassiveEffects(), delete_service=PassiveEffects(),
+            model_catalog=Catalog(), interrupt_service=self.effects, delete_service=self.effects,
             now_ms=self.clock, token_factory=token_factory,
         )
 
@@ -58,10 +79,23 @@ class FinalFakeP4AcceptanceTests(unittest.IsolatedAsyncioTestCase):
         return next(button.callback_data[4:] for row in panel.rows for button in row if button.label == label)
 
     async def test_final_private_management_composition_fake(self):
-        root = await self.service.handle_command(PrivateCommandRequest(200, 7, 7, PrivateCommand.MENU))
+        before_menu = await ControllerRuntimeRepository(self.storage).get()
+        inbound = self.adapter.normalize({
+            "update_id": 200,
+            "message": {"from": {"id": 7, "is_bot": False}, "chat": {"id": 7, "type": "private"}, "text": "/menu"},
+        })
+        self.assertIs(PrivateInboundKind.COMMAND, inbound.kind)
+        self.assertIs(PrivateCommand.MENU, inbound.command)
+        root = await self.service.handle_command(PrivateCommandRequest(inbound.update_id, inbound.user_id, inbound.chat_id, inbound.command))
         self.assertEqual(PrivateControlStatus.RENDERED, root.status)
+        self.assertEqual(before_menu, await ControllerRuntimeRepository(self.storage).get())
+        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM turn_jobs").fetchone()[0]))
 
         settings_token = self.token(root.panel, "Settings")
+        settings_row = await self.storage.read(lambda c, h=hashlib.sha256(settings_token.encode()).hexdigest(): tuple(c.execute(
+            "SELECT action, subject_type, subject_id, expected_version, expected_state, consumed_at_ms "
+            "FROM callback_actions WHERE token_hash_sha256 = ?", (h,)).fetchone()))
+        self.assertEqual(("OPEN_ROOT", "panel", "0", 0, "NO_DIALOGUE", None), settings_row)
         settings = await self.service.handle_callback(PrivateCallbackRequest(201, 7, 7, "settings", settings_token))
         self.assertEqual(PrivateControlStatus.RENDERED, settings.status)
         model_token = self.token(settings.panel, "Models")
@@ -104,6 +138,10 @@ class FinalFakeP4AcceptanceTests(unittest.IsolatedAsyncioTestCase):
             kind=ApprovalKind.COMMAND_EXECUTION, job_id="job", expected_job_version=running.version,
             display_payload_id=payload.payload_id, expires_at_ms=10000,
         )
+        fingerprint = "e" * 64
+        await ErrorFingerprintRepository(self.storage, now_ms=self.clock).record(
+            fingerprint_sha256=fingerprint, error_class="CODEX_PROCESS", dialogue_id="dialogue", job_id="job"
+        )
         root = await self.service.handle_command(PrivateCommandRequest(207, 7, 7, PrivateCommand.MENU))
         dialogue_token = self.token(root.panel, "Dialogue")
         running_status = await self.service.handle_callback(PrivateCallbackRequest(208, 7, 7, "running-dialogue", dialogue_token))
@@ -111,21 +149,45 @@ class FinalFakeP4AcceptanceTests(unittest.IsolatedAsyncioTestCase):
         confirmation = await self.service.handle_callback(PrivateCallbackRequest(209, 7, 7, "delete", delete_token))
         self.assertEqual(PrivateControlStatus.CONFIRM_REQUIRED, confirmation.status)
         self.assertIn("CONFIRM DELETE", [button.label for row in confirmation.panel.rows for button in row])
+        cancel = self.token(confirmation.panel, "Cancel")
+        cancelled = await self.service.handle_callback(PrivateCallbackRequest(210, 7, 7, "cancel", cancel))
+        self.assertEqual(PrivateControlStatus.RENDERED, cancelled.status)
+        self.assertEqual([], self.effects.interrupt_calls)
+        self.assertEqual([], self.effects.delete_calls)
 
-        root = await self.service.handle_command(PrivateCommandRequest(210, 7, 7, PrivateCommand.MENU))
+        root = await self.service.handle_command(PrivateCommandRequest(211, 7, 7, PrivateCommand.MENU))
+        diagnostics = await self.service.handle_callback(PrivateCallbackRequest(212, 7, 7, "diagnostics", self.token(root.panel, "Diagnostics")))
+        self.assertEqual(PrivateControlStatus.RENDERED, diagnostics.status)
+        self.assertIn("CODEX_PROCESS", diagnostics.panel.text)
+        self.assertIn("count 1", diagnostics.panel.text)
+        self.assertIn("scope dialogue+job", diagnostics.panel.text)
+        self.assertNotIn(fingerprint, diagnostics.panel.text)
+        self.assertNotIn("dialogue", diagnostics.panel.text.replace("scope dialogue+job", ""))
+        self.assertNotIn("job", diagnostics.panel.text.replace("scope dialogue+job", ""))
+        self.assertNotIn("fake-thread", diagnostics.panel.text)
+        self.assertNotIn("fake-turn", diagnostics.panel.text)
+        self.assertNotIn("/synthetic/profile-a", diagnostics.panel.text)
+
+        root = await self.service.handle_command(PrivateCommandRequest(213, 7, 7, PrivateCommand.MENU))
         approval_token = self.token(root.panel, "Approvals")
-        approval = await self.service.handle_callback(PrivateCallbackRequest(211, 7, 7, "approval", approval_token))
+        approval = await self.service.handle_callback(PrivateCallbackRequest(214, 7, 7, "approval", approval_token))
         self.assertEqual(PrivateControlStatus.RENDERED, approval.status)
         self.assertIn("fake privileged command", approval.panel.text)
         self.assertIn("Allow", [button.label for row in approval.panel.rows for button in row])
         allow = self.token(approval.panel, "Allow")
-        unauthorized = await self.service.handle_callback(PrivateCallbackRequest(212, 8, 8, "approval", allow))
+        unauthorized = await self.service.handle_callback(PrivateCallbackRequest(215, 8, 8, "approval", allow))
         self.assertEqual(PrivateControlStatus.UNAUTHORIZED, unauthorized.status)
-        decided = await self.service.handle_callback(PrivateCallbackRequest(213, 7, 7, "approval", allow))
+        self.assertIsNone(await self.storage.read(lambda c, h=hashlib.sha256(allow.encode()).hexdigest(): c.execute(
+            "SELECT consumed_at_ms FROM callback_actions WHERE token_hash_sha256 = ?", (h,)).fetchone()[0]))
+        decided = await self.service.handle_callback(PrivateCallbackRequest(216, 7, 7, "approval", allow))
         self.assertEqual(PrivateControlStatus.APPROVED, decided.status)
-        replay = await self.service.handle_callback(PrivateCallbackRequest(214, 7, 7, "approval", allow))
+        replay = await self.service.handle_callback(PrivateCallbackRequest(217, 7, 7, "approval", allow))
         self.assertEqual(PrivateControlStatus.ALREADY_USED, replay.status)
-        self.assertEqual("APPROVED", (await ApprovalRepository(self.storage).get("approval")).state.value)
+        self.assertIs(ApprovalState.APPROVED, (await ApprovalRepository(self.storage).get("approval")).state)
+        deny = self.token(approval.panel, "Deny")
+        sibling = await self.service.handle_callback(PrivateCallbackRequest(218, 7, 7, "approval", deny))
+        self.assertEqual(PrivateControlStatus.STALE, sibling.status)
+        self.assertIs(ApprovalState.APPROVED, (await ApprovalRepository(self.storage).get("approval")).state)
         projected = await self.service.project_approval(PrivateApprovalProjectionRequest("approval"))
         self.assertEqual(PrivateControlStatus.BLOCKED, projected.status)
 
@@ -136,5 +198,21 @@ class FinalFakeP4AcceptanceTests(unittest.IsolatedAsyncioTestCase):
                 "PRIVATE_ROOT", 7, 7,
             ),), created_at_ms=100, expires_at_ms=1000,
         )
-        unknown_result = await self.service.handle_callback(PrivateCallbackRequest(215, 7, 7, "unknown", unknown))
+        unknown_result = await self.service.handle_callback(PrivateCallbackRequest(219, 7, 7, "unknown", unknown))
         self.assertEqual(PrivateControlStatus.BLOCKED, unknown_result.status)
+        self.assertIsNone(await self.storage.read(lambda c, h=hashlib.sha256(unknown.encode()).hexdigest(): c.execute(
+            "SELECT consumed_at_ms FROM callback_actions WHERE token_hash_sha256 = ?", (h,)).fetchone()[0]))
+
+        stale_root = await self.service.handle_command(PrivateCommandRequest(220, 7, 7, PrivateCommand.MENU))
+        stale_token = self.token(stale_root.panel, "Refresh")
+        before_dialogue = await DialogueRepository(self.storage).get_live()
+        before_job = await TurnJobRepository(self.storage).get("job")
+        before_boot = await ControllerRuntimeRepository(self.storage).get()
+        after_boot = await ControllerRuntimeRepository(self.storage, now_ms=self.clock).begin_boot("fleet")
+        self.assertEqual(before_boot.boot_generation + 1, after_boot.record.boot_generation)
+        stale = await self.service.handle_callback(PrivateCallbackRequest(221, 7, 7, "old-root", stale_token))
+        self.assertEqual(PrivateControlStatus.STALE, stale.status)
+        self.assertEqual(before_dialogue, await DialogueRepository(self.storage).get_live())
+        self.assertEqual(before_job, await TurnJobRepository(self.storage).get("job"))
+        self.assertIsNotNone(await self.storage.read(lambda c, h=hashlib.sha256(stale_token.encode()).hexdigest(): c.execute(
+            "SELECT consumed_at_ms FROM callback_actions WHERE token_hash_sha256 = ?", (h,)).fetchone()[0]))

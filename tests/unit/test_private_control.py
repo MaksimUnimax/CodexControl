@@ -1,7 +1,7 @@
 import unittest
 from dataclasses import FrozenInstanceError, fields
 
-from codex_control.adapters.telegram import TelegramPrivateControlRenderer
+from codex_control.adapters.telegram import PrivateCommand, TelegramPrivateControlRenderer
 from codex_control.application import (
     P43_APPROVAL_DETAILS_MAX_CHARS,
     PrivateAdminButton,
@@ -23,9 +23,11 @@ from codex_control.application.private_dialogue import (
     PrivateDialoguePanelSection,
 )
 from codex_control.application.private_settings import (
+    PrivateAdminReason,
     PrivateAdminStatus,
     PrivatePanelSection,
 )
+from codex_control.application.private_dialogue import PrivateDialogueReason, PrivateDialogueStatus
 
 
 class PrivateControlContractTests(unittest.TestCase):
@@ -39,6 +41,28 @@ class PrivateControlContractTests(unittest.TestCase):
             [item.value for item in PrivateControlReason],
         )
         self.assertEqual("INVALID_ARGUMENT STORAGE INVARIANT".split(), [item.value for item in PrivateControlErrorCategory])
+
+    def test_accepted_private_command_p41_and_p42_enums_are_unchanged(self):
+        self.assertEqual(["MENU", "SETTINGS"], [item.value for item in PrivateCommand])
+        self.assertEqual(
+            "RENDERED UPDATED NO_CHANGE BLOCKED STALE EXPIRED ALREADY_USED DUPLICATE UNAUTHORIZED UNSUPPORTED".split(),
+            [item.value for item in PrivateAdminStatus],
+        )
+        self.assertEqual(
+            "CALLBACK_NOT_FOUND STALE_ACTION SETTINGS_MISSING PROFILE_NOT_CONFIGURED PROFILE_LOCKED DIALOGUE_NOT_IDLE MODEL_NOT_CONFIGURED MODEL_UNAVAILABLE REASONING_EFFORT_UNSUPPORTED CATALOG_UNAVAILABLE ACTION_UNAVAILABLE".split(),
+            [item.value for item in PrivateAdminReason],
+        )
+        self.assertEqual(["ROOT", "PROFILES", "MODELS", "REASONING"], [item.value for item in PrivatePanelSection])
+        self.assertEqual(
+            "RENDERED CONFIRM_REQUIRED INTERRUPTED DELETED BLOCKED STALE UNKNOWN FAILED EXPIRED ALREADY_USED UNAUTHORIZED".split(),
+            [item.value for item in PrivateDialogueStatus],
+        )
+        self.assertEqual(
+            "CALLBACK_NOT_FOUND STALE_ACTION NO_DIALOGUE DIALOGUE_NOT_RUNNING JOB_NOT_RUNNING ACTIVE_BINDING_UNAVAILABLE INTERRUPT_IN_PROGRESS INTERRUPT_UNRESOLVED DIALOGUE_NOT_READY DELETE_NOT_READY DELETE_IN_PROGRESS DELETE_UNKNOWN ACTION_UNAVAILABLE".split(),
+            [item.value for item in PrivateDialogueReason],
+        )
+        from codex_control.application.private_dialogue import PrivateDialoguePanelSection
+        self.assertEqual(["STATUS", "DELETE_CONFIRM"], [item.value for item in PrivateDialoguePanelSection])
 
     def test_public_records_are_frozen_and_redacted(self):
         request = PrivateApprovalProjectionRequest("approval-secret")

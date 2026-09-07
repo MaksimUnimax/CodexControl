@@ -74,10 +74,10 @@ class P26bContractSnapshotTests(unittest.IsolatedAsyncioTestCase):
             TurnJobRepository: {"get", "claim_ingress", "claim_turn", "mark_codex_starting", "mark_codex_running", "finish_codex"},
             TransientPayloadRepository: {"get", "get_input_for_job", "create"},
             DeliverySegmentRepository: {"get", "list_for_job", "plan", "claim_next", "finish_sending"},
-            ApprovalRepository: {"get", "create_pending", "claim_callback", "cancel_pending_for_job"},
+            ApprovalRepository: {"get", "list_pending_for_job", "create_pending", "claim_callback", "cancel_pending_for_job"},
             RetentionRepository: {"sweep"},
             DeletionRepository: {"get_tombstone", "claim_delete_intent", "claim_deleting", "mark_delete_unknown", "mark_delete_error", "finalize_confirmed"},
-            ErrorFingerprintRepository: {"get", "record"},
+            ErrorFingerprintRepository: {"get", "record", "latest"},
             MetadataRetentionRepository: {"sweep"},
         }
         forbidden = {"retry", "requeue", "reset", "reconcile", "transition", "set_state", "send", "respond", "thread_delete", "purge_dialogue", "run_forever"}

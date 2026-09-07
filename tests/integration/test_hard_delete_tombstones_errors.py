@@ -120,7 +120,7 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
             {name for name, value in vars(DeletionRepository).items() if not name.startswith("_") and callable(value)},
         )
         self.assertEqual(
-            {"get", "record"},
+            {"get", "record", "latest"},
             {name for name, value in vars(ErrorFingerprintRepository).items() if not name.startswith("_") and callable(value)},
         )
         storage = await self.open()
