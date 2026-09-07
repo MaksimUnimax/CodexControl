@@ -79,6 +79,17 @@ from .private_settings import (
     PrivatePanelSection,
     PrivateSettingsManagementService,
 )
+from .private_dialogue import (
+    PrivateDialogueError,
+    PrivateDialogueErrorCategory,
+    PrivateDialogueManagementService,
+    PrivateDialogueOpenRequest,
+    PrivateDialoguePanel,
+    PrivateDialoguePanelSection,
+    PrivateDialogueReason,
+    PrivateDialogueResult,
+    PrivateDialogueStatus,
+)
 
 __all__ = [
     "P3_INPUT_PAYLOAD_RETENTION_MS",
@@ -145,4 +156,13 @@ __all__ = [
     "PrivateCommandRequest",
     "PrivatePanelSection",
     "PrivateSettingsManagementService",
+    "PrivateDialogueOpenRequest",
+    "PrivateDialogueStatus",
+    "PrivateDialogueReason",
+    "PrivateDialogueErrorCategory",
+    "PrivateDialogueError",
+    "PrivateDialoguePanelSection",
+    "PrivateDialoguePanel",
+    "PrivateDialogueResult",
+    "PrivateDialogueManagementService",
 ]

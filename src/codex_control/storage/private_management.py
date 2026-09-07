@@ -158,6 +158,21 @@ class PrivateManagementRepository:
 
         return await self._storage.write(write)
 
+    async def peek_callback(self, token_hash_sha256: str) -> CallbackActionRecord | None:
+        """Read one callback action without consuming or consulting the clock."""
+        token_hash_sha256 = _validate_token_hash(token_hash_sha256)
+
+        def read(connection: Any) -> CallbackActionRecord | None:
+            row = connection.execute(
+                "SELECT token_hash_sha256, action, subject_type, subject_id, expected_version, "
+                "expected_state, authorized_user_id, authorized_chat_id, created_at_ms, expires_at_ms, consumed_at_ms "
+                "FROM callback_actions WHERE token_hash_sha256 = ?",
+                (token_hash_sha256,),
+            ).fetchone()
+            return None if row is None else _materialize_callback(row)
+
+        return await self._storage.read(read)
+
 
 def _validate_nonzero_chat_id(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value == 0 or not -(2**63) <= value <= 2**63 - 1:

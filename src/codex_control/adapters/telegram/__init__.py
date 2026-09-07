@@ -1,6 +1,7 @@
 """Pure, Telegram-shaped private management boundary."""
 
 from .private_render import TelegramPrivatePanelRenderer
+from .private_dialogue_render import TelegramPrivateDialoguePanelRenderer
 from .private_updates import (
     PrivateCommand,
     PrivateInboundKind,
@@ -14,4 +15,5 @@ __all__ = [
     "PrivateInboundUpdate",
     "TelegramPrivateUpdateAdapter",
     "TelegramPrivatePanelRenderer",
+    "TelegramPrivateDialoguePanelRenderer",
 ]
