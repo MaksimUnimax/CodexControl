@@ -236,14 +236,10 @@ class PrivateManagementRepository:
             for record in records:
                 if record.consumed_at_ms is not None:
                     continue
-                revoked_at = min(
-                    record.expires_at_ms,
-                    max(record.created_at_ms, consumed_at_ms),
-                )
                 changed = connection.execute(
                     "UPDATE callback_actions SET consumed_at_ms = ? "
                     "WHERE token_hash_sha256 = ? AND consumed_at_ms IS NULL",
-                    (revoked_at, record.token_hash_sha256),
+                    (record.expires_at_ms, record.token_hash_sha256),
                 ).rowcount
                 if changed != 1:
                     raise RepositoryError(RepositoryErrorCategory.INVARIANT_VIOLATION)

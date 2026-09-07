@@ -652,6 +652,141 @@ class PrivateDialogueControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
             PrivateDialogueStatus.ALREADY_USED,
             (await service.handle_callback(PrivateCallbackRequest(54, 7, 7, "query", second_confirm))).status,
         )
+        for token in (first_confirm, second_confirm):
+            consumed, expires = await self.storage.read(
+                lambda c, token_hash=hashlib.sha256(token.encode()).hexdigest(): tuple(c.execute(
+                    "SELECT consumed_at_ms, expires_at_ms FROM callback_actions "
+                    "WHERE token_hash_sha256 = ?",
+                    (token_hash,),
+                ).fetchone())
+            )
+            self.assertEqual(consumed, expires)
+
+    async def test_cancel_is_repeatable_in_unchanged_idle_generation_with_expiry_sentinel(self):
+        await self.seed_idle()
+        delete = MappingDeleteService(DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, None, None, None))
+        service = self.p42(PassiveService(), delete)
+
+        initial = await service.open_status(PrivateDialogueOpenRequest(7, 7))
+        generation_before = await DialogueRepository(self.storage).get_live()
+        first_begin = await self.action_token(initial.panel, "P42_BEGIN_DELETE")
+        first_confirmation = await service.handle_callback(
+            PrivateCallbackRequest(79, 7, 7, "query", first_begin)
+        )
+        first_confirm = await self.action_token(first_confirmation.panel, "P42_CONFIRM_DELETE")
+        first_cancel = await self.action_token(first_confirmation.panel, "P42_CANCEL_DELETE")
+        first_confirm_hash = hashlib.sha256(first_confirm.encode()).hexdigest()
+        first_expiry = await self.storage.read(
+            lambda c: c.execute(
+                "SELECT expires_at_ms FROM callback_actions WHERE token_hash_sha256 = ?",
+                (first_confirm_hash,),
+            ).fetchone()[0]
+        )
+
+        cancelled_first = await service.handle_callback(
+            PrivateCallbackRequest(80, 7, 7, "query", first_cancel)
+        )
+        self.assertEqual(PrivateDialogueStatus.RENDERED, cancelled_first.status)
+        first_row = await self.storage.read(
+            lambda c: tuple(c.execute(
+                "SELECT consumed_at_ms, expires_at_ms FROM callback_actions "
+                "WHERE token_hash_sha256 = ?",
+                (first_confirm_hash,),
+            ).fetchone())
+        )
+        self.assertEqual(first_expiry, first_row[1])
+        self.assertEqual(first_row[0], first_row[1])
+        self.assertEqual(
+            PrivateDialogueStatus.ALREADY_USED,
+            (await service.handle_callback(
+                PrivateCallbackRequest(81, 7, 7, "query", first_confirm)
+            )).status,
+        )
+
+        second_begin = await self.action_token(cancelled_first.panel, "P42_BEGIN_DELETE")
+        second_confirmation = await service.handle_callback(
+            PrivateCallbackRequest(82, 7, 7, "query", second_begin)
+        )
+        second_confirm = await self.action_token(second_confirmation.panel, "P42_CONFIRM_DELETE")
+        second_cancel = await self.action_token(second_confirmation.panel, "P42_CANCEL_DELETE")
+        cancelled_second = await service.handle_callback(
+            PrivateCallbackRequest(83, 7, 7, "query", second_cancel)
+        )
+        self.assertEqual(PrivateDialogueStatus.RENDERED, cancelled_second.status)
+        generation_after = await DialogueRepository(self.storage).get_live()
+        self.assertEqual(
+            (generation_before.dialogue_id, generation_before.version, generation_before.state),
+            (generation_after.dialogue_id, generation_after.version, generation_after.state),
+        )
+        second_confirm_hash = hashlib.sha256(second_confirm.encode()).hexdigest()
+        second_row = await self.storage.read(
+            lambda c: tuple(c.execute(
+                "SELECT consumed_at_ms, expires_at_ms FROM callback_actions "
+                "WHERE token_hash_sha256 = ?",
+                (second_confirm_hash,),
+            ).fetchone())
+        )
+        self.assertEqual(second_row[0], second_row[1])
+        self.assertEqual(
+            PrivateDialogueStatus.ALREADY_USED,
+            (await service.handle_callback(
+                PrivateCallbackRequest(84, 7, 7, "query", second_confirm)
+            )).status,
+        )
+        self.assertEqual(0, len(delete.calls))
+
+    async def test_direct_revocation_ignores_old_expiry_sentinel_and_marks_new_row_at_expiry(self):
+        current = await self.seed_idle()
+        repository = PrivateManagementRepository(self.storage, now_ms=self.clock)
+        old_token = "O" * 32
+        new_token = "N" * 32
+        old_hash = hashlib.sha256(old_token.encode()).hexdigest()
+        new_hash = hashlib.sha256(new_token.encode()).hexdigest()
+        subject_id = hashlib.sha256(
+            f"{current.dialogue_id}\x00{current.state.value}\x00-\x00-".encode()
+        ).hexdigest()
+        await repository.create_callback_batch(
+            actions=(
+                PrivateCallbackActionSpec(
+                    old_hash, "P42_CONFIRM_DELETE", "p42_delete", subject_id,
+                    current.version, current.state.value, 7, 7,
+                ),
+                PrivateCallbackActionSpec(
+                    new_hash, "P42_CONFIRM_DELETE", "p42_delete", subject_id,
+                    current.version, current.state.value, 7, 7,
+                ),
+            ),
+            created_at_ms=1000,
+            expires_at_ms=901000,
+        )
+        await self.storage.write(lambda c: c.execute(
+            "UPDATE callback_actions SET consumed_at_ms = expires_at_ms "
+            "WHERE token_hash_sha256 = ?",
+            (old_hash,),
+        ).rowcount)
+        self.clock.calls = 0
+        result = await repository.revoke_delete_confirmations(
+            subject_id=subject_id,
+            expected_version=current.version,
+            expected_state=current.state.value,
+            authorized_user_id=7,
+            authorized_chat_id=7,
+            consumed_at_ms=1001,
+        )
+        self.assertEqual("REVOKED", result.status.value)
+        self.assertEqual(1, result.revoked_count)
+        self.assertEqual(0, self.clock.calls)
+        rows = await self.storage.read(lambda c: tuple(
+            tuple(row) for row in c.execute(
+                "SELECT token_hash_sha256, consumed_at_ms, expires_at_ms "
+                "FROM callback_actions WHERE subject_id = ? ORDER BY token_hash_sha256",
+                (subject_id,),
+            ).fetchall()
+        ))
+        self.assertEqual(2, len(rows))
+        by_hash = {row[0]: row[1:] for row in rows}
+        self.assertEqual(by_hash[old_hash][0], by_hash[old_hash][1])
+        self.assertEqual(by_hash[new_hash][0], by_hash[new_hash][1])
 
     async def test_cancel_does_not_revoke_other_generation(self):
         current = await self.seed_idle()
@@ -697,11 +832,20 @@ class PrivateDialogueControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         confirm = await self.action_token(confirmation.panel, "P42_CONFIRM_DELETE")
         cancel = await self.action_token(confirmation.panel, "P42_CANCEL_DELETE")
+        confirm_hash = hashlib.sha256(confirm.encode()).hexdigest()
 
         confirm_task = asyncio.create_task(
             service.handle_callback(PrivateCallbackRequest(59, 7, 7, "query", confirm))
         )
         await delete.entered.wait()
+        claimed_consumed, claimed_expires = await self.storage.read(
+            lambda c: tuple(c.execute(
+                "SELECT consumed_at_ms, expires_at_ms FROM callback_actions "
+                "WHERE token_hash_sha256 = ?",
+                (confirm_hash,),
+            ).fetchone())
+        )
+        self.assertLess(claimed_consumed, claimed_expires)
         cancelled = await service.handle_callback(
             PrivateCallbackRequest(60, 7, 7, "query", cancel)
         )

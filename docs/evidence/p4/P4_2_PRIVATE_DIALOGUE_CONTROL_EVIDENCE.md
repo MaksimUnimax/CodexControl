@@ -200,12 +200,12 @@ DELETING/DELETE_UNKNOWN, and no private ACTIVE/group routing.
 
 ### Verification and regression counts
 
-- Final P4.2 focused counts: unit `5`, integration `27`; total `32`.
+- Historical first-repair focused counts: unit `5`, integration `27`; total `32`.
 - Accepted pre-P4.2 full baseline: `694`.
 - Required full command: `PYTHONPATH=src python3 -m unittest discover -s tests -v`.
-- Final observed full result: `726` tests, `OK`.
-- Exact arithmetic: `EXPECTED_FULL_TESTS = 694 + 5 + 27 = 726` and
-  `OBSERVED_FULL_TESTS = 726`; the formula matches.
+- Historical first-repair observed full result: `726` tests, `OK`.
+- Historical first-repair arithmetic: `EXPECTED_FULL_TESTS = 694 + 5 + 27 = 726` and
+  `OBSERVED_FULL_TESTS = 726`; this is not the second-repair final count.
 - Prior focused regressions passed at the required authority counts: P4.1
   `8/15`; P3.5 `12/25/1`; P3.4 `6/31`; P3.3 `5/25`; P3.2 `2/21`; P3.1
   `11/26`; P2.C1 `5/1`; P2.6b `5/12/8/3`; P2.6a `4/28`; P2.5 `4/18`;
@@ -225,3 +225,90 @@ service, credential or secret effect occurred. No raw callback token/hash,
 thread/job/turn ID, prompt/output, environment, credential or raw exception
 body was added to evidence or generic diagnostics. P4.2 remains not
 architect-accepted.
+
+## Architect second repair
+
+This section records factual second-repair evidence only. It does not claim
+architect acceptance, close Issue #29, change main, or authorize P4.3/P5.
+
+### Authority and exact repair
+
+- First repair parent: `e6bb85986835d82e5b4235f83aef33cc10501fbc`.
+- Architect second review/addendum: `5568879298`.
+- Original architect base and unchanged main authority:
+  `a4ad1f70cf2fa1abdecd8d37900a53de4fbfbe7d`.
+- The only production change is in `PrivateManagementRepository.revoke_delete_confirmations`.
+  The existing API argument is retained for compatibility and validation, but it
+  is not used as the durable revocation timestamp.
+- No schema/DDL, ADR, accepted P4.1/P3 production, roadmap/current-work
+  authority, or later-slice surface was changed.
+
+### Exact revoked-confirmation sentinel
+
+For every matching row with `consumed_at_ms IS NULL`, successful cancellation
+now persists exactly that row's `expires_at_ms`. No cancel timestamp, current
+clock value, created time, clamped time, or `expires_at_ms - 1` is persisted.
+The transaction still materializes callback rows before mutation, treats only
+`consumed_at_ms < expires_at_ms` as claimed destructive authority, leaves
+already-terminal `consumed_at_ms == expires_at_ms` rows non-blocking, revokes
+all matching outstanding rows, and performs zero clock reads.
+
+### Repeatable cancellation and direct storage proof
+
+The deterministic unchanged-IDLE-generation proof now runs:
+
+1. BEGIN #1 -> CANCEL #1 returns `RENDERED`.
+2. CONFIRM #1 is durably `consumed_at_ms == expires_at_ms` and replays as
+   `ALREADY_USED`.
+3. The same dialogue ID/version/state is used for BEGIN #2 -> CANCEL #2,
+   which also returns `RENDERED`.
+4. CONFIRM #2 is durably `consumed_at_ms == expires_at_ms` and replays as
+   `ALREADY_USED`.
+5. Total injected delete calls across both cancellations is zero.
+
+The direct repository proof seeds one old terminal expiry-sentinel row and one
+new unconsumed row for the same exact delete context. Revocation returns
+`REVOKED`, does not treat the old row as claimed, marks only the new row at its
+exact expiry sentinel, and records zero injected clock calls.
+
+### Preserved authority distinctions and regressions
+
+- The event-driven claimed-confirm race remains distinct: the claimed row is
+  explicitly asserted with `consumed_at_ms < expires_at_ms`; Cancel returns
+  `STALE / STALE_ACTION`, dispatches zero Cancel-side effects, and at most one
+  delete invocation is observed.
+- Expired confirmations remain `consumed_at_ms == expires_at_ms` and do not
+  block later same-context cancellation.
+- Multiple same-context confirmations are all revoked at their expiry
+  sentinels; old confirmations replay as `ALREADY_USED`. Cross-generation
+  confirmation rows remain untouched.
+- Existing first-repair proofs remain green for stale confirm, wrong principal,
+  exact P3.4 binding identity, exact running-delete request, P4.1 token routing,
+  BEGIN_DELETE zero effect, IDLE/DELETE_PENDING P3.5 composition,
+  DELETING/DELETE_UNKNOWN refresh-only behavior, collision atomicity, and the
+  strict P3.4/P3.5 status-reason pairs.
+
+### Verification and final counts
+
+- Second-repair focused unit tests: `5`.
+- Second-repair focused integration tests: `29`.
+- Accepted pre-P4.2 baseline: `694`.
+- Required full discovery: `728` tests, `OK`.
+- Exact arithmetic: `EXPECTED_FULL_TESTS = 694 + 5 + 29 = 728` and
+  `OBSERVED_FULL_TESTS = 728`; the formula matches.
+- Prior focused regressions passed at the required authority counts: P4.1
+  `8/15`; P3.5 `12/25/1`; P3.4 `6/31`; P3.3 `5/25`; P3.2 `2/21`; P3.1
+  `11/26`; P2.C1 `5/1`; P2.6b `5/12/8/3`; P2.6a `4/28`; P2.5 `4/18`;
+  P2.4b `6/25`; P2.4a `8/31`; P2.3 `7/28`; P2.2 `6/20`; P2.1 `8/31`;
+  P1.9 `15`; P1.8 `28`; P1.10 `6/1/4`.
+- The known P1.6 pending-task warning was observed during full discovery; no
+  P4.2-owned task leak was observed or introduced.
+- DDL SHA-256 remains
+  `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+- Compileall, public import smoke, diff-check, changed-file boundary checks,
+  and secret/content/effect scans are final handoff checks; all use temporary
+  SQLite and fake local effect ports. No real Telegram, network, Codex, thread,
+  turn, interrupt, delete, approval, delivery, production DB, production state
+  root, or production service effect occurred.
+
+P4.2 remains not architect-accepted and Issue #29 remains open.
