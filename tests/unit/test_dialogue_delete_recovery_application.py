@@ -126,6 +126,7 @@ class DialogueDeleteRecoveryApplicationUnitTests(unittest.IsolatedAsyncioTestCas
         registry.retire("job", binding)
         await waiter
         self.assertIsNone(registry.lookup("job"))
+        self.assertEqual({}, registry._watches)
         self.assertNotIn("_retired", vars(registry))
 
     async def test_registry_stale_retirement_does_not_release_exact_waiter(self):
@@ -167,6 +168,29 @@ class DialogueDeleteRecoveryApplicationUnitTests(unittest.IsolatedAsyncioTestCas
         with self.assertRaises(RuntimeError):
             await waiter
         self.assertIs(new, registry.lookup("job"))
+        self.assertEqual({}, registry._watches)
+
+    async def test_registry_transient_replacements_fail_old_waiter_closed(self):
+        registry = ActiveTurnRegistry()
+        old = TurnBinding("profile", "thread", "old")
+        replacement = TurnBinding("profile", "thread", "replacement")
+        later = TurnBinding("profile", "thread", "later")
+        registry.publish("job", old)
+        watch = registry.wait_retired("job", old)
+        waiter = asyncio.create_task(watch.wait())
+        await asyncio.sleep(0)
+
+        registry.retire("job", old)
+        registry.publish("job", replacement)
+        registry.retire("job", replacement)
+        registry.publish("job", later)
+        registry.retire("job", later)
+
+        with self.assertRaises(RuntimeError):
+            await waiter
+        self.assertEqual({}, registry._entries)
+        self.assertEqual({}, registry._watches)
+        self.assertIsNone(registry.lookup("job"))
 
     async def test_registry_replacement_waits_for_new_exact_owner(self):
         registry = ActiveTurnRegistry()
@@ -194,7 +218,7 @@ class DialogueDeleteRecoveryApplicationUnitTests(unittest.IsolatedAsyncioTestCas
             self.assertIsNone(registry.lookup(job_id))
         self.assertEqual({}, registry._entries)
         self.assertNotIn("_retired", vars(registry))
-        self.assertEqual({"_entries": {}}, vars(registry))
+        self.assertEqual({"_entries": {}, "_watches": {}}, vars(registry))
 
     async def test_registry_disposed_watch_has_no_ownership_or_pending_wait(self):
         registry = ActiveTurnRegistry()

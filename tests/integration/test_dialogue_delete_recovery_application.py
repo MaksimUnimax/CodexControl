@@ -13,7 +13,13 @@ from codex_control.adapters.codex.thread_lifecycle import (
     ThreadOperationStatus,
     TrustedWorkingDirectory,
 )
-from codex_control.adapters.codex.turn_lifecycle import TurnBinding
+from codex_control.adapters.codex.turn_lifecycle import (
+    TurnBinding,
+    TurnInterruptResult,
+    TurnInterruptStatus,
+    TurnTerminalResult,
+    TurnTerminalStatus,
+)
 from codex_control.application import (
     ActiveTurnRegistry,
     DialogueDeleteError,
@@ -21,6 +27,7 @@ from codex_control.application import (
     DialogueDeleteRequest,
     DialogueDeleteService,
     DialogueDeleteStatus,
+    DialogueInterruptService,
     DialogueInterruptResult,
     DialogueInterruptStatus,
     DialogueRecoveryError,
@@ -407,6 +414,49 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
         self.active_registry.retire(running_job.job_id, exact_binding)
         self.assertIsNone(self.active_registry.lookup(running_job.job_id))
         self.assertNotIn("_retired", vars(self.active_registry))
+
+    async def test_running_delete_fails_closed_after_transient_replacements_before_quiescence(self):
+        _, running_dialogue, running_job = await self.seed_running()
+        old_binding = self.active_registry.lookup(running_job.job_id)
+
+        class TransientReplacementLifecycle:
+            async def interrupt_turn(inner_self, binding):
+                self.assertIs(binding, old_binding)
+                self.active_registry.retire(running_job.job_id, old_binding)
+                replacement = TurnBinding("profile", "thread", "replacement")
+                self.active_registry.publish(running_job.job_id, replacement)
+                self.active_registry.retire(running_job.job_id, replacement)
+                return TurnInterruptResult(
+                    TurnInterruptStatus.CONFIRMED,
+                    binding,
+                    TurnTerminalResult(binding, TurnTerminalStatus.FAILED, ()),
+                )
+
+            async def wait_turn(inner_self, binding):
+                raise AssertionError("confirmed interrupt must not collect again")
+
+        interrupt = DialogueInterruptService(
+            self.storage,
+            server_id="server",
+            active_turn_registry=self.active_registry,
+            turn_lifecycle=TransientReplacementLifecycle(),
+            now_ms=lambda: 20,
+        )
+        lifecycle = FakeDeleteLifecycle()
+        with self.assertRaises(DialogueDeleteError) as raised:
+            await self.delete_service(lifecycle, interrupt=interrupt).delete(
+                DialogueDeleteRequest("dialogue", running_dialogue.version)
+            )
+        self.assertEqual("INVARIANT", str(raised.exception))
+        self.assertEqual([], lifecycle.calls)
+
+        durable_dialogue = await DialogueRepository(self.storage).get_live()
+        durable_job = await TurnJobRepository(self.storage).get(running_job.job_id)
+        self.assertEqual(DialogueState.IDLE, durable_dialogue.state)
+        self.assertEqual(TurnJobState.FAILED, durable_job.state)
+        self.assertIsNone(await DeletionRepository(self.storage).get_tombstone("dialogue"))
+        self.assertEqual({}, self.active_registry._entries)
+        self.assertEqual({}, self.active_registry._watches)
 
     async def test_running_delete_rejects_every_mismatched_definitive_interrupt_result(self):
         mutations = (

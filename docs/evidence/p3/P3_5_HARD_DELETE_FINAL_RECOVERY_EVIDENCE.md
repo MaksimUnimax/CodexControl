@@ -397,3 +397,74 @@ architect acceptance, close Issue #27, mark P3 complete, or authorize P4.
 - No raw binding/content/error values, prompts, outputs, credentials, tokens,
   private keys, or production paths were added to diagnostics, evidence, or
   commit metadata.
+
+## Architect fourth repair
+
+This section records factual fourth-repair evidence only. It does not claim
+architect acceptance, close Issue #27, mark P3 complete, or authorize P4.
+
+- Repair parent: `d9d1336f4cfd72e5d3d47db391fcac4bd43506d4`
+- Architect review comment: Issue #27 comment `5565728116`.
+- Original architect base remains:
+  `3e19f1028916613f7d89b254fdd7bf04505a2fb5`.
+- Issue #27 comments `5564792583`, `5565047063`, `5565286591`, and
+  `5565728116` were read from the repository API; the issue remains open.
+- No reset, rebase, merge, force-push, main change, ADR change, schema/DDL
+  change, P1/P2 change, or accepted prior-slice production rewrite was made.
+
+### Repair closure
+
+- `ActiveTurnRegistry` now keeps `_watches` only for currently armed live
+  retirement watches. Publication of any later generation for the same job
+  synchronously marks all older live watches superseded before installing the
+  new active entry.
+- Retirement notifies a watch only when the captured opaque generation token
+  is the exact retired entry token. The watch therefore proves exact A
+  retirement and cannot treat B/C retirement as A authority.
+- The sequence A retire -> B publish -> B retire fails the old A watch even
+  when the registry is empty when A resumes. The sequence A retire -> B
+  publish/retire -> C publish/retire also fails the old A watch.
+- Successful, failed, cancelled, and disposed watches unregister from live
+  bookkeeping. Ordinary 1000-cycle publish/retire testing leaves both
+  `_entries` and `_watches` empty and retains no historical binding archive.
+- The real P3.4-compatible integration composition arms A before interrupt,
+  lets P3.4 terminalize the durable row to `IDLE`/`FAILED`, then publishes
+  and retires transient B before A resumes. P3.5 returns `INVARIANT`; P1.9
+  delete calls are zero; no `DELETE_PENDING`, `DELETING`, tombstone, or purge
+  is created; and registry entries/watch bookkeeping are empty afterward.
+- Existing exact identity, clone rejection, stale retirement, active
+  replacement failure, non-definitive disposal, runner-before-delete, final
+  fake acceptance, and all prior recovery/terminal-shape proofs remain green.
+
+### Verification
+
+- Final P3.5 focused counts: unit `12`, integration `25`, final fake
+  acceptance `1`.
+- Accepted pre-P3.5 full count: `633`; arithmetic is
+  `633 + 12 + 25 + 1 = 671`; observed full discovery is `671`, all passing.
+- Required prior focused counts passed: P3.4 `6/31`, P3.3 `5/25`, P3.2
+  `2/21`, P3.1 `11/26`, P2.C1 `5/1`, P2.6b `5/12/8/3`, P2.6a `4/28`,
+  P2.5 `4/18`, P2.4b `6/25`, P2.4a `8/31`, P2.3 `7/28`, P2.2 `6/20`,
+  P2.1 `8/31`, P1.9 `15`, P1.8 `28`, and P1.10 `6/1/4`.
+- `PYTHONPATH=src python3 -m compileall -q src tests`, the existing P3.5
+  import smoke, `git diff --check`, and the changed-file security/content
+  scan passed.
+- The frozen schema-v1 DDL SHA remains
+  `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
+- Fourth-repair production change is limited to
+  `src/codex_control/application/active_turn_registry.py`; the other changed
+  files are the focused unit/integration tests and this factual evidence.
+  No architecture-file drift was introduced.
+- The known P1.6 pending-task warning appeared during full discovery and is
+  pre-existing. No P3.5 watcher or owned orchestration task was left pending.
+
+### Security and effects
+
+- Tests used temporary SQLite databases and fake lifecycle ports/events only.
+  No real Codex, interrupt, thread/delete, Telegram, network, production
+  database, production state root, service, `auth.json`, or `secrets.env` was
+  opened or changed.
+- No real interrupt, thread/delete, Telegram, network, purge, or production
+  effect occurred. No raw binding/content/error values, prompts, outputs,
+  credentials, keys, or production paths were added to diagnostics, tests,
+  evidence, or commit metadata.
