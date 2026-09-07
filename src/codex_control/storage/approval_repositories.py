@@ -250,6 +250,25 @@ class ApprovalRepository(_RepositoryBase):
 
         return await self._storage.read(read)
 
+    async def list_pending_for_job(self, job_id: str) -> tuple[ApprovalRecord, ...]:
+        """Read the pending approvals for one canonical job, without a clock."""
+        job_id = _validate_id(job_id)
+
+        def read(connection: Any) -> tuple[ApprovalRecord, ...]:
+            job_row = _job_row(connection, job_id)
+            if job_row is None:
+                raise _not_found()
+            _materialize_job(job_row)
+            rows = connection.execute(
+                _approval_select()
+                + " WHERE job_id = ? AND state = 'PENDING' "
+                + "ORDER BY created_at_ms ASC, approval_id ASC",
+                (job_id,),
+            ).fetchall()
+            return tuple(_materialize_approval(connection, row) for row in rows)
+
+        return await self._storage.read(read)
+
     async def create_pending(
         self,
         *,

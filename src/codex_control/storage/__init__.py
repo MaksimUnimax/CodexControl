@@ -52,6 +52,7 @@ from .transient_payloads import (
     TransientPayloadRecord,
 )
 from .turn_job_repositories import TurnJobRepository, TransientPayloadRepository
+from .application_recovery import ApplicationRecoveryRepository
 from .delivery_records import (
     DeliveryOperation,
     DeliverySegmentState,
@@ -111,6 +112,7 @@ __all__ = [
     "ControllerRuntimeRepository",
     "SettingsRepository",
     "DialogueRepository",
+    "ApplicationRecoveryRepository",
     "IngressUpdateRepository",
     "ControlIngressRepository",
     "CallbackActionRepository",

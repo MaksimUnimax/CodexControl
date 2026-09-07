@@ -177,6 +177,18 @@ class ErrorFingerprintRepository(_RepositoryBase):
 
         return await self._storage.read(read)
 
+    async def latest(self) -> ErrorFingerprintRecord | None:
+        """Read the deterministic latest sanitized error without a clock."""
+
+        def read(connection: Any) -> ErrorFingerprintRecord | None:
+            row = connection.execute(
+                _error_select()
+                + " ORDER BY last_seen_at_ms DESC, fingerprint_sha256 ASC LIMIT 1"
+            ).fetchone()
+            return None if row is None else _materialize_error(connection, row)
+
+        return await self._storage.read(read)
+
     async def record(
         self, *, fingerprint_sha256: str, error_class: str,
         dialogue_id: str | None = None, job_id: str | None = None,

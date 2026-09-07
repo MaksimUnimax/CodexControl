@@ -2,6 +2,7 @@
 
 from .private_render import TelegramPrivatePanelRenderer
 from .private_dialogue_render import TelegramPrivateDialoguePanelRenderer
+from .private_control_render import TelegramPrivateControlRenderer
 from .private_updates import (
     PrivateCommand,
     PrivateInboundKind,
@@ -16,4 +17,5 @@ __all__ = [
     "TelegramPrivateUpdateAdapter",
     "TelegramPrivatePanelRenderer",
     "TelegramPrivateDialoguePanelRenderer",
+    "TelegramPrivateControlRenderer",
 ]

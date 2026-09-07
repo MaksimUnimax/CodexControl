@@ -90,6 +90,20 @@ from .private_dialogue import (
     PrivateDialogueResult,
     PrivateDialogueStatus,
 )
+from .private_control import (
+    P43_APPROVAL_DETAILS_MAX_CHARS,
+    PrivateApprovalProjectionRequest,
+    PrivateControlError,
+    PrivateControlErrorCategory,
+    PrivateControlPanel,
+    PrivateControlPanelSection,
+    PrivateControlReason,
+    PrivateControlResult,
+    PrivateControlService,
+    PrivateControlStatus,
+    PrivateDiagnosticState,
+    PrivateDiagnosticsSnapshot,
+)
 
 __all__ = [
     "P3_INPUT_PAYLOAD_RETENTION_MS",
@@ -165,4 +179,16 @@ __all__ = [
     "PrivateDialoguePanel",
     "PrivateDialogueResult",
     "PrivateDialogueManagementService",
+    "P43_APPROVAL_DETAILS_MAX_CHARS",
+    "PrivateApprovalProjectionRequest",
+    "PrivateControlError",
+    "PrivateControlErrorCategory",
+    "PrivateControlPanel",
+    "PrivateControlPanelSection",
+    "PrivateControlReason",
+    "PrivateControlResult",
+    "PrivateControlService",
+    "PrivateControlStatus",
+    "PrivateDiagnosticState",
+    "PrivateDiagnosticsSnapshot",
 ]
