@@ -37,10 +37,12 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P3.2 lazy `thread/start` + first-turn orchestration and fail-closed create/restart boundary under ADR-0028. Accepted after one production repair: `c484c56db007569170363b3d08c24766148c3e30`; final full suite 566.
 - [DONE] P3.3 profile/model/reasoning settings selection + authenticated catalog validation + atomic dialogue/settings locks under ADR-0029. Accepted after one repair: `66a37d8b8065ecd31e17351e8062f9ebf1ee8828`; final full suite 596.
 - [DONE] P3.4 durable interrupt orchestration over P1.8 + exact active-binding registry + interrupt/natural-terminal reconciliation + startup INTERRUPTING recovery under ADR-0030. Accepted after one repair: `6460a449f861b7b86ab664e5ff877c108715082d`; final full suite 633.
-- [NEXT] P3.5 hard-delete orchestration over P1.9/P2.5 + final no-P1 startup recovery + final P3 fake/application acceptance under ADR-0031.
+- [DONE] P3.5 hard-delete orchestration over P1.9/P2.5 + exact running-turn quiescence + final no-P1 startup recovery + final P3 fake/application acceptance under ADR-0031. Accepted after four architect repair reviews: `6145d262787465ac6b4a17327114211cd86e8104`; final full suite 671.
+
+P3 is complete at the fake/application boundary. Acceptance authority: `docs/evidence/p3/P3_5_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
 
 ## P4 — Telegram private management
-Authorization edge, panel, profile/model/reasoning/status, dialogue/delete/interrupt, diagnostics and opaque callback actions.
+[NEXT] Architect authority must be frozen before implementation. Target scope remains authorization edge, private panel, profile/model/reasoning/status, dialogue/delete/interrupt, diagnostics and opaque callback actions. No P4 production implementation is authorized yet.
 
 ## P5 — Telegram group routing
 Persistent fleet keyboard, serialized group updates, activation epoch/restart-SLEEP, SLEEP ignore, ACTIVE prompt ingress, BUSY, fleet status/version safeguards.
