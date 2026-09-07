@@ -91,7 +91,7 @@ If absent, display mode `UNAVAILABLE`. If present, it is a read-only local proje
 
 Reuse accepted P2.3 one-time callback claims and P4.1 callback batch storage. P4.2 uses the same 900000 ms TTL, one validated clock read per render batch, SHA-256-only token persistence, all-or-none batch insertion and no collision retry. Existing/new hash collision from P4-owned generation is `INVARIANT`.
 
-Wrong user/chat is rejected before token claim and cannot consume the operator callback. Callback consumption occurs before any interrupt/delete effect. Cancellation after consumption never causes P4 retry.
+Wrong user/chat is rejected before token lookup/claim and cannot consume the operator callback. Callback consumption occurs before any interrupt/delete effect. Cancellation after consumption never causes P4 retry.
 
 P4.2 callback actions exactly:
 
@@ -109,9 +109,33 @@ Subject types exactly:
 
 `expected_version` is always the exact current dialogue version. `expected_state` is always the exact current `DialogueState.value`.
 
+## Cross-surface callback ownership
+
+P4.1 and P4.2 deliberately share the accepted opaque `cc1:<token>` Telegram grammar and the same durable `callback_actions` table. Because action identity is server-side only, a callback must not be destructively routed by trying one service's one-time claim first.
+
+P4.2 therefore adds one narrow schema-v1 read-only operation on the accepted private-management storage surface:
+
+`peek_callback(token_hash_sha256) -> CallbackActionRecord | None`.
+
+It validates/materializes the exact existing callback row but never consumes or mutates it.
+
+P4.2 callback order is:
+
+1. validate request and exact operator/private-chat authority;
+2. validate token grammar and hash it;
+3. `peek_callback(hash)`;
+4. no row -> `STALE / CALLBACK_NOT_FOUND`;
+5. row whose action is not one of the exact `P42_*` actions -> `BLOCKED / ACTION_UNAVAILABLE`, zero claim/consumption;
+6. only a P42-owned row proceeds to accepted `CallbackActionRepository.claim`;
+7. claim result then follows normal one-time expiry/replay/auth mapping.
+
+This prevents P4.2 from consuming a P4.1 settings token if it is accidentally dispatched to the wrong service. P4.1's accepted handler is not modified by P4.2. P4.3 final composition must use the same non-consuming durable action peek (or an architect-equivalent routing layer) to dispatch a token to the correct private sub-service before any one-time claim.
+
+A peek/claim TOCTOU is safe: after a P42 row is peeked, the authoritative claim may still return EXPIRED/ALREADY_CONSUMED/UNAUTHORIZED; no effect occurs before claim.
+
 ## Context fingerprints
 
-Telegram callback data contains no target/action parameter; trusted action/context lives only in the durable callback row.
+Telegram callback data contains no trusted action/target parameter; trusted action/context lives only in the durable callback row.
 
 Status subject ID:
 
@@ -216,6 +240,7 @@ Must prove at least:
 - safe status fields and no thread/job/turn/CODEX_HOME leakage;
 - action availability matrix for every relevant dialogue/active-job state;
 - wrong callback principal cannot consume token;
+- P4.1 token sent to P4.2 -> ACTION_UNAVAILABLE and remains unconsumed;
 - not-found/expired/replay/stale mapping;
 - context fingerprints bind exact job/version/dialogue generation;
 - interrupt callback calls real accepted P3.4 exactly once and maps finite outcomes;

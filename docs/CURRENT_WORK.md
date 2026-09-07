@@ -84,13 +84,31 @@ Delete begin exists only for IDLE with no active job, TURN_RUNNING + exact CODEX
 
 Only `P42_CONFIRM_DELETE` may call accepted `DialogueDeleteService.delete()` exactly once. DELETE_PENDING confirmation uses the exact current version, preserving P3.5 fresh-explicit-continuation authority. DELETING/DELETE_UNKNOWN expose no second-delete authority.
 
+## Cross-surface callback dispatch
+
+P4.1 and P4.2 share the same opaque `cc1:<token>` callback grammar and callback table, so final routing cannot safely be implemented by trying one service's one-time claim first.
+
+P4.2 adds one read-only schema-v1 helper on the accepted private-management storage surface:
+
+`peek_callback(token_hash_sha256) -> CallbackActionRecord | None`.
+
+It materializes the existing callback row without mutation/consumption.
+
+P4.2 callback order is exact auth -> token hash -> peek -> action-family decision -> claim only if action is `P42_*`.
+
+- missing row -> STALE/CALLBACK_NOT_FOUND;
+- existing non-P42/P4.1 row -> BLOCKED/ACTION_UNAVAILABLE and remains unconsumed;
+- exact P42 row -> accepted P2.3 claim/expiry/replay flow.
+
+This preserves P4.1 token authority if a token is accidentally dispatched to P4.2. P4.1 handler remains unchanged. P4.3 final composition must use the same non-consuming durable action lookup, or architect-equivalent routing authority, before choosing the private sub-service that will consume a token.
+
 ## Destructive confirmation
 
 Hard delete is always two-step:
 
 `status -> BEGIN_DELETE(no effect) -> new CONFIRM_DELETE callback -> exact P3.5 delete`.
 
-Confirmation is bound to the same exact current dialogue version/state/context. Any version/state/context drift before confirmation is STALE with zero delete effect. Confirmation text must not claim empirical erasure of all Codex internal traces; P7 remains the storage-measurement gate.
+Confirmation is bound to the same exact current dialogue version/state/delete-context fingerprint. Any version/state/context drift before confirmation is STALE with zero delete effect. Confirmation text must not claim empirical erasure of all Codex internal traces; P7 remains the storage-measurement gate.
 
 Callback claim occurs before interrupt/delete. Cancellation/replay never causes P4 retry.
 
@@ -104,7 +122,7 @@ No mandatory follow-up render after a committed interrupt/delete effect; renderi
 
 ## P4.2 acceptance focus
 
-Must prove exact public contracts/redaction, canonical status inspection, no-dialogue zero callbacks, action matrix, exact context fingerprints, wrong-auth non-consumption, expiry/replay/stale handling, real accepted P3.4 one-interrupt composition, two-step delete confirmation, stale confirm zero effect, real accepted P3.5 IDLE delete, explicit DELETE_PENDING continuation, no delete authority in DELETING/DELETE_UNKNOWN, callback collision invariant/no retry, cancellation/replay no second effect, zero real Telegram/network/production effects, full P4.1/P3/P2/P1 regressions and unchanged DDL hash.
+Must prove exact public contracts/redaction, canonical status inspection, no-dialogue zero callbacks, action matrix, exact context fingerprints, wrong-auth non-consumption, non-P42 token non-consumption, expiry/replay/stale handling, real accepted P3.4 one-interrupt composition, two-step delete confirmation, stale confirm zero effect, real accepted P3.5 IDLE delete, explicit DELETE_PENDING continuation, no delete authority in DELETING/DELETE_UNKNOWN, callback collision invariant/no retry, cancellation/replay no second effect, zero real Telegram/network/production effects, full P4.1/P3/P2/P1 regressions and unchanged DDL hash.
 
 Accepted pre-P4.2 full suite authority is 694.
 
