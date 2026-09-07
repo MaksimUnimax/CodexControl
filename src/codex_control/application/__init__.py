@@ -62,6 +62,23 @@ from .dialogue_recovery import (
     DialogueRecoveryService,
     DialogueRecoveryStatus,
 )
+from .private_settings import (
+    P4_PRIVATE_BUTTON_LABEL_MAX_CHARS,
+    P4_PRIVATE_CALLBACK_TTL_MS,
+    P4_PRIVATE_PAGE_SIZE,
+    P4_PRIVATE_PANEL_TEXT_MAX_CHARS,
+    PrivateAdminButton,
+    PrivateAdminError,
+    PrivateAdminErrorCategory,
+    PrivateAdminPanel,
+    PrivateAdminReason,
+    PrivateAdminResult,
+    PrivateAdminStatus,
+    PrivateCallbackRequest,
+    PrivateCommandRequest,
+    PrivatePanelSection,
+    PrivateSettingsManagementService,
+)
 
 __all__ = [
     "P3_INPUT_PAYLOAD_RETENTION_MS",
@@ -113,4 +130,19 @@ __all__ = [
     "DialogueRecoveryResult",
     "DialogueRecoveryService",
     "DialogueRecoveryStatus",
+    "P4_PRIVATE_BUTTON_LABEL_MAX_CHARS",
+    "P4_PRIVATE_CALLBACK_TTL_MS",
+    "P4_PRIVATE_PAGE_SIZE",
+    "P4_PRIVATE_PANEL_TEXT_MAX_CHARS",
+    "PrivateAdminButton",
+    "PrivateAdminError",
+    "PrivateAdminErrorCategory",
+    "PrivateAdminPanel",
+    "PrivateAdminReason",
+    "PrivateAdminResult",
+    "PrivateAdminStatus",
+    "PrivateCallbackRequest",
+    "PrivateCommandRequest",
+    "PrivatePanelSection",
+    "PrivateSettingsManagementService",
 ]
