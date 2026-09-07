@@ -44,7 +44,7 @@ P3 is complete at the fake/application boundary. Acceptance authority: `docs/evi
 ## P4 — Telegram private management
 - [DONE] P4.1 private Telegram auth/normalization + durable private-menu dedupe + opaque callbacks + profile/model/reasoning settings panel under ADR-0032. Accepted after one architect repair: `5a7db46c6e06662c379149c454c06003d48feb30`; final full suite 694. Acceptance authority: `docs/evidence/p4/P4_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
 - [DONE] P4.2 private server/dialogue status + exact P3.4 interrupt + mandatory two-step confirmed P3.5 hard delete under ADR-0033. Accepted after two architect repair reviews: `a5a8ee6773936b1dcbb777e36ffa33519cd8ab39`; final full suite 728. Acceptance authority: `docs/evidence/p4/P4_2_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
-- [NEXT] P4.3 private root/menu composition + diagnostics/last sanitized error + approval projection/callback composition + final fake private-management acceptance. Requires a separate architect authority freeze before implementation and must preserve accepted P4.1/P4.2 callback ownership/one-time semantics.
+- [NEXT / AUTHORITY FROZEN] P4.3 final private facade/root + non-consuming callback-family dispatch + diagnostics/last sanitized error + approval projection/atomic P2.4b decision callbacks + final fake private-management acceptance under ADR-0034. No P1.7 external approval response, delivery, private ACTIVE, group routing or live Telegram belongs to this slice.
 
 No P4 live Telegram/network acceptance occurs here; T4/T5 live validation remains later roadmap authority.
 
@@ -52,7 +52,7 @@ No P4 live Telegram/network acceptance occurs here; T4/T5 live validation remain
 Persistent fleet keyboard, serialized group updates, activation epoch/restart-SLEEP, SLEEP ignore, ACTIVE prompt ingress, BUSY, fleet status/version safeguards.
 
 ## P6 — Response delivery/full local orchestration
-Progress/edit path, deterministic chunk/outbox, ambiguous send handling, end-to-end fake recovery.
+Progress/edit path, deterministic chunk/outbox, ambiguous send handling, end-to-end fake recovery, plus live P1.7 approval-request persistence/wait/response coordination over the P4.3 UI decision boundary.
 
 ## P7 — Real Codex isolated acceptance / hard-delete proof
 Disposable server-80 thread, authenticated eligibility, multi-turn/interrupt/approval, thread/delete storage measurement across sessions/history/state/logs, architecture gate on shared profiles vs dedicated homes.

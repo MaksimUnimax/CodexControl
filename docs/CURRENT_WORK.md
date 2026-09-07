@@ -22,14 +22,15 @@ Date: 2026-09-07
 - P4.2 acceptance authority: `docs/evidence/p4/P4_2_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
 - ADR-0032 remains binding accepted P4.1 authority.
 - ADR-0033 plus architect addenda `5568089991` and `5568879298` remain binding accepted P4.2 authority.
+- ADR-0034 now freezes P4.3 final private composition, diagnostics, approval projection/decision UI and final fake P4 acceptance. P4.3 implementation is not yet accepted.
 
 ## Accepted P4.1/P4.2 boundary consumed by P4.3
 
 P4.1 owns exact private Telegram normalization/settings enums and action vocabulary. P4.2 owns the separate dialogue-control surface. P4.3 must compose these accepted private surfaces without weakening either one's one-time callback authority.
 
-P4.1 provides exact private principal checking, accepted `PrivateCallbackRequest`, opaque `cc1:<32-char token>` grammar, one-time P2.3 callback claims, callback batch storage, hash-only token persistence, 900000 ms TTL and content-safe buttons/rendering.
+P4.1 provides exact private principal checking, accepted `PrivateCommandRequest`/`PrivateCallbackRequest`, opaque `cc1:<32-char token>` grammar, one-time P2.3 callback claims, callback batch storage, hash-only token persistence, 900000 ms TTL and content-safe buttons/rendering.
 
-P4.2 adds canonical private dialogue status over `ApplicationRecoveryRepository.inspect()`, exact P3.4 interrupt delegation, mandatory two-step P3.5 hard delete, read-only callback ownership peek, and context-wide destructive-confirm cancellation. A P4.1 token routed to P4.2 remains unconsumed; final P4.3 dispatcher must route by non-consuming durable action authority before any sub-service claims the token.
+P4.2 adds canonical private dialogue status over `ApplicationRecoveryRepository.inspect()`, exact P3.4 interrupt delegation, mandatory two-step P3.5 hard delete, read-only callback ownership peek, and context-wide destructive-confirm cancellation. A P4.1 token routed to P4.2 remains unconsumed.
 
 Private ACTIVE remains forbidden. Group/fleet routing remains P5 authority.
 
@@ -37,9 +38,9 @@ Private ACTIVE remains forbidden. Group/fleet routing remains P5 authority.
 
 - **P4.1 — DONE:** private Telegram trust edge + settings management. Accepted `5a7db46c6e06662c379149c454c06003d48feb30`; full suite 694.
 - **P4.2 — DONE:** private server/dialogue status + exact P3.4 interrupt + two-step confirmed P3.5 hard delete under ADR-0033 and two architect repair addenda. Accepted `a5a8ee6773936b1dcbb777e36ffa33519cd8ab39`; full suite 728.
-- **P4.3 — NEXT / NOT YET FROZEN:** private root/menu composition, diagnostics/last sanitized error, approval projection/callback composition and final fake private-management acceptance. Requires a separate architect authority freeze before implementation.
+- **P4.3 — NEXT / AUTHORITY FROZEN:** final private facade/root callback dispatch, diagnostics/last sanitized error, approval projection/callback composition over P2.4b, and final fake private-management acceptance under ADR-0034. Implementation must start only from the exact architect freeze commit that contains ADR-0034.
 
-P5 group routing and P6 response delivery remain separate. Live Telegram acceptance remains later roadmap authority.
+P5 group routing and P6 response delivery/full local orchestration remain separate. Live Telegram acceptance remains later roadmap authority.
 
 ## Accepted P4.2 public boundary
 
@@ -66,66 +67,122 @@ Panel sections exactly:
 
 `STATUS | DELETE_CONFIRM`.
 
-## Accepted P4.2 status and action authority
+## Accepted P4.2 status and destructive authority
 
 Dialogue/active-job status is read only through accepted `ApplicationRecoveryRepository.inspect()`. Corrupt persisted state is INVARIANT. No dialogue yields a static `RENDERED / NO_DIALOGUE` panel with zero callback authority and no fabricated dialogue version.
-
-For a live dialogue, safe display may include server identity, optional read-only effective mode, dialogue state, profile ID, active job state/model/reasoning. Raw thread/job/turn IDs, CODEX_HOME, prompt/output, callback token/hash and raw error bodies remain forbidden.
 
 P4.2 actions exactly:
 
 `P42_REFRESH | P42_INTERRUPT | P42_BEGIN_DELETE | P42_CONFIRM_DELETE | P42_CANCEL_DELETE`.
 
-Every P42 action binds exact current dialogue version/state and SHA-256 context fingerprint. `P42_INTERRUPT` exists only for `TURN_RUNNING` plus exactly one `CODEX_RUNNING` active job and delegates exactly one accepted P3.4 request. `P42_BEGIN_DELETE` exists only for accepted IDLE/TURN_RUNNING/DELETE_PENDING cases and has zero destructive effect. Only `P42_CONFIRM_DELETE` may call accepted P3.5 exactly once. DELETING and DELETE_UNKNOWN expose no second-delete authority.
+Every P42 action binds exact current dialogue version/state and SHA-256 context fingerprint. `P42_INTERRUPT` exists only for `TURN_RUNNING` plus exactly one `CODEX_RUNNING` active job and delegates exactly one accepted P3.4 request. `P42_BEGIN_DELETE` has zero destructive effect. Only `P42_CONFIRM_DELETE` may call accepted P3.5 exactly once. DELETING and DELETE_UNKNOWN expose no second-delete authority.
 
-## Accepted cross-surface callback dispatch
+A successful `P42_CANCEL_DELETE` atomically revokes every still-outstanding same-context confirmation for the exact version/state/fingerprint/principal. Revoked and expired no-effect confirmations use exact durable sentinel `consumed_at_ms == expires_at_ms`; a genuinely claimed confirm remains `consumed_at_ms < expires_at_ms`. If any matching confirm has actually been claimed, Cancel returns `STALE / STALE_ACTION`. Repeated Cancel in the same unchanged dialogue generation remains valid and leaves zero destructive authority.
 
-P4.1 and P4.2 share the same opaque `cc1:<token>` grammar and callback table. Final routing must not be implemented by trying one sub-service's one-time claim first.
+## P4.3 frozen final facade
 
-Accepted P4.2 provides:
+ADR-0034 freezes a new `PrivateControlService` with exactly:
 
-`PrivateManagementRepository.peek_callback(token_hash_sha256) -> CallbackActionRecord | None`
+- `handle_command(PrivateCommandRequest)`;
+- `handle_callback(PrivateCallbackRequest)`;
+- `project_approval(PrivateApprovalProjectionRequest)`.
 
-as a read-only, zero-consumption durable action lookup. P4.2 callback order is auth -> token hash -> peek -> action-family decision -> claim only if action is `P42_*`.
+It consumes only normalized private requests and constructs/uses accepted P4.1 and P4.2 services with one coherent server/operator/profile/catalog/effect configuration. It never inspects sub-service private state and never reproduces P3.3/P3.4/P3.5 business mutation logic.
 
-- missing row -> `STALE / CALLBACK_NOT_FOUND`;
-- existing non-P42/P4.1 row -> `BLOCKED / ACTION_UNAVAILABLE` and remains unconsumed;
-- exact P42 row -> accepted P2.3 claim/expiry/replay flow.
+The final result contract is `PrivateControlStatus`, `PrivateControlReason`, `PrivateControlErrorCategory`, finite `PrivateControlError`, and frozen `PrivateControlResult`. New P4.3 panel sections are exactly `ROOT | DIAGNOSTICS | APPROVAL`; accepted P4.1/P4.2 panel objects remain valid delegated result panels. A pure final renderer accepts exact P4.1/P4.2/P4.3 panel types and performs no send/edit/network action.
 
-P4.3 final composition must use this same non-consuming durable routing authority or an architect-equivalent mechanism before choosing the sub-service that will consume the callback.
+## P4.3 ROOT and mode boundary
 
-## Accepted destructive confirmation/cancellation
+Authorized `/start` and `/menu` normalize to `PrivateCommand.MENU`; the final facade durably claims one private CONTROL ingress and renders the final ROOT. Duplicate update IDs do not mint a second panel/callback batch. `/settings` delegates unchanged to accepted P4.1. Unsupported text remains non-prompt.
 
-Hard delete remains mandatory two-step:
+Final ROOT is navigation-only. It may display safe server identity, read-only effective mode, settings summary, canonical dialogue state and pending-approval count. There is no private ACTIVE/SLEEP mutation button. Root mode comes only from the optional read-only exact `ControllerMode` provider; absent provider displays `UNAVAILABLE`.
 
-`status -> BEGIN_DELETE(no effect) -> new CONFIRM_DELETE callback -> exact P3.5 delete`.
+ROOT uses exact `controller_runtime.boot_generation` as P43 navigation generation authority. Missing controller runtime after boot is INVARIANT. No fabricated settings/dialogue/controller version is allowed.
 
-Confirmation is bound to exact current dialogue version/state/delete fingerprint. Version/state/context drift before confirmation is STALE with zero delete effect. Confirmation text must not claim empirical erasure of all Codex internal traces; P7 remains the storage-measurement gate.
+ROOT buttons are Settings when settings exist, Dialogue, Diagnostics, Approvals only when the exact current CODEX_RUNNING job has pending approval(s), and Refresh.
 
-A successful `P42_CANCEL_DELETE` atomically revokes every still-outstanding same-context confirmation for the exact version/state/fingerprint/principal. Revoked and expired no-effect confirmations use exact durable sentinel:
+## P4.1-owned Settings button
 
-`consumed_at_ms == expires_at_ms`.
+P4.3 does not invent a new settings navigation action. ROOT mints an exact accepted P4.1 `OPEN_ROOT` callback using the current P3.3 selection view:
 
-A genuinely claimed confirm remains:
+- action `OPEN_ROOT`;
+- subject_type `panel`;
+- subject_id `0`;
+- expected_version exact `settings.version`;
+- expected_state exact `NO_DIALOGUE` or live `DialogueState.value`.
 
-`consumed_at_ms < expires_at_ms`.
+Final callback dispatch peeks then delegates the unchanged request to accepted P4.1 without pre-claim. If settings do not exist, no settings callback exists.
 
-If any matching confirm has actually been claimed, Cancel returns `STALE / STALE_ACTION` rather than falsely claiming cancellation. Repeated Cancel in the same unchanged dialogue generation remains valid and leaves zero destructive authority.
+## P43 navigation actions
 
-## Accepted P4.2 service mapping
+P4.3 owns only:
 
-P3.4 canonical status/reason relations are validated strictly before mapping. CONFIRMED/RECONCILED -> INTERRUPTED; UNKNOWN -> UNKNOWN/INTERRUPT_UNRESOLVED; CONFLICT+STALE_REQUEST -> STALE; REJECTED+None -> BLOCKED; only canonical blocked reasons map to BLOCKED. Impossible pairs are INVARIANT.
+`P43_REFRESH_ROOT | P43_OPEN_DIALOGUE | P43_OPEN_DIAGNOSTICS | P43_OPEN_APPROVALS`.
 
-P3.5 canonical status/reason relations are validated strictly before mapping. DELETED -> DELETED; FAILED -> FAILED; UNKNOWN -> UNKNOWN/DELETE_UNKNOWN; CONFLICT+STALE_REQUEST -> STALE; only canonical blocked reasons map to BLOCKED. Impossible pairs are INVARIANT.
+Each P43 row uses subject_type `p43_nav`, expected_version exact current `controller_runtime.boot_generation`, expected_state `PRIVATE_ROOT`, exact operator user/chat and SHA-256 target fingerprint defined by ADR-0034. P43 callbacks are read/navigation authority only and are generic-claimed only after final ownership dispatch.
 
-No mandatory follow-up render occurs after a committed interrupt/delete effect; rendering failure must not disguise an already completed effect.
+Dialogue target fingerprints bind current dialogue ID/version or explicit missing sentinel; Approvals navigation targets the SHA-256 fingerprint of an exact pending approval ID and is resolved only against current pending approvals of the exact canonical CODEX_RUNNING job.
 
-Accepted final P4.2 full suite authority is 728 (`694 + 5 unit + 29 integration`).
+## Final callback dispatcher
 
-## Out of scope / next gate
+Every callback uses read-only `PrivateManagementRepository.peek_callback(hash)` before any one-time claim.
 
-No private ACTIVE or group routing; no live Telegram transport; no response delivery; no real Codex/production effects; no schema/DDL change. P4.3 diagnostics/last sanitized error, approval projection/callback composition and final fake private root/menu composition remain unimplemented.
+Routing is exact:
+
+1. P4.1 action family -> accepted P4.1 handler, no facade pre-claim;
+2. P42 action family -> accepted P4.2 handler, no facade pre-claim;
+3. `approval_allow|approval_deny` -> accepted `ApprovalRepository.claim_callback` directly, never generic P2.3 claim first;
+4. P43 action family -> generic P2.3 claim then P43 navigation handling;
+5. unknown action -> `ACTION_UNAVAILABLE` and remains unconsumed.
+
+Wrong principal is rejected before hash/peek/claim. This final routing rule is mandatory because P2.4b approval decision and callback consumption are one atomic transaction.
+
+## P4.3 approval read/projection authority
+
+P4.3 may add only read-side approval authority plus UI/callback composition:
+
+`ApprovalRepository.list_pending_for_job(job_id) -> tuple[ApprovalRecord, ...]`
+
+is read-only, zero-clock, exact-job, materializer-backed and deterministically ordered by `created_at_ms, approval_id`.
+
+`PrivateApprovalProjectionRequest(approval_id)` is internal/application-facing and repr-redacts its ID. `project_approval` or P43 approval navigation may project only a PENDING approval owned by the exact current `TURN_RUNNING`/`CODEX_RUNNING` job.
+
+Approval decision callback rows preserve exact accepted P2.4b shape: action `approval_allow` or `approval_deny`, subject_type `approval`, subject_id exact approval ID, expected_version exact current job version, expected_state `PENDING`, exact operator user/chat. Decision callback expiry is `min(now + 900000, approval.expires_at_ms)`.
+
+P4.3 never generic-claims an approval callback before `ApprovalRepository.claim_callback`.
+
+## Approval detail fail-closed rule
+
+Optional persisted APPROVAL display payload is read through accepted transient-payload materialization and must belong exactly to the current approval job/dialogue. Missing a non-NULL referenced payload or ownership/kind corruption is INVARIANT.
+
+Allow is rendered only when the entire payload decodes strict UTF-8, sanitizes to non-empty plain text and fits completely within `P43_APPROVAL_DETAILS_MAX_CHARS = 2400` without truncation. If optional display payload is absent, invalid UTF-8, empty after sanitization, or too long to display in full, the panel is deny-only. P4.3 must never approve privileged work based on truncated/incomplete details.
+
+Approval panel generic repr redacts text and callback data.
+
+## Approval/P1.7/P6 boundary
+
+P4.3 `APPROVED`/`DENIED` means only that accepted P2.4b atomically recorded the operator decision. It does not mean an approval response was sent to Codex.
+
+P4.3 creates no process-local approval waiter/Future and does not call `CodexApprovalBridge` or a protocol client. P6 later owns receiving/normalizing the live P1.7 approval request, creating the pending approval/display payload, coordinating live request ownership with the durable decision, sending the exact P1.7 response once, and restart/cancellation ambiguity handling. P4.3 acceptance uses canonical seeded pending approvals and no external approval response.
+
+## P4.3 diagnostics and last sanitized error
+
+P4.3 may add:
+
+`ErrorFingerprintRepository.latest() -> ErrorFingerprintRecord | None`
+
+as a read-only, zero-clock deterministic query ordered by `last_seen_at_ms DESC, fingerprint_sha256 ASC`, materialized through accepted ADR-0023 authority.
+
+Diagnostics defines exact `PrivateDiagnosticState = OK | DEGRADED | UNAVAILABLE` and frozen `PrivateDiagnosticsSnapshot(storage_state, codex_state, database_bytes, transient_payload_bytes, filesystem_free_bytes)`. Optional byte counts are nonnegative signed-64 ints or None. Optional injected provider is read-only; absent provider is UNAVAILABLE; wrong type/exception is INVARIANT. P4.3 does not implement OS/network probing.
+
+Diagnostics may display safe state/byte values and only latest sanitized error class/count/timestamps plus derived scope label `controller`, `dialogue`, `job` or `dialogue+job`. It never displays fingerprint hash or actual entity IDs.
+
+## P4.3 final fake acceptance
+
+P4.3 must add a final fake/application private-management acceptance proving one final dispatcher/root composes accepted P4.1, P4.2, diagnostics and approval decisions without claim races. It must cover at least MENU CONTROL dedupe/no JOB/mode mutation, P4.1 Settings delegation, P4.2 Dialogue delegation, safe diagnostics/latest-error projection, complete-details Allow/Deny approval decision, deny-only unavailable/incomplete details, wrong-principal non-consumption, replay, unknown-action non-consumption, P43 boot-generation staleness, unchanged P4.2 destructive confirmation authority, no private ACTIVE, and no live Telegram/network/Codex/approval-response effect.
+
+Accepted pre-P4.3 full-suite baseline is 728. P4.3 implementation must preserve the frozen DDL SHA and all accepted prior regressions.
 
 ## Execution authority
 
-P4.2 is complete and architect-accepted. P4.3 is the next roadmap slice, but it is NOT implementation-authorized yet. The architect must first research and freeze a separate P4.3 authority/ADR or binding architecture record, create the exact implementation branch/issue from that authority commit, and only then issue an explicit executor prompt. Codex must not self-start P4.3/P5.
+P4.3 authority is now frozen under ADR-0034. Implementation must start from the exact architect commit containing this file and the corresponding CURRENT_WORK/ROADMAP/DECISIONS updates, on a separate implementation branch/Issue. Codex may implement only that frozen slice and must not mark it architect-accepted, close its issue or start P5/P6.
