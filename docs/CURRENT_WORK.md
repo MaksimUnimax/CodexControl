@@ -16,112 +16,84 @@ Date: 2026-09-08
 - P3.3 accepted `66a37d8b8065ecd31e17351e8062f9ebf1ee8828`; full 596.
 - P3.4 accepted `6460a449f861b7b86ab664e5ff877c108715082d`; full 633.
 - P3.5 accepted `6145d262787465ac6b4a17327114211cd86e8104`; final P3 full 671.
-- P3 is complete at the fake/application boundary.
+- P3 is COMPLETE at the fake/application dialogue boundary.
 - P4.1 accepted `5a7db46c6e06662c379149c454c06003d48feb30`; full 694.
 - P4.2 accepted `a5a8ee6773936b1dcbb777e36ffa33519cd8ab39`; full 728.
 - P4.3 accepted `d053f24061e20aa44e07e5b92c9b92c6506647fd`; final P4 full 762.
 - P4 is COMPLETE at the fake/application private-management boundary.
-- P5.1 accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777. Acceptance: `docs/evidence/p5/P5_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
-- P5.2 accepted `345c48722c4faa03be19d38b6f07304276075f64`; full 841, failures 0, errors 0, unittest `OK`.
-- P5.2 acceptance: `docs/evidence/p5/P5_2_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
+- P5.1 accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777.
+- P5.2 accepted `345c48722c4faa03be19d38b6f07304276075f64`; full 841.
+- P5.3 accepted `c23d9356e7033ce44a62933f7749250433d49f61`; final P5 full 860.
+- P5.3 acceptance: `docs/evidence/p5/P5_3_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
+- P5 is COMPLETE at the fake/application group-routing boundary.
 - No live Telegram/network acceptance has occurred.
 
 ## Current slice
 
-**P5.3 — NEXT / AUTHORITY FROZEN under ADR-0038.**
+**P6.1 — NEXT / AUTHORITY FROZEN under ADR-0039.**
 
-P5.3 closes the fake/application P5 milestone with:
+P6 is split into three architecture slices:
 
-1. deterministic local fleet-status identity/projection;
-2. human-visible fleet-version/manifest mismatch diagnostics;
-3. final fake multi-controller group-routing acceptance.
+- **P6.1 — NEXT:** successful completed-job response segmentation + durable one-attempt delivery over accepted P2.4b and a fake/application Telegram delivery port;
+- **P6.2 — LATER:** durable approval operator coordination from accepted P1.7 request ownership through P2.4b/P4.3 decision state back to the P1.7 response owner;
+- **P6.3 — LATER:** full local fake orchestration/recovery, acknowledgement/progress composition, startup delivery discovery and final P6 acceptance.
 
-P5.3 does not add a coordinator, peer RPC or shared runtime database.
+## P6.1 content authority
 
-## Fleet status identity
+Accepted P3 remains the only Codex output projection authority. P6.1 may deliver only:
 
-Every exact accepted `FleetManifest` has a deterministic lowercase SHA-256 identity over the NUL-separated canonical sequence:
+- the exact accepted P3 transient `OUTPUT` bytes for a successful `CODEX_COMPLETED` job, decoded strict UTF-8; or
+- exact fallback `✅ Выполнено` when the successful job has no OUTPUT payload.
 
-`codex-control-fleet-v1`, exact `fleet_version`, decimal member count, then each exact `server_id` and `display_name` in manifest order.
+P6.1 does not deliver Codex FAILED/UNKNOWN jobs; later P6.3 owns safe failure/status UX.
 
-This fingerprint is diagnostic metadata only. It never authorizes activation or any external effect.
+A narrow additive read-only `TransientPayloadRepository.get_output_for_job(job_id)` is authorized so an explicit delivery invocation after restart can recover an unplanned successful output without duplicating persistence SQL/materialization. It adds no schema or new durable state.
 
-P5.3 status exposes both:
+## P6.1 segmentation authority
 
-- exact configured `fleet_version`;
-- full manifest SHA-256 identity.
+Configured text limit is exact 512..4096 characters. Deterministic segmentation preserves the source exactly and prefers, in order, the farthest paragraph boundary, line boundary, ASCII-space boundary, then a hard Unicode code-point cut. No Markdown/HTML parse mode or text normalization is used.
 
-Therefore mismatch is visible even when two controllers accidentally reuse the same `fleet_version` string with different member lists/order/labels.
+The 512 lower bound ensures the accepted maximum P3 projected output fits within P2.4b's maximum 4096 delivery segments.
 
-## Status projection
+## P6.1 durable one-attempt authority
 
-P5.3 adds pure `FleetStatusService` over an exact P5.2 STATUS result.
+Accepted P2.4b remains sole outbox state authority:
 
-Frozen `FleetStatusProjection` fields exactly:
+`CODEX_COMPLETED -> DELIVERY_PENDING -> DELIVERING -> DELIVERED | DELIVERY_UNKNOWN | FAILED`.
 
-`server_id, display_name, effective_mode, fleet_version, manifest_fingerprint_sha256, member_count, boot_generation, last_control_epoch`.
+P6.1 creates transient `DISPLAY` chunks, creates one immutable P2.4b plan, then for each pending segment:
 
-The service requires the P5.2 STATUS snapshot to match its configured local server and manifest version. Malformed/mismatched local composition fails `INVARIANT`.
+1. commits accepted `claim_next` so the exact segment is durable `SENDING/attempt1` before external effect;
+2. invokes exactly one fake/application Telegram CREATE or EDIT effect;
+3. commits accepted `finish_sending` with CONFIRMED/UNKNOWN/FAILED.
 
-No storage read, clock read, mode mutation or network action occurs in status projection.
+Confirmed segments are never recreated. UNKNOWN and delivery FAILED are terminal and never automatically retried.
 
-Pure `TelegramFleetStatusRenderer` returns only `{"text": ...}`. The text includes local display/server identity, ACTIVE/SLEEP, fleet version, member count, first 16 manifest-fingerprint hex characters, boot generation and control epoch. No parse mode, callbacks or send/edit action.
+If a new delivery invocation observes an already `SENDING` segment, it performs **zero Telegram effect** and terminalizes that exact segment as `UNKNOWN/TELEGRAM_RECOVERY_AMBIGUOUS`. This is the restart/crash no-blind-resend rule.
 
-## Version-mismatch safety
+A confirmed prefix followed only by pending segments is safe to resume from the first pending segment.
 
-P5.3 does not attempt distributed peer compatibility decisions.
+## Existing-status edit boundary
 
-Runtime safety remains accepted P5.1 reserved activation parsing:
+`TurnDeliveryRequest` may optionally carry an already-known status message ID. Only when creating the initial durable plan, segment 1 becomes EDIT to that exact message and later segments are CREATE. Without a status message ID all segments are CREATE.
 
-- a new controller that knows a new server label parses exact ACTIVATE target=new server;
-- an old controller whose manifest does not contain that label still sees the reserved `🖥 ` prefix and parses ACTIVATE target=None;
-- the old controller therefore applies local SLEEP;
-- neither controller may treat the activation-looking text as a Codex prompt.
+P6.1 does not create the initial acknowledgement/progress message; P6.3 owns that composition. Once a durable plan exists, it is sole authority and a later request hint cannot rewrite it.
 
-Status responses make the different fleet version/fingerprint visible to the operator.
+## Cancellation/error boundary
 
-## Final fake multi-controller acceptance
+P6.1 owns one local delivery task and shields an already-owned Telegram effect from caller cancellation. It never redispatches an effect because a caller was cancelled.
 
-The final P5 acceptance must compose separate temporary SQLite/controller stacks with the real accepted group adapter, keyboard, P5.1 control service, P5.2 routing facade, status projection/renderer and accepted P3 orchestration with fake local P1 lifecycle ports.
-
-For matching manifests it proves:
-
-- all controllers boot effective SLEEP;
-- identical persistent keyboards;
-- exact target activation makes target ACTIVE and non-target SLEEP;
-- ordinary prompt executes only on ACTIVE target and is terminally SLEEP-ignored elsewhere;
-- switching activation moves routing authority;
-- all-sleep sleeps all controllers;
-- STATUS is read-only and produces matching fleet identity values;
-- restart after historical ACTIVE returns effective SLEEP and no local P5.2 queue/marker is restored;
-- no prompt executes after restart until a fresh current-boot activation is processed.
-
-For mismatched old/new manifests it proves:
-
-- fleet version/fingerprint difference is visible;
-- new-server activation is exact on the new controller;
-- old controller treats it as reserved unknown activation and sleeps;
-- old controller performs zero P3 prompt execution from that control text;
-- all-sleep and STATUS remain common safe controls.
-
-## Offline/restart boundary
-
-P5.3 proves the accepted local application restart invariant only. It does not claim to distinguish a Telegram message sent before restart but delivered only afterwards from a genuinely fresh operator message. Live polling offset/backlog behavior remains later P9/P11 acceptance authority.
-
-## P5 split
-
-- **P5.1 — DONE:** accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777.
-- **P5.2 — DONE:** accepted `345c48722c4faa03be19d38b6f07304276075f64`; full 841.
-- **P5.3 — NEXT / AUTHORITY FROZEN:** ADR-0038 fleet status identity/version-mismatch visibility + final fake multi-controller routing acceptance.
+Malformed/exception/ambiguous port results after durable SENDING are captured as DELIVERY_UNKNOWN, not retried. A storage failure after a possible external effect does not cause immediate resend; a later invocation sees stranded SENDING and applies recovery UNKNOWN.
 
 ## Current non-goals
 
 Do not start:
 
-- P6 response delivery/approval-response orchestration;
-- Telegram HTTP/polling/webhook/token loading;
-- production config/secrets/systemd;
+- P6.2 approval-response coordination;
+- P6.3 full local orchestration;
+- live Telegram HTTP/polling/webhook/token loading;
 - live backlog/offset acceptance;
+- production config/secrets/systemd;
 - real Codex/network effects;
 - P7+.
 
