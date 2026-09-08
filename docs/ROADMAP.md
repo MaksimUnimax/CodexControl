@@ -58,10 +58,10 @@ P5 is complete at the fake/application group-routing boundary.
 
 ## P6 — Response delivery/full local orchestration
 - [DONE] **P6.1** deterministic successful-response segmentation + transient DISPLAY materialization + accepted P2.4b durable one-attempt delivery under ADR-0039 and architect bounded-segmentation addendum. Accepted `51902dcbd743cd91ad209cd96879b4ad45a26a9e`; full 900. Acceptance: `docs/evidence/p6/P6_1_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
-- [NEXT / AUTHORITY FROZEN] **P6.2** durable live approval operator + owned exact P1.7 response under ADR-0040: per-approval EXPIRED/CANCELLED terminalizer, wake-only decision signal, exact running-turn binding, PENDING-before-wait, real P4.3 durable Allow/Deny, and one owned P1.7 response attempt. Restart never reconstructs wire authority. No P3 rewrite/live Telegram.
-- [LATER] **P6.3** full local fake orchestration/recovery: server-request dequeue/turn concurrency, acknowledgement/progress composition, delivery-job startup discovery, group/private composition and final P6 acceptance.
+- [DONE] **P6.2** durable live approval operator + owned exact P1.7 response under ADR-0040. Accepted `51a681b09cf2eb2e75fbd2663f88b7a96077a39d`; full 922. Acceptance: `docs/evidence/p6/P6_2_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
+- [NEXT / AUTHORITY FROZEN] **P6.3** final local orchestration under ADR-0041: exact-runtime approval-aware P1.6 lifecycle, one-attempt non-durable work-status hint, P4.3 wake composition, P6.1 final delivery, bounded startup delivery discovery/recovery and final fake P6 acceptance. No live Telegram/P7.
 
-P6 is NOT complete until P6.2 and P6.3 are independently accepted.
+P6 is NOT complete until P6.3 is independently accepted.
 
 ## P7 — Real Codex isolated acceptance / hard-delete proof
 Disposable server-80 thread, authenticated eligibility, multi-turn/interrupt/approval, thread/delete storage measurement across sessions/history/state/logs, architecture gate on shared profiles vs dedicated homes.
