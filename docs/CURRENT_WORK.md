@@ -28,55 +28,117 @@ Date: 2026-09-08
 
 ## Current slice
 
-**P5.2 — NEXT / architect research + freeze.**
+**P5.2 — NEXT / AUTHORITY FROZEN under ADR-0037.**
 
-P5.2 owns serialized ordinary authorized group TEXT admission only:
+P5.2 adds the final local group-routing facade `FleetGroupRoutingService` over accepted P5.1/P2.C2/P3.2.
 
-- preserve P5.1 exact group/operator trust edge and control classification;
-- SLEEP prompt -> terminal content-free `IGNORED_SLEEP`;
-- ACTIVE prompt -> delegate to accepted P3 dialogue-turn application authority;
-- BUSY and other pre-JOB rejected prompt outcomes -> terminal content-free `IGNORED_REJECTED` from accepted P2.C2;
-- duplicate updates never later execute;
-- no queue;
-- control-before-prompt ordering under one local group-ingress serialization boundary;
-- no second prompt/job state machine on top of P3;
-- no direct Codex protocol/lifecycle calls outside accepted P3.
+It owns only serialized ordinary authorized group TEXT admission and exact non-TEXT delegation.
 
-P5.3 later owns fleet status/version mismatch safeguards and final fake multi-controller group-routing acceptance. P6 owns delivery/full orchestration and live P1.7 approval-response coordination.
+## P5.2 ordering authority
 
-## Binding accepted P5.1 authority consumed by P5.2
+One short application `asyncio.Lock` linearizes group routing decisions, but it is never held for the duration of a Codex turn.
 
-P5.1 freezes:
+The lock protects:
 
-- immutable `FleetMember` / `FleetManifest`;
-- persistent fleet reply keyboard;
-- exact operator + exact negative control-supergroup + human-origin trust edge;
-- authorization before raw message text access;
-- reserved activation/control-looking namespace before ordinary TEXT;
-- self activation -> ACTIVE; other/unknown activation -> SLEEP; all-sleep -> SLEEP;
-- STATUS read-only/no control epoch mutation;
-- current-boot effective mode from durable controller epoch relative to captured boot baseline;
-- historical persisted ACTIVE is effectively SLEEP after restart until a fresh current-boot self activation;
-- old boot service fails closed;
-- P5.1 TEXT itself creates no ingress/JOB/payload/P3/Codex effect.
+- P5.1 control/status/auth delegation;
+- TEXT current-mode projection;
+- durable ingress duplicate precheck;
+- stale/SLEEP/local-busy terminal claim;
+- publication/clearing of one process-local prompt marker.
 
-## Binding accepted P2.C2 replay guard
+The accepted P3 turn task executes outside the routing lock. Therefore:
 
-`IngressDispositionKind` exact current order:
+- a second prompt cannot wait until the first completes and then run;
+- SLEEP/ALL_SLEEP controls remain processable while the first turn runs;
+- a newer control affects later prompts but does not implicitly interrupt an already admitted turn.
+
+## P5.2 prompt marker
+
+At most one process-local marker may represent a prompt logically admitted by the group facade while its exact P3 invocation is still in flight.
+
+The marker is non-content and non-durable. It is not JOB/dialogue/effect authority and is never restored after restart.
+
+A different update while the marker exists and effective mode remains ACTIVE is BUSY and is terminally `IGNORED_REJECTED` without P3.
+
+A duplicate of the SAME marker update must not claim rejected and suppress the original prompt. It returns an in-flight duplicate result and zero P3 redispatch while the original owned invocation continues.
+
+## P5.2 TEXT decision order
+
+For exact authorized P5.1 TEXT:
+
+1. delegate to accepted `FleetControlService.handle` to revalidate principal/current boot and obtain exact mode snapshot;
+2. read durable ingress by update ID;
+3. existing ingress -> DUPLICATE, no reclassification/P3;
+4. same-update local marker -> in-flight DUPLICATE, no durable claim/P3 redispatch;
+5. `message_id <= last_control_epoch` -> terminal `IGNORED_REJECTED` / stale prompt;
+6. effective SLEEP -> terminal `IGNORED_SLEEP`;
+7. different active marker while ACTIVE -> terminal `IGNORED_REJECTED` / BUSY;
+8. construct accepted P3 `ExistingDialoguePromptRequest`; P3-invalid authorized text is terminal `IGNORED_REJECTED` / invalid prompt;
+9. publish marker and launch exactly one owned accepted P3.2 `DialogueTurnService.execute` task outside the lock.
+
+No direct TurnJobRepository/P1/model/settings/ActiveTurnRegistry call is allowed in P5.2.
+
+## P3 mapping
+
+Accepted P3 COMPLETED/FAILED/UNKNOWN already owns a durable JOB. P5.2 verifies the ingress is exact JOB for the returned job and never reclassifies it.
+
+Accepted P3 DUPLICATE is mapped from the current durable ingress without new claim.
+
+Accepted P3 BUSY/BLOCKED with no JOB/output is a pre-JOB rejection. Before successful return, P5.2 claims exact `IGNORED_REJECTED`. If another durable classification already won, P5.2 returns DUPLICATE instead and preserves it.
+
+`FAILED`/`UNKNOWN` after JOB are admitted work, never `IGNORED_REJECTED`.
+
+## Result authority
+
+`GroupRoutingStatus` exactly:
+
+`CONTROL | STATUS | PROMPT | DUPLICATE | BUSY | BLOCKED | IGNORED_SLEEP | REJECTED | UNAUTHORIZED | UNSUPPORTED | MALFORMED`.
+
+`GroupRoutingReason` exactly:
+
+`STALE_PROMPT | LOCAL_PROMPT_IN_FLIGHT | IN_FLIGHT_DUPLICATE | INVALID_PROMPT`.
+
+`GroupRoutingErrorCategory` exactly:
+
+`INVALID_ARGUMENT | STORAGE | CODEX | INVARIANT`.
+
+Frozen repr-redacted `GroupRoutingResult` fields exactly:
+
+`status, snapshot, control_result, turn_result, disposition, reason`.
+
+Nested P5.1/P3 results are excluded from repr. P5.2 sends no Telegram response; P6 may later consume the accepted nested P3 result for delivery.
+
+## Binding accepted lower authority
+
+P5.1 remains exact:
+
+- operator/control-supergroup/user-origin trust edge;
+- reserved control classification before TEXT;
+- self activation ACTIVE; other/unknown/all-sleep SLEEP;
+- STATUS read-only;
+- historical ACTIVE never restored after boot;
+- current mode derived from durable control epoch.
+
+P2.C2 remains exact:
 
 `CONTROL | IGNORED_SLEEP | IGNORED_UNAUTHORIZED | IGNORED_REJECTED | JOB`.
 
-`IGNORED_REJECTED` means an authorized ordinary prompt update was terminally rejected before JOB/external effect. It stores no prompt text and no reason prose.
+Duplicate ignored claims are clock-free and never reclassify original durable ingress.
 
-Duplicate `claim_ignored` is clock-free and never reclassifies the original durable ingress. Therefore once P5.2 terminalizes a BUSY/BLOCKED update as `IGNORED_REJECTED`, the same Telegram update can never later execute after state changes.
+P3 remains the only dialogue/JOB/thread/turn authority.
 
-## P5.2 non-goals
+## P5 split
+
+- **P5.1 — DONE:** accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777.
+- **P5.2 — NEXT / AUTHORITY FROZEN:** ADR-0037 serialized group prompt admission/no queue over accepted P2.C2/P3.
+- **P5.3 — LATER:** fleet status/version mismatch safeguards and final fake multi-controller group-routing acceptance.
+
+## Current non-goals
 
 Do not start:
 
-- P5.3 fleet-status/final multi-controller acceptance;
-- response delivery/P6;
-- live approval response/waiter;
+- P5.3;
+- P6 response delivery/approval-response orchestration;
 - Telegram HTTP/polling/webhook/token loading;
 - production config/secrets/systemd;
 - real Codex/network effects;
