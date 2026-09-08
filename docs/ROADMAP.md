@@ -31,7 +31,7 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P2.6a bounded non-content metadata retention. Accepted `e6f59739b3091d00894d3434abb5a99e2af72885`.
 - [DONE] P2.6b crash/restart/idempotency harness and final historical P2 acceptance. Accepted `9db97f0dda109b4d0c0ecfa5f167733905df2766`; full 500.
 - [DONE] P2.C1 retention-compatible JOB duplicate replay correction. Accepted `4b6d226ce647fbf38a6ada7b82947be7ad3e30c2`; full 506.
-- [DONE] **P2.C2** terminal authorized pre-JOB rejection + schema-v2 migration under ADR-0036. Accepted `082c6df79a7c3a6d8dd04b73f15563f1668b6c9b`; full 796. Historical schema-v1/hash remains immutable; current v2 adds exact `IGNORED_REJECTED` and validated v1→v2 migration authority. Acceptance: `docs/evidence/p2/P2_C2_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
+- [DONE] P2.C2 terminal authorized pre-JOB rejection + schema-v2 migration under ADR-0036. Accepted `082c6df79a7c3a6d8dd04b73f15563f1668b6c9b`; full 796. Acceptance: `docs/evidence/p2/P2_C2_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
 
 ## P3 — Dialogue application service
 - [DONE] P3.1 existing-dialogue prompt admission + immutable authenticated selection + one-turn orchestration. Accepted `9e0a86b311bb63d6a36a4641cb588321987e1550`; full 543.
@@ -50,9 +50,9 @@ P3 is complete at the fake/application boundary.
 P4 is complete at the fake/application private-management boundary. No live Telegram/network acceptance occurs in P4.
 
 ## P5 — Telegram group routing
-- [DONE] **P5.1** shared immutable fleet manifest + persistent reply keyboard + pure group normalization/auth + serialized durable activation/all-sleep routing + restart/current-boot SLEEP authority under ADR-0035. Accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777. Acceptance: `docs/evidence/p5/P5_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
-- [NEXT / AUTHORITY FROZEN] **P5.2** serialized ordinary group TEXT admission under ADR-0037: short routing lock, non-durable in-flight prompt marker, stale prompt epoch rejection, SLEEP `IGNORED_SLEEP`, ACTIVE accepted-P3 execution outside the lock, terminal P2.C2 `IGNORED_REJECTED` for BUSY/BLOCKED/local-busy/invalid pre-JOB decisions, durable duplicate preservation, no queue, controls remain responsive while a turn runs.
-- [LATER] **P5.3** fleet status/version mismatch safeguards + final fake multi-controller group-routing acceptance, including self-active/non-target sleep/all-sleep/status/offline-restart safety.
+- [DONE] P5.1 shared immutable fleet manifest + persistent reply keyboard + pure group normalization/auth + serialized durable activation/all-sleep routing + restart/current-boot SLEEP authority under ADR-0035. Accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777. Acceptance: `docs/evidence/p5/P5_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
+- [DONE] P5.2 serialized ordinary group TEXT admission under ADR-0037: short routing lock, non-durable in-flight prompt marker, stale/SLEEP/local-BUSY guards, accepted P3 outside the lock, durable P2.C2 rejection for pre-JOB BUSY/BLOCKED/invalid decisions, strict result invariants and no delayed queue. Accepted `345c48722c4faa03be19d38b6f07304276075f64`; full 841. Acceptance: `docs/evidence/p5/P5_2_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
+- [NEXT / AUTHORITY FROZEN] P5.3 fleet status identity/version-mismatch visibility + final fake multi-controller group-routing acceptance under ADR-0038. Exact local status exposes fleet version plus deterministic complete-manifest SHA-256 identity; mismatched old controllers must keep reserved unknown activation fail-safe SLEEP semantics. No coordinator/peer RPC/live Telegram.
 
 ## P6 — Response delivery/full local orchestration
 Progress/edit path, deterministic chunk/outbox, ambiguous send handling, end-to-end fake recovery, plus live P1.7 approval-request persistence/wait/response coordination over the P4.3 UI decision boundary.
