@@ -171,6 +171,18 @@ from .live_approval import (
     DurableApprovalOperator,
     OwnedApprovalResponseService,
 )
+from .local_orchestration import (
+    P63_STARTUP_DELIVERY_MAX_JOBS,
+    P63_WORK_STATUS_TEXT_MAX_CHARS,
+    WorkStatusAttempt,
+    LocalStartupStatus,
+    LocalOrchestrationErrorCategory,
+    LocalOrchestrationError,
+    LocalGroupResult,
+    LocalStartupResult,
+    ApprovalAwareTurnLifecycle,
+    LocalControllerOrchestrator,
+)
 
 __all__ = [
     "P3_INPUT_PAYLOAD_RETENTION_MS",
@@ -315,4 +327,14 @@ __all__ = [
     "ApprovalDecisionSignal",
     "DurableApprovalOperator",
     "OwnedApprovalResponseService",
+    "P63_STARTUP_DELIVERY_MAX_JOBS",
+    "P63_WORK_STATUS_TEXT_MAX_CHARS",
+    "WorkStatusAttempt",
+    "LocalStartupStatus",
+    "LocalOrchestrationErrorCategory",
+    "LocalOrchestrationError",
+    "LocalGroupResult",
+    "LocalStartupResult",
+    "ApprovalAwareTurnLifecycle",
+    "LocalControllerOrchestrator",
 ]

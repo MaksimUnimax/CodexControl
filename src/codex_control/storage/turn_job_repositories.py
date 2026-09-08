@@ -520,6 +520,22 @@ class TurnJobRepository(_RepositoryBase):
 
         return await self._storage.read(read)
 
+    async def list_delivery_candidates(self, *, limit: int) -> tuple[TurnJobRecord, ...]:
+        """Read the bounded, oldest-first successful-delivery recovery set."""
+        if type(limit) is not int or not 1 <= limit <= 4096:
+            raise _invalid()
+
+        def read(connection: Any) -> tuple[TurnJobRecord, ...]:
+            rows = connection.execute(
+                _job_select()
+                + " WHERE state IN ('CODEX_COMPLETED', 'DELIVERY_PENDING', 'DELIVERING')"
+                + " ORDER BY created_at_ms ASC, job_id ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return tuple(_materialize_job(row) for row in rows)
+
+        return await self._storage.read(read)
+
     async def claim_ingress(
         self,
         *,

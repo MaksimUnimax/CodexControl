@@ -66,7 +66,7 @@ class TurnJobRecordTests(unittest.TestCase):
 
     def test_public_repository_surfaces_are_exact(self):
         public = lambda cls: {name for name, value in vars(cls).items() if not name.startswith("_") and callable(value)}
-        self.assertEqual({"get", "claim_ingress", "claim_turn", "mark_codex_starting", "mark_codex_running", "finish_codex"},
+        self.assertEqual({"get", "list_delivery_candidates", "claim_ingress", "claim_turn", "mark_codex_starting", "mark_codex_running", "finish_codex"},
                          public(TurnJobRepository))
         self.assertEqual({"get", "get_input_for_job", "get_output_for_job", "create"}, public(TransientPayloadRepository))
         for cls in (TurnJobRepository, TransientPayloadRepository):
