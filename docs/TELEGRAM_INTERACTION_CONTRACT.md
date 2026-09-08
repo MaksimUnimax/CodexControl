@@ -88,7 +88,7 @@ Once a durable delivery plan exists, that plan is sole authority; a later reques
 ## P6.1 response segmentation and durable delivery
 P6.1 delivers only accepted successful P3 user-visible OUTPUT content, or exact fallback `✅ Выполнено` when successful work has no OUTPUT payload. It does not deliver raw reasoning, raw command-event floods, stderr, environment or raw Codex protocol events.
 
-Configured P6.1 text limit is 512..4096 Unicode code points. Segmentation preserves the source exactly and chooses boundaries deterministically: paragraph (`\n\n`), then line (`\n`), then ASCII space, then hard cut. No Markdown/HTML parse mode is used.
+Configured P6.1 text limit is 512..4096 Unicode code points. Segmentation preserves the source exactly. Preferred cuts are paragraph (`\n\n`), then line (`\n`), then ASCII space, then hard cut. If that semantic pass would exceed accepted P2.4b's 4096-segment plan bound, P6.1 deterministically falls back to exact hard chunks; if even hard chunks would exceed 4096, it fails closed. No Markdown/HTML parse mode is used.
 
 Before any final Telegram message effect, P6.1 creates transient DISPLAY chunks and an immutable accepted P2.4b delivery plan. For each segment:
 
@@ -114,8 +114,32 @@ Dialogue buttons: NEW DIALOGUE, DELETE DIALOGUE, and STOP TURN only while runnin
 ## Destructive callbacks
 Callback payload carries an opaque token, not trusted business parameters. Durable record binds operator/chat/action/entity/version/state/expiry and is atomically consumed before effect. Delete uses explicit second confirmation. Double/stale clicks produce no repeat effect.
 
-## Approval UI
-Blocking Codex approval shows only necessary sanitized context with explicit Allow/Deny buttons bound to exact request/job and expiry. P4.3 stores the atomic decision only; P6.2 later owns the live P1.7 operator/wait/response composition.
+## Approval UI and P6.2 live decision bridge
+A blocking Codex approval exposes only P1.7's bounded/sanitized operator context. P6.2 publishes a durable P2.4b PENDING approval before waiting for the operator. If safe context exists it may be stored only as a bounded transient APPROVAL payload; if no safe detail payload exists, accepted P4.3 remains deny-only.
+
+P4.3 continues to own the private Allow/Deny UI and its atomic durable callback decision. P4.3 itself still sends no Codex response.
+
+P6.2 composition is:
+
+1. exact current P1.7 server request is already owned by the current Codex protocol client;
+2. P6.2 binds it to the exact running job/profile/thread/Codex turn;
+3. a content-free process-local decision waiter is registered before PENDING publication;
+4. P2.4b PENDING approval commits with an exact 900000 ms deadline;
+5. P4.3 Allow/Deny callback atomically commits APPROVED/DENIED, or P6.2 terminalizes due/lost ownership to EXPIRED/CANCELLED;
+6. composition pulses `ApprovalDecisionSignal.notify()` after private callback handling;
+7. the waiter re-reads the exact durable ApprovalRecord;
+8. APPROVED -> P1.7 ALLOW; DENIED/EXPIRED/CANCELLED -> P1.7 DENY;
+9. accepted P1.7 performs exactly one method-specific response attempt.
+
+The signal is wake-only. It contains no approval decision and `notify()` can never grant ALLOW. A notification before a durable decision only wakes a waiter that sees PENDING and keeps waiting.
+
+Expiry and Allow/Deny callbacks race through the same durable approval state; one terminal state wins. Duplicate/sibling clicks cannot send a second Codex response.
+
+Once P6.2 owns an exact server request, ordinary outer caller cancellation is shielded from the P1.7 bridge so a durable Allow cannot be replaced by P1.7's cancellation-path Deny. If the exact Codex protocol becomes terminal, no safe response can be sent; P6.2 best-effort marks a still-PENDING approval CANCELLED and P1.7 returns RESPONSE_UNKNOWN/no retry.
+
+Durable approval metadata is **not** wire-response authority. After process/client restart the old exact `InboundServerRequest` identity is gone permanently. A new client must never reconstruct or answer the old request from a saved wire ID or APPROVED/DENIED record. P6.3 startup recovery may clean up the old job/approval state, but old wire response replay is forbidden.
+
+P6.2 remains application/fake only. Live Telegram HTTP/polling/webhook delivery and live Codex acceptance remain later milestones.
 
 ## Commands/menu
 Tap-able `/panel`, `/status`, `/help` may exist as fallback. Normal operation must not require manual command typing.
