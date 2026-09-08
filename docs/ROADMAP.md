@@ -52,10 +52,14 @@ P4 is complete at the fake/application private-management boundary. No live Tele
 ## P5 — Telegram group routing
 - [DONE] P5.1 shared immutable fleet manifest + persistent reply keyboard + pure group normalization/auth + serialized durable activation/all-sleep routing + restart/current-boot SLEEP authority under ADR-0035. Accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777. Acceptance: `docs/evidence/p5/P5_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
 - [DONE] P5.2 serialized ordinary group TEXT admission under ADR-0037: short routing lock, non-durable in-flight prompt marker, stale/SLEEP/local-BUSY guards, accepted P3 outside the lock, durable P2.C2 rejection for pre-JOB BUSY/BLOCKED/invalid decisions, strict result invariants and no delayed queue. Accepted `345c48722c4faa03be19d38b6f07304276075f64`; full 841. Acceptance: `docs/evidence/p5/P5_2_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
-- [NEXT / AUTHORITY FROZEN] P5.3 fleet status identity/version-mismatch visibility + final fake multi-controller group-routing acceptance under ADR-0038. Exact local status exposes fleet version plus deterministic complete-manifest SHA-256 identity; mismatched old controllers must keep reserved unknown activation fail-safe SLEEP semantics. No coordinator/peer RPC/live Telegram.
+- [DONE] P5.3 fleet status identity/version-mismatch visibility + final fake multi-controller group-routing acceptance under ADR-0038. Accepted `c23d9356e7033ce44a62933f7749250433d49f61`; final P5 full 860. Acceptance: `docs/evidence/p5/P5_3_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
+
+P5 is complete at the fake/application group-routing boundary. Live Telegram transport/backlog remains later acceptance authority.
 
 ## P6 — Response delivery/full local orchestration
-Progress/edit path, deterministic chunk/outbox, ambiguous send handling, end-to-end fake recovery, plus live P1.7 approval-request persistence/wait/response coordination over the P4.3 UI decision boundary.
+- [NEXT / AUTHORITY FROZEN] **P6.1** deterministic successful-response segmentation + transient DISPLAY materialization + accepted P2.4b durable one-attempt delivery over a fake/application Telegram delivery port under ADR-0039. Existing SENDING on resume becomes DELIVERY_UNKNOWN with zero resend; confirmed prefix resumes only at first pending segment.
+- [LATER] **P6.2** live approval operator coordination: persist/project accepted P1.7 request through P2.4b/P4.3 decision authority and return exact ALLOW/DENY to the still-owned P1.7 bridge; fail closed across cancellation/restart.
+- [LATER] **P6.3** full local fake orchestration/recovery: acknowledgement/progress composition, delivery-job startup discovery, group/private composition and final P6 acceptance.
 
 ## P7 — Real Codex isolated acceptance / hard-delete proof
 Disposable server-80 thread, authenticated eligibility, multi-turn/interrupt/approval, thread/delete storage measurement across sessions/history/state/logs, architecture gate on shared profiles vs dedicated homes.
