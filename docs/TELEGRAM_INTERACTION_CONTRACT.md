@@ -25,18 +25,7 @@ The durable control epoch is the accepted supergroup message ID of the last appl
 A control accepted after a prompt has already been logically admitted does not retroactively cancel that turn. It governs subsequent prompt admissions. Explicit STOP remains private interrupt authority.
 
 ## Ordinary prompt eligibility
-A prompt must be:
-
-- unique update or the still-owned first delivery of the same local in-flight update;
-- exact operator;
-- exact configured supergroup;
-- human-originated ordinary text;
-- not command/control/service content;
-- newer than the current durable control epoch;
-- effective ACTIVE;
-- not blocked by another locally admitted prompt;
-- acceptable to accepted P3 request validation;
-- admitted by accepted P3 durable dialogue/JOB authority.
+A prompt must be unique, exact-operator, exact-control-supergroup, human-originated ordinary text, newer than the current durable control epoch, effective ACTIVE, locally unblocked, P3-valid and durably admitted by accepted P3.
 
 SLEEP -> terminal content-free `IGNORED_SLEEP`, no P3.
 
@@ -46,100 +35,131 @@ Accepted P3 BUSY/BLOCKED before JOB -> terminal content-free `IGNORED_REJECTED` 
 
 A replay of a durable SLEEP/rejected/JOB/control/unauthorized update returns duplicate authority and never changes classification.
 
-The same update redelivered while its original P5.2 P3 invocation is still locally in flight must not be claimed rejected, because that could suppress the original first execution. It is an in-flight duplicate with zero redispatch; the original invocation continues.
+The same update redelivered while its original P5.2 P3 invocation is still locally in flight is an in-flight duplicate with zero redispatch; the original invocation continues.
 
-P3 COMPLETED/FAILED/UNKNOWN after JOB remains admitted JOB work and is never rewritten as rejected.
-
-No prompt text or rejection prose is stored in ignored/rejected ingress metadata.
+P3 COMPLETED/FAILED/UNKNOWN after JOB remains admitted JOB work and is never rewritten as rejected. No prompt text or rejection prose is stored in ignored/rejected ingress metadata.
 
 ## No queue / control responsiveness
-P5.2 never holds the group routing lock across the full P3 turn. Therefore a second prompt is rejected immediately rather than waiting for idle, and SLEEP/ALL_SLEEP/STATUS controls remain processable while a turn is running.
+P5.2 never holds the group routing lock across the full P3 turn. A second prompt is rejected immediately rather than waiting for idle, and SLEEP/ALL_SLEEP/STATUS controls remain processable while a turn is running.
 
 The process-local P5.2 prompt marker is conservative coordination only; it is non-content, non-durable and not restored after restart. Durable P3 recovery/state remains authority after crash/restart.
 
 ## Fleet STATUS / manifest mismatch visibility
-Exact `📊 СТАТУС` remains a read-only group control. Each healthy controller projects its own accepted P5.1/P5.2 STATUS snapshot and may later send the pure P5.3 rendered text through the Telegram transport layer.
+Exact `📊 СТАТУС` remains a read-only group control. Each healthy controller projects its own accepted P5.1/P5.2 STATUS snapshot through accepted P5.3.
 
-The P5.3 status projection exposes only non-secret local fleet metadata:
+The projection exposes only non-secret local fleet metadata: local display/server ID, ACTIVE/SLEEP, fleet version, member count, complete ordered-manifest SHA-256 identity, boot generation and last control epoch. The renderer shows the first 16 hex characters; the full hash remains diagnostic only and never grants routing authority.
 
-- local display name/server ID;
-- effective ACTIVE/SLEEP;
-- exact configured `fleet_version`;
-- member count;
-- deterministic SHA-256 identity of the complete ordered fleet manifest;
-- boot generation;
-- last applied control epoch.
+There is no peer compatibility RPC or local distributed MATCH decision. Different fleet versions/fingerprints make mismatch visible to the operator. Unknown reserved `🖥 ...` activation still makes an old controller SLEEP, never prompt.
 
-The renderer displays the first 16 hexadecimal characters of the manifest identity while the full 64-character value remains available in the local projection. The fingerprint is diagnostic only and never grants routing/effect authority.
+Telegram polling backlog/offset freshness remains later P9/P11 live acceptance.
 
-There is no peer compatibility RPC or local distributed MATCH decision. Different `fleet_version` values or different manifest fingerprints in the bots' STATUS responses make rollout/configuration mismatch visible to the operator.
+## P6.1 final-response delivery
+P6.1 delivers only accepted successful P3 user-visible OUTPUT, or exact fallback `✅ Выполнено` when successful work has no OUTPUT. Raw reasoning, command-event floods, stderr, environment and raw protocol events are never delivered.
 
-During manifest mismatch the reserved activation namespace remains the safety rule: a controller that does not know a newly added `🖥 ...` label must still parse it as ACTIVATE with unknown target and become/remain SLEEP, never treat it as a prompt.
+Configured text limit is 512..4096 Unicode code points. Segmentation preserves source exactly; preferred cuts are paragraph, line, ASCII space, then hard cut. If the preferred pass exceeds P2.4b's 4096-plan bound, exact hard-cut fallback is used; if even that exceeds 4096, delivery fails closed.
 
-P5 fake acceptance proves local restart SLEEP/no restored prompt queue. Telegram polling backlog/offset freshness is a later live P9/P11 transport acceptance concern and is not inferred from application-only STATUS data.
+Before any final response effect, P6.1 creates transient DISPLAY chunks and immutable accepted P2.4b delivery plan. Each segment is durably `SENDING/attempt1` before exactly one CREATE/EDIT attempt. CONFIRMED is never recreated; UNKNOWN/FAILED is never automatically retried. Existing durable SENDING recovers with zero new effect to `DELIVERY_UNKNOWN/TELEGRAM_RECOVERY_AMBIGUOUS`.
 
-## Work status / acknowledgement boundary
-An accepted prompt should eventually create or identify a safe Telegram status message containing bounded server/profile/model/effort context. P6.3 owns that acknowledgement/progress orchestration.
+## P6.3 work-status hint
+P6.3 owns a one-attempt, process-local work-status hint for a newly admitted live turn. It is intentionally not a durable outbox.
 
-P6.1 does not create acknowledgement/status messages. If P6.3 or another accepted caller already knows a status message ID, P6.1 may bind the **first final response segment** as EDIT to that exact message. Every later response segment is CREATE. If no status message ID is supplied, every final response segment is CREATE.
+Exact running text:
 
-Once a durable delivery plan exists, that plan is sole authority; a later request cannot rewrite CREATE/EDIT targets.
+```text
+⏳ Выполняю запрос
+Сервер: <server_id>
+Профиль: <profile_id>
+Модель: <model_id>
+Рассуждение: <reasoning_effort>
+```
 
-## P6.1 response segmentation and durable delivery
-P6.1 delivers only accepted successful P3 user-visible OUTPUT content, or exact fallback `✅ Выполнено` when successful work has no OUTPUT payload. It does not deliver raw reasoning, raw command-event floods, stderr, environment or raw Codex protocol events.
+Only bounded non-secret durable job metadata is included. No prompt, output, thread/turn/job ID or raw error appears.
 
-Configured P6.1 text limit is 512..4096 Unicode code points. Segmentation preserves the source exactly. Preferred cuts are paragraph (`\n\n`), then line (`\n`), then ASCII space, then hard cut. If that semantic pass would exceed accepted P2.4b's 4096-segment plan bound, P6.1 deterministically falls back to exact hard chunks; if even hard chunks would exceed 4096, it fails closed. No Markdown/HTML parse mode is used.
+P6.3 performs exactly one plain CREATE attempt. CONFIRMED stores the returned message ID only in process memory as a possible final-delivery hint. FAILED/UNKNOWN/malformed/exception means no hint and no retry; the Codex turn continues.
 
-Before any final Telegram message effect, P6.1 creates transient DISPLAY chunks and an immutable accepted P2.4b delivery plan. For each segment:
+If the process dies before P6.1 commits a final plan, this message ID is forgotten and no acknowledgement is replayed. A stale `⏳` message may remain in Telegram. Startup successful delivery therefore uses CREATE. Only when accepted P6.1 later commits the confirmed hint into the immutable first-segment EDIT plan does that target become durable P2.4b authority.
 
-1. durable P2.4b `claim_next` commits that exact segment as `SENDING/attempt1` before the effect;
-2. exactly one application `TelegramDeliveryPort` CREATE or EDIT attempt is owned;
-3. P2.4b `finish_sending` records CONFIRMED, UNKNOWN or FAILED.
+For a live P3 FAILED result, P6.3 makes at most one safe status attempt using:
 
-Confirmed segments are never recreated. UNKNOWN/FAILED are not automatically retried.
+```text
+❌ Выполнение завершилось с ошибкой
+Сервер: <server_id>
+Профиль: <profile_id>
+Модель: <model_id>
+Рассуждение: <reasoning_effort>
+```
 
-If a later delivery invocation finds an already durable SENDING segment, it sends **nothing** for that segment and converts it to `DELIVERY_UNKNOWN` with sanitized recovery-ambiguity authority. A confirmed prefix followed by untouched PENDING segments may safely resume from the first pending segment.
+For live P3 UNKNOWN:
 
-A storage failure after a possible Telegram effect never causes an immediate resend. The durable SENDING record remains the fail-closed evidence and a later invocation follows the same recovery-to-UNKNOWN rule.
+```text
+⚠️ Результат выполнения не подтверждён
+Сервер: <server_id>
+Профиль: <profile_id>
+Модель: <model_id>
+Рассуждение: <reasoning_effort>
+```
 
-P6.1 is application/fake only; no actual Telegram HTTP implementation is accepted in this slice.
+If the live confirmed work-status ID exists, use one EDIT; otherwise one CREATE. There is no retry and no startup replay. These status effects never alter the already-durable P3 terminal job state.
 
 ## Private panel
-Private chat requires exact operator and private chat identity. Main panel shows safe mode/profile/model/reasoning/dialogue/app-server/diagnostic state. Buttons: account, model, reasoning, dialogue, status.
-
-Profile chooser is blocked while live dialogue exists. Model/reasoning changes are blocked while turn runs and runtime-validated.
-
-Dialogue buttons: NEW DIALOGUE, DELETE DIALOGUE, and STOP TURN only while running. NEW with no dialogue merely readies lazy creation; it never abandons a live thread.
+Private chat requires exact operator and private chat identity. Main panel shows safe mode/profile/model/reasoning/dialogue/app-server/diagnostic state. Buttons cover account, model, reasoning, dialogue and status. Profile changes are blocked with live dialogue; model/reasoning changes are only between turns. STOP TURN and hard-delete remain explicit private authority.
 
 ## Destructive callbacks
 Callback payload carries an opaque token, not trusted business parameters. Durable record binds operator/chat/action/entity/version/state/expiry and is atomically consumed before effect. Delete uses explicit second confirmation. Double/stale clicks produce no repeat effect.
 
 ## Approval UI and P6.2 live decision bridge
-A blocking Codex approval exposes only P1.7's bounded/sanitized operator context. P6.2 publishes a durable P2.4b PENDING approval before waiting for the operator. If safe context exists it may be stored only as a bounded transient APPROVAL payload; if no safe detail payload exists, accepted P4.3 remains deny-only.
+A blocking Codex approval exposes only P1.7's bounded/sanitized operator context. P6.2 publishes durable P2.4b PENDING before waiting. Safe details may exist only as bounded transient APPROVAL payload; absent safe details keeps accepted P4.3 deny-only.
 
-P4.3 continues to own the private Allow/Deny UI and its atomic durable callback decision. P4.3 itself still sends no Codex response.
+P4.3 owns private Allow/Deny UI and atomic durable callback decision. It sends no Codex response itself.
 
 P6.2 composition is:
 
-1. exact current P1.7 server request is already owned by the current Codex protocol client;
-2. P6.2 binds it to the exact running job/profile/thread/Codex turn;
-3. a content-free process-local decision waiter is registered before PENDING publication;
-4. P2.4b PENDING approval commits with an exact 900000 ms deadline;
-5. P4.3 Allow/Deny callback atomically commits APPROVED/DENIED, or P6.2 terminalizes due/lost ownership to EXPIRED/CANCELLED;
-6. composition pulses `ApprovalDecisionSignal.notify()` after private callback handling;
-7. the waiter re-reads the exact durable ApprovalRecord;
-8. APPROVED -> P1.7 ALLOW; DENIED/EXPIRED/CANCELLED -> P1.7 DENY;
-9. accepted P1.7 performs exactly one method-specific response attempt.
+1. exact current P1.7 request is already owned by the current client;
+2. P6.2 binds exact running job/profile/thread/Codex turn;
+3. wake waiter registers before PENDING publication;
+4. PENDING commits with exact 900000 ms deadline;
+5. P4.3 Allow/Deny or P6.2 EXPIRED/CANCELLED terminalizer wins durable state;
+6. P6.3 private composition pulses `ApprovalDecisionSignal.notify()` after relevant private callback handling;
+7. waiter re-reads exact durable record;
+8. APPROVED -> ALLOW; DENIED/EXPIRED/CANCELLED -> DENY;
+9. accepted P1.7 makes exactly one method-specific response attempt.
 
-The signal is wake-only. It contains no approval decision and `notify()` can never grant ALLOW. A notification before a durable decision only wakes a waiter that sees PENDING and keeps waiting.
+The signal is wake-only. It contains no decision and cannot grant ALLOW. Duplicate/sibling clicks cannot send a second response.
 
-Expiry and Allow/Deny callbacks race through the same durable approval state; one terminal state wins. Duplicate/sibling clicks cannot send a second Codex response.
+Ordinary outer cancellation of an already-owned P6.2 response is shielded. Exact Codex protocol terminal yields RESPONSE_UNKNOWN/no retry and best-effort CANCELLED of still-PENDING state.
 
-Once P6.2 owns an exact server request, ordinary outer caller cancellation is shielded from the P1.7 bridge so a durable Allow cannot be replaced by P1.7's cancellation-path Deny. If the exact Codex protocol becomes terminal, no safe response can be sent; P6.2 best-effort marks a still-PENDING approval CANCELLED and P1.7 returns RESPONSE_UNKNOWN/no retry.
+Durable approval metadata is never old wire-response authority. Restart loses the exact old `InboundServerRequest`; a new client cannot reconstruct/respond from saved wire ID or decision metadata.
 
-Durable approval metadata is **not** wire-response authority. After process/client restart the old exact `InboundServerRequest` identity is gone permanently. A new client must never reconstruct or answer the old request from a saved wire ID or APPROVED/DENIED record. P6.3 startup recovery may clean up the old job/approval state, but old wire response replay is forbidden.
+## P6.3 turn/approval concurrency
+P6.3 captures the exact runtime object used by accepted P1.6 `turn/start`; it does not reacquire later and guess runtime identity.
 
-P6.2 remains application/fake only. Live Telegram HTTP/polling/webhook delivery and live Codex acceptance remain later milestones.
+While the same turn terminal is pending, P6.3 concurrently services at most one exact P1.7 server request at a time through accepted P6.2. Sequential approvals are allowed; there is no delayed approval queue.
+
+If the turn terminal wins while no approval request has been transferred, the pending request-get is cancelled/joined and the terminal stands. If an exact owned request is nevertheless captured in the cancellation race, it is answered once DENY, the exact profile runtime is shut down, and the turn is projected UNKNOWN.
+
+If the turn terminal wins while a live P6.2 approval is already waiting, P6.3 does not cancel it or guess DENY. It shuts down the exact captured profile runtime so accepted P1.7/P6.2 resolves `RESPONSE_UNKNOWN` and best-effort CANCELLED; the turn is projected UNKNOWN.
+
+Every turn/request/approval helper is owned and joined. Interrupt delegates to the same accepted P1.6 lifecycle and exact binding; P3.4 remains durable interrupt authority.
+
+## P6.3 group/private final composition
+P6.3 wraps accepted P5 group routing and P4 private management; it does not replace their normalization/auth/dedupe rules.
+
+- P5 PROMPT + P3 COMPLETED -> accepted P6.1 exactly once, using live status ID only as initial hint.
+- P5 PROMPT + P3 FAILED/UNKNOWN -> no P6.1; one live non-success status attempt only.
+- P5 DUPLICATE -> no new acknowledgement, P3 or final-delivery effect.
+- P5 STATUS -> accepted P5.3 pure status projection/renderer only.
+- relevant P4 approval callback results (`APPROVED`, `DENIED`, `EXPIRED`, `STALE`, `ALREADY_USED`) pulse the shared wake signal once; callback result itself is not wire decision authority.
+
+Outer group-handler cancellation cannot create a second P3, approval response, acknowledgement or final-delivery effect.
+
+## P6.3 startup recovery boundary
+Before later live polling/ingestion, P6.3 must run accepted P3.5 startup recovery, clean leftover pending approvals only after their job is no longer CODEX_RUNNING, then process oldest successful delivery candidates (`CODEX_COMPLETED|DELIVERY_PENDING|DELIVERING`) through accepted P6.1 with no status hint.
+
+At most 256 candidates are processed per explicit recovery pass. Remaining backlog returns `LIMIT_REACHED`; P6.3 creates no background worker. Live ingestion must not begin until an explicit pass returns READY.
+
+Startup never recreates the early work-status message. `CODEX_COMPLETED` therefore plans all CREATE; stranded SENDING performs zero resend and becomes DELIVERY_UNKNOWN; confirmed-prefix delivery resumes only at first pending.
+
+P6.3 remains fake/application only. Live Telegram HTTP/polling/webhook, offsets/backlog, bot tokens, deployment and real Codex acceptance are later milestones.
 
 ## Commands/menu
 Tap-able `/panel`, `/status`, `/help` may exist as fallback. Normal operation must not require manual command typing.
