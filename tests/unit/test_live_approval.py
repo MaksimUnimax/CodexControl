@@ -161,7 +161,23 @@ class LiveApprovalUnitTests(unittest.IsolatedAsyncioTestCase):
             signal=ApprovalDecisionSignal(),
             sleep=sleeper,
         )
-        await operator._sleep_expiry()
+        self.assertIs(True, await operator._sleep_expiry())
+        self.assertEqual([900.0], calls)
+
+    async def test_async_sleep_expiry_failure_is_not_authority(self):
+        calls = []
+
+        async def sleeper(delay):
+            calls.append(delay)
+            raise RuntimeError("synthetic")
+
+        operator = DurableApprovalOperator(
+            object.__new__(SqliteStorage),
+            binding=ApprovalTurnBinding("job", "profile", "thread", "turn"),
+            signal=ApprovalDecisionSignal(),
+            sleep=sleeper,
+        )
+        self.assertIs(False, await operator._sleep_expiry())
         self.assertEqual([900.0], calls)
 
 

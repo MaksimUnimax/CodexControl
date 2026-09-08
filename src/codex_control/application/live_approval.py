@@ -306,14 +306,15 @@ class DurableApprovalOperator:
             return None
         return job
 
-    async def _sleep_expiry(self) -> None:
+    async def _sleep_expiry(self) -> bool:
         try:
             await self._sleep(900.0)
         except asyncio.CancelledError:
             raise
         except Exception:
-            # A broken test/clock seam is not durable decision authority.
-            return
+            # A broken test/clock seam is not durable expiry authority.
+            return False
+        return True
 
     async def _terminalize_expired(self, approval_id: str) -> ApprovalRecord | None:
         try:
@@ -392,14 +393,16 @@ class DurableApprovalOperator:
                 if expiry_task in done and not expiry_attempted:
                     expiry_attempted = True
                     try:
-                        expiry_task.result()
+                        expiry_elapsed = expiry_task.result()
                     except asyncio.CancelledError:
                         # The outer cancellation path owns cancellation cleanup.
                         raise
                     except Exception:
-                        terminal = None
-                    else:
+                        expiry_elapsed = False
+                    if expiry_elapsed is True:
                         terminal = await self._terminalize_expired(approval_id)
+                    else:
+                        terminal = None
                     if terminal is not None:
                         decision = self._decision(terminal)
                         if decision is not None:

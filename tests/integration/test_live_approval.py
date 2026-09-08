@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from codex_control.adapters.codex.approvals import (
     ApprovalDecision,
@@ -332,10 +333,10 @@ class LiveApprovalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await init
         return transport, client
 
-    async def start_owned(self, method, params):
+    async def start_owned(self, method, params, *, sleep=None):
         transport, client = await self.protocol_client()
         signal = ApprovalDecisionSignal()
-        operator = self.operator(signal, self.blocked_sleeper)
+        operator = self.operator(signal, self.blocked_sleeper if sleep is None else sleep)
         service = OwnedApprovalResponseService("profile-a", client, operator)
         transport.incoming.put_nowait(json.dumps({"id": "wire", "method": method, "params": params}))
         await asyncio.sleep(0)
@@ -344,6 +345,128 @@ class LiveApprovalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.wait_pending()
         await self.wait_for_pending_waiter(signal)
         return transport, client, signal, service, inbound, task
+
+    async def test_failed_async_expiry_stays_pending_then_real_allow_responds_once(self):
+        await self.seed_running()
+
+        async def failing_sleeper(delay):
+            self.assertEqual(900.0, delay)
+            raise RuntimeError("synthetic")
+
+        transport, client, signal, service, inbound, task = await self.start_owned(
+            "item/commandExecution/requestApproval",
+            {"itemId": "item", "startedAtMs": 1, "threadId": "thread", "turnId": "turn", "reason": "safe"},
+            sleep=failing_sleeper,
+        )
+        operator = service._operator
+        expiry_calls = 0
+        original_terminalize = operator._terminalize_expired
+
+        async def counted_terminalize(approval_id):
+            nonlocal expiry_calls
+            expiry_calls += 1
+            return await original_terminalize(approval_id)
+
+        with patch.object(operator, "_terminalize_expired", counted_terminalize):
+            for _ in range(1000):
+                expiry_tasks = tuple(
+                    candidate for candidate in asyncio.all_tasks()
+                    if not candidate.done()
+                    and getattr(candidate.get_coro(), "__qualname__", "")
+                    == "DurableApprovalOperator._sleep_expiry"
+                )
+                if not expiry_tasks:
+                    break
+                await asyncio.sleep(0)
+            self.assertEqual((), expiry_tasks)
+            self.assertIs(ApprovalState.PENDING, (await ApprovalRepository(self.storage).get("approval-generated")).state)
+            self.assertEqual(0, expiry_calls)
+            self.assertFalse(task.done())
+            self.assertEqual([], [message for message in transport.sent if message.get("id") == "wire"])
+
+            callbacks = await self.approval_callbacks()
+            await self.service.handle_callback(
+                PrivateCallbackRequest(12, 7, 7, "allow", callbacks["Allow"])
+            )
+            signal.notify()
+            result = await asyncio.wait_for(task, 2)
+            self.assertIs(ApprovalHandlingStatus.ALLOWED, result.status)
+            self.assertIs(
+                ApprovalState.APPROVED,
+                (await ApprovalRepository(self.storage).get("approval-generated")).state,
+            )
+            self.assertEqual(1, len([message for message in transport.sent if message.get("id") == "wire"]))
+            self.assertEqual([], [message for message in transport.sent if message.get("result") == {"decision": "decline"}])
+            self.assertEqual(set(), signal._waiters)
+            self.assertEqual(
+                [],
+                [
+                    candidate for candidate in asyncio.all_tasks()
+                    if not candidate.done()
+                    and getattr(getattr(candidate.get_coro(), "cr_code", None), "co_filename", "")
+                    .endswith("codex_control/application/live_approval.py")
+                ],
+            )
+        await client.close()
+
+    async def test_failed_async_expiry_then_protocol_terminal_cancels_without_response(self):
+        await self.seed_running()
+
+        async def failing_sleeper(delay):
+            self.assertEqual(900.0, delay)
+            raise RuntimeError("synthetic")
+
+        transport, client, signal, service, inbound, task = await self.start_owned(
+            "item/commandExecution/requestApproval",
+            {"itemId": "item", "startedAtMs": 1, "threadId": "thread", "turnId": "turn", "reason": "safe"},
+            sleep=failing_sleeper,
+        )
+        operator = service._operator
+        expiry_calls = 0
+
+        async def counted_terminalize(approval_id):
+            nonlocal expiry_calls
+            expiry_calls += 1
+            return await DurableApprovalOperator._terminalize_expired(operator, approval_id)
+
+        with patch.object(operator, "_terminalize_expired", counted_terminalize):
+            for _ in range(1000):
+                expiry_tasks = tuple(
+                    candidate for candidate in asyncio.all_tasks()
+                    if not candidate.done()
+                    and getattr(candidate.get_coro(), "__qualname__", "")
+                    == "DurableApprovalOperator._sleep_expiry"
+                )
+                if not expiry_tasks:
+                    break
+                await asyncio.sleep(0)
+            self.assertEqual((), expiry_tasks)
+            self.assertIs(ApprovalState.PENDING, (await ApprovalRepository(self.storage).get("approval-generated")).state)
+            self.assertEqual(0, expiry_calls)
+            self.assertFalse(task.done())
+            self.assertEqual([], [message for message in transport.sent if message.get("id") == "wire"])
+
+            transport.incoming.put_nowait(None)
+            done, _ = await asyncio.wait({task}, timeout=2)
+            self.assertEqual({task}, done)
+            result = await task
+            self.assertIs(ApprovalHandlingStatus.RESPONSE_UNKNOWN, result.status)
+            self.assertEqual([], [message for message in transport.sent if message.get("id") == "wire"])
+            self.assertIs(
+                ApprovalState.CANCELLED,
+                (await ApprovalRepository(self.storage).get("approval-generated")).state,
+            )
+            self.assertEqual(set(), signal._waiters)
+            self.assertEqual(
+                [],
+                [
+                    candidate for candidate in asyncio.all_tasks()
+                    if not candidate.done()
+                    and getattr(getattr(candidate.get_coro(), "cr_code", None), "co_filename", "")
+                    .endswith("codex_control/application/live_approval.py")
+                ],
+            )
+        await client.close()
 
     async def test_real_allow_and_deny_are_exact_one_method_specific_response(self):
         await self.seed_running()
