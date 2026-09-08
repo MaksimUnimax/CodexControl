@@ -177,6 +177,60 @@ new client + reconstructed same wire ID -> no response authority
 
 P3/P6.3 startup recovery may later terminalize the job and use existing post-turn approval cleanup. No old approval response is replayed after restart.
 
+## P6.3 final local orchestration
+
+P6.3 adds no durable state. It composes the accepted turn, approval and delivery state machines.
+
+Live execution is:
+
+```text
+P3 persists CODEX_STARTING
+  -> one process-local safe work-status CREATE attempt
+  -> accepted P1.6 turn/start on exact captured runtime
+  -> P3 persists CODEX_RUNNING
+  -> P6.3 waits for turn terminal while pumping exact P1.7 server requests
+  -> P6.2 publishes/awaits durable approvals as needed
+  -> accepted P1.6 terminal
+  -> P3 durable CODEX_COMPLETED | FAILED | UNKNOWN
+  -> COMPLETED: accepted P6.1 final delivery
+  -> FAILED|UNKNOWN: one live non-durable safe status attempt only
+```
+
+The work-status message ID is not durable P6.3 state. A confirmed live ID may be supplied to P6.1 as the initial first-EDIT hint. Only the immutable P2.4b delivery plan makes that target durable. Process restart restores no work-status hint and never replays acknowledgement/status CREATE.
+
+Turn/approval concurrency is fail-closed:
+
+```text
+turn terminal while only waiting for next server request
+  -> cancel/join request-get
+  -> no captured request => original terminal stands
+  -> captured exact owned request in race => one DENY response, runtime shutdown, projected UNKNOWN
+
+turn terminal while live P6.2 approval is pending
+  -> do not guess/cancel approval handler
+  -> shutdown exact captured profile runtime
+  -> P1.7/P6.2 => RESPONSE_UNKNOWN + best-effort CANCELLED
+  -> projected turn UNKNOWN
+```
+
+Every turn-terminal/request-get/approval-handler helper is owned and joined. There is no delayed approval queue and no runtime reacquire to recreate ownership.
+
+P6.3 startup composition is:
+
+```text
+accepted P3.5 DialogueRecoveryService.recover_startup()
+  -> cancel leftover PENDING approvals only after their recovered job is no longer CODEX_RUNNING
+  -> discover oldest CODEX_COMPLETED|DELIVERY_PENDING|DELIVERING job
+  -> accepted P6.1 with status_message_id=None
+  -> repeat up to 256 candidates
+  -> no remaining candidate => READY
+  -> candidates still remain => LIMIT_REACHED
+```
+
+A startup `CODEX_COMPLETED` job creates an all-CREATE final plan because process-local status hints are never restored. A stranded durable SENDING segment follows accepted P6.1 zero-resend recovery to DELIVERY_UNKNOWN. Confirmed-prefix/PENDING resumes only at the first pending segment. P6.3 creates no background recovery worker.
+
+Later live update ingestion must not start until explicit startup recovery returns READY. Controller effective mode still boots SLEEP under accepted P5.1.
+
 ## Hard-delete ordering
 Do not purge reconciliation identifiers before external delete is definitive. Do not clear binding before confirmed hard delete. DELETE_UNKNOWN blocks new work and retains minimum exact identifiers needed to reconcile.
 
