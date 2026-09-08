@@ -14,9 +14,11 @@ from codex_control.adapters.telegram import (
     TelegramPrivateUpdateAdapter,
 )
 from codex_control.application import (
+    ActiveTurnRegistry,
     ApprovalAwareTurnLifecycle,
     ApprovalDecisionSignal,
     DialogueTurnService,
+    DialogueInterruptService,
     FleetControlService,
     FleetGroupRoutingService,
     FleetMember,
@@ -75,6 +77,8 @@ class _Transport:
         self.sent = []
         self.turn_number = 0
         self.current_turn_id = None
+        self.interrupt_effects = []
+        self.interrupt_seen = asyncio.Event()
 
     async def send(self, message):
         self.sent.append(message)
@@ -95,6 +99,8 @@ class _Transport:
                 "id": message["id"], "result": {"turn": {"id": self.current_turn_id}}
             }))
         elif message.get("method") == "turn/interrupt":
+            self.interrupt_effects.append(message)
+            self.interrupt_seen.set()
             await self.incoming.put(json.dumps({"id": message["id"], "result": {}}))
 
     async def receive(self):
@@ -216,6 +222,7 @@ class P6LocalOrchestrationAcceptance(unittest.IsolatedAsyncioTestCase):
                 p3_job_number += 1
                 return "job-id" if p3_job_number == 1 else f"job-{p3_job_number}-id"
             return f"{kind}-{p3_job_number}-id"
+        shared_registry = ActiveTurnRegistry()
         lifecycle = ApprovalAwareTurnLifecycle(
             self.storage, runtime_manager=manager, model_catalog=_Catalog(), telegram=telegram,
             approval_signal=signal, now_ms=lambda: self.clock, id_factory=approval_id_factory,
@@ -226,16 +233,25 @@ class P6LocalOrchestrationAcceptance(unittest.IsolatedAsyncioTestCase):
             model_catalog=_Catalog(), thread_lifecycle=_Thread(), turn_lifecycle=lifecycle,
             working_directory_resolver=type("W", (), {"resolve": lambda _, profile_id: TrustedWorkingDirectory("/synthetic")})(),
             now_ms=lambda: self.clock, id_factory=p3_id,
+            active_turn_registry=shared_registry,
         )
         control = FleetControlService(
             self.storage, manifest=manifest, server_id="server-80", operator_user_id=7,
             control_chat_id=-100, boot_result=boot, now_ms=lambda: self.clock,
         )
         routing = FleetGroupRoutingService(self.storage, fleet_control=control, dialogue_turn=p3, now_ms=lambda: self.clock)
+        dialogue_interrupt = DialogueInterruptService(
+            self.storage,
+            server_id="server-80",
+            active_turn_registry=shared_registry,
+            turn_lifecycle=lifecycle,
+            now_ms=lambda: self.clock,
+            id_factory=lambda kind: f"{kind}-interrupt-id",
+        )
         private = PrivateControlService(
             self.storage, server_id="server-80", server_display_name="SERVER-80", operator_user_id=7,
             profiles=(CodexProfile("profile-1", "/synthetic", "Profile"),), model_catalog=_Catalog(),
-            interrupt_service=_NoEffect(), delete_service=_NoEffect(), mode_provider=lambda: ControllerMode.ACTIVE,
+            interrupt_service=dialogue_interrupt, delete_service=_NoEffect(), mode_provider=lambda: ControllerMode.ACTIVE,
             now_ms=lambda: self.clock, token_factory=self._token_factory,
         )
         display_number = 0
@@ -251,6 +267,9 @@ class P6LocalOrchestrationAcceptance(unittest.IsolatedAsyncioTestCase):
             approval_signal=signal, dialogue_recovery=DialogueRecoveryService(self.storage, now_ms=lambda: self.clock),
         )
         self.transport, self.runtime_manager, self.telegram = transport, manager, telegram
+        self.shared_registry = shared_registry
+        self.dialogue_interrupt = dialogue_interrupt
+        self.dialogue_turn = p3
         self.group_adapter = TelegramGroupUpdateAdapter(manifest, 7, -100)
         self.private_adapter = TelegramPrivateUpdateAdapter(7)
         self.token_number = 0
@@ -307,21 +326,21 @@ class P6LocalOrchestrationAcceptance(unittest.IsolatedAsyncioTestCase):
             )
             if approvals:
                 return approvals[0][0]
-            await asyncio.sleep(0.005)
+            await asyncio.sleep(0)
         self.fail("approval not published")
 
     async def _wait_wire_response(self):
         for _ in range(200):
             if any(item.get("id") == "approval-wire" for item in self.transport.sent):
                 return
-            await asyncio.sleep(0.005)
+            await asyncio.sleep(0)
         self.fail("approval response not sent")
 
     async def _wait_wire_response_id(self, request_id):
         for _ in range(200):
             if any(item.get("id") == request_id for item in self.transport.sent):
                 return
-            await asyncio.sleep(0.005)
+            await asyncio.sleep(0)
         self.fail("approval response not sent")
 
     async def _wait_no_pending_approvals(self):
@@ -331,7 +350,7 @@ class P6LocalOrchestrationAcceptance(unittest.IsolatedAsyncioTestCase):
             ).fetchall())
             if not pending:
                 return
-            await asyncio.sleep(0.005)
+            await asyncio.sleep(0)
         self.fail("approval remained pending")
 
     async def _create_display_payload(self, job_id, payload_id, text):
@@ -474,14 +493,59 @@ class P6LocalOrchestrationAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("COMPLETED", result.routing.turn_result.status.value)
         self.assertEqual(TurnJobState.DELIVERED, (await TurnJobRepository(self.storage).get("job-id")).state)
 
-    async def test_interrupt_uses_same_lifecycle_without_reacquire(self):
+    async def test_real_private_interrupt_uses_shared_p3_composition_without_reacquire(self):
         group_task = await self._start_prompt()
         binding = self.controller._turn_lifecycle._lease.binding
-        interrupt_task = asyncio.create_task(self.controller._turn_lifecycle.interrupt_turn(binding))
-        await self._feed_completed()
-        interrupt = await interrupt_task
+        job = await TurnJobRepository(self.storage).get("job-id")
+        self.assertIs(binding, self.shared_registry.lookup(job.job_id))
+        self.assertIs(self.dialogue_turn._active_turn_registry, self.shared_registry)
+        self.assertIs(self.dialogue_interrupt._registry, self.shared_registry)
+        self.assertIs(self.dialogue_turn._turn_lifecycle, self.dialogue_interrupt._turn_lifecycle)
+        self.assertEqual("thread-1", binding.thread_id)
+        self.assertEqual("turn-1", binding.turn_id)
+        acquire_calls = self.runtime_manager.acquire_calls
+
+        root = await self.controller.handle_private_command(
+            self._private_command_request(self._raw_private_command(30, "/menu"))
+        )
+        dialogue_token = next(
+            button.callback_data[4:]
+            for row in root.panel.rows
+            for button in row
+            if button.label == "Dialogue"
+        )
+        dialogue_panel = await self.controller.handle_private_callback(
+            self._private_callback_request(self._raw_private_callback(31, "dialogue-query", dialogue_token))
+        )
+        interrupt_token = next(
+            button.callback_data[4:]
+            for row in dialogue_panel.panel.rows
+            for button in row
+            if button.label == "Interrupt"
+        )
+        callback_task = asyncio.create_task(self.controller.handle_private_callback(
+            self._private_callback_request(self._raw_private_callback(32, "interrupt-query", interrupt_token))
+        ))
+        await asyncio.wait_for(self.transport.interrupt_seen.wait(), 1)
+        dialogue = await DialogueRepository(self.storage).get_live()
+        self.assertEqual("INTERRUPTING", dialogue.state.value)
+        running_job = await TurnJobRepository(self.storage).get("job-id")
+        self.assertEqual((job.profile_id, job.thread_id, job.codex_turn_id),
+                         (running_job.profile_id, running_job.thread_id, running_job.codex_turn_id))
+        self.assertEqual(1, len(self.transport.interrupt_effects))
+        self.assertEqual({"threadId": "thread-1", "turnId": "turn-1"},
+                         self.transport.interrupt_effects[0]["params"])
+        self.assertEqual(acquire_calls, self.runtime_manager.acquire_calls)
+
+        await self._feed_completed(status="interrupted")
+        private_result = await callback_task
         await group_task
-        self.assertEqual("CONFIRMED", interrupt.status.value)
+        self.assertEqual("INTERRUPTED", private_result.status.value)
+        self.assertIn((await TurnJobRepository(self.storage).get("job-id")).state.value,
+                      {"FAILED", "DELIVERY_UNKNOWN", "DELIVERED"})
+        self.assertEqual("IDLE", (await DialogueRepository(self.storage).get_live()).state.value)
+        self.assertIsNone(self.shared_registry.lookup("job-id"))
+        self.assertEqual(1, len(self.transport.interrupt_effects))
         self.assertEqual(1, self.runtime_manager.acquire_calls)
 
     async def test_terminal_live_approval_cancels_without_wire_response(self):
@@ -543,7 +607,7 @@ class P6LocalOrchestrationAcceptance(unittest.IsolatedAsyncioTestCase):
             second_job = await TurnJobRepository(self.storage).get("job-2-id")
             if second_job is not None and second_job.state is TurnJobState.CODEX_COMPLETED:
                 break
-            await asyncio.sleep(0.005)
+            await asyncio.sleep(0)
         self.assertEqual(TurnJobState.CODEX_COMPLETED, (await TurnJobRepository(self.storage).get("job-2-id")).state)
         self.telegram.release_final_delivery.set()
         first_result = await first
@@ -770,15 +834,11 @@ class P6LocalOrchestrationAcceptance(unittest.IsolatedAsyncioTestCase):
         await self.controller.handle_private_callback(self._private_callback_request(self._raw_private_callback(22, "query-2", allow)))
         await self._wait_wire_response_id("approval-wire-1")
         await self._wait_no_pending_approvals()
-        for _ in range(20):
-            await asyncio.sleep(0.01)
-
         await self.transport.feed({
             "id": "approval-wire-2", "method": "item/commandExecution/requestApproval",
             "params": {"threadId": "thread-1", "turnId": "turn-1", "itemId": "item-2",
                         "startedAtMs": 2, "command": "echo two", "cwd": "/synthetic", "reason": "synthetic"},
         })
-        await asyncio.sleep(0.1)
         await self._wait_pending()
         root = await self.controller.handle_private_command(self._private_command_request(self._raw_private_command(23, "/menu")))
         opened_token = next(b.callback_data[4:] for row in root.panel.rows for b in row if b.label == "Approvals")
