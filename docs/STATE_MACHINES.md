@@ -76,6 +76,56 @@ DELIVERING -> DELIVERED | DELIVERY_UNKNOWN | FAILED
 ```
 The startup-only recovery exceptions above may terminalize stranded `RECEIVED`/`CLAIMED` jobs without passing through effect-intent states. UNKNOWN/DELIVERY_UNKNOWN are not automatic retry sources. Duplicate update returns existing disposition/job.
 
+## P6.1 response delivery
+
+P6.1 composes the accepted P2.4b delivery state machine; it does not add durable states.
+
+Initial successful delivery:
+
+```text
+CODEX_COMPLETED + no plan
+  -> create bounded DISPLAY chunks
+  -> durable immutable delivery plan
+  -> DELIVERY_PENDING
+```
+
+One segment attempt:
+
+```text
+PENDING/attempt0
+  -> claim_next commits SENDING/attempt1 + job DELIVERING
+  -> exactly one TelegramDeliveryPort effect
+  -> CONFIRMED => segment CONFIRMED
+  -> UNKNOWN   => segment UNKNOWN + job DELIVERY_UNKNOWN
+  -> FAILED    => segment FAILED + job FAILED
+```
+
+After CONFIRMED:
+
+```text
+confirmed prefix + remaining PENDING -> claim first pending only
+all CONFIRMED -> job DELIVERED
+```
+
+No confirmed segment is recreated. No UNKNOWN/FAILED segment is retried automatically.
+
+Recovery of effect-possible SENDING is fail-closed:
+
+```text
+new explicit delivery invocation
++ job DELIVERING
++ exact existing SENDING/attempt1
+  -> ZERO Telegram effect
+  -> finish_sending(UNKNOWN, TELEGRAM_RECOVERY_AMBIGUOUS)
+  -> DELIVERY_UNKNOWN
+```
+
+A durable confirmed prefix followed only by pending segments is safe to resume because no unclassified effect is exposed for the pending suffix.
+
+A storage failure after a possible external message effect may leave SENDING durable. The same recovery rule applies on the next explicit invocation; there is no blind resend.
+
+P6.1 delivers only CODEX_COMPLETED work. Codex FAILED/UNKNOWN without a delivery plan is not promoted into delivery states by P6.1.
+
 ## Setting mutations
 Profile change: only NO_DIALOGUE. Model/reasoning: NO_DIALOGUE defaults or IDLE after runtime validation; rejected during create/run/interrupt/delete/unknown states.
 
