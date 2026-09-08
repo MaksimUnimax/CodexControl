@@ -22,16 +22,16 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P1.10 T0/T1/T2 adapter acceptance; no real production conversation. Accepted `7b236f95df78a05073d67fe362ac9fff343d7c43`.
 
 ## P2 — Durable local state/idempotency
-- [DONE] P2.1 secure SQLite storage kernel + schema-v1 bootstrap/migration/process lock. Accepted `61301fd25ff7253693f367664ce99e13dfc88446`.
+- [DONE] P2.1 secure SQLite storage kernel + historical schema-v1 bootstrap/migration/process lock. Accepted `61301fd25ff7253693f367664ce99e13dfc88446`.
 - [DONE] P2.2 controller/settings/dialogue core repositories. Accepted `5187c080a7188a59989013defe7d07075662d007`.
 - [DONE] P2.3 ingress dedupe + atomic control epoch/mode claim + opaque callback claims. Accepted `0d8f34beaa35a2bc02b349abba9507ebb9bc3802`.
 - [DONE] P2.4a atomic JOB ingress + turn-job execution claims + transient payloads. Accepted `ca5b5cc19ac9278377b96abec46c523603b2ff47`.
 - [DONE] P2.4b delivery segments + atomic approval callback/subject claims + bounded transient retention. Accepted `1dedc737ffa3092ba0dbcd8618a57fa6c351b849`.
 - [DONE] P2.5 deletion claims/tombstones/error fingerprints/confirmed local purge. Accepted `87ef37cf245d79f6d20b507b13c0f36014c1580f`.
 - [DONE] P2.6a bounded non-content metadata retention. Accepted `e6f59739b3091d00894d3434abb5a99e2af72885`.
-- [DONE] P2.6b crash/restart/idempotency harness and final P2 acceptance. Accepted `9db97f0dda109b4d0c0ecfa5f167733905df2766`; full 500.
+- [DONE] P2.6b crash/restart/idempotency harness and final historical P2 acceptance. Accepted `9db97f0dda109b4d0c0ecfa5f167733905df2766`; full 500.
 - [DONE] P2.C1 retention-compatible JOB duplicate replay correction. Accepted `4b6d226ce647fbf38a6ada7b82947be7ad3e30c2`; full 506.
-- [NEXT / AUTHORITY FROZEN] **P2.C2** terminal authorized pre-JOB rejection + schema-v2 migration under ADR-0036. Adds only durable `IGNORED_REJECTED`, exact v1→v2 migration/validation/rollback compatibility, and claim/materializer/retention support. Historical schema-v1/hash remains immutable. P5.2 is gated on this correction.
+- [DONE] **P2.C2** terminal authorized pre-JOB rejection + schema-v2 migration under ADR-0036. Accepted `082c6df79a7c3a6d8dd04b73f15563f1668b6c9b`; full 796. Historical schema-v1/hash remains immutable; current v2 adds exact `IGNORED_REJECTED` and validated v1→v2 migration authority. Acceptance: `docs/evidence/p2/P2_C2_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
 
 ## P3 — Dialogue application service
 - [DONE] P3.1 existing-dialogue prompt admission + immutable authenticated selection + one-turn orchestration. Accepted `9e0a86b311bb63d6a36a4641cb588321987e1550`; full 543.
@@ -50,8 +50,8 @@ P3 is complete at the fake/application boundary.
 P4 is complete at the fake/application private-management boundary. No live Telegram/network acceptance occurs in P4.
 
 ## P5 — Telegram group routing
-- [DONE] **P5.1** shared immutable fleet manifest + persistent reply keyboard + pure group normalization/auth + serialized durable activation/all-sleep routing + restart/current-boot SLEEP authority under ADR-0035. Accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777. Acceptance authority: `docs/evidence/p5/P5_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
-- [BLOCKED ON P2.C2] **P5.2** serialized ordinary group text admission: SLEEP terminal `IGNORED_SLEEP`, ACTIVE P3 turn admission, durable terminal rejection for BUSY/BLOCKED, duplicates, no delayed queue, control-before-prompt ordering.
+- [DONE] **P5.1** shared immutable fleet manifest + persistent reply keyboard + pure group normalization/auth + serialized durable activation/all-sleep routing + restart/current-boot SLEEP authority under ADR-0035. Accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777. Acceptance: `docs/evidence/p5/P5_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
+- [NEXT / ARCHITECT RESEARCH] **P5.2** serialized ordinary group TEXT admission: SLEEP terminal `IGNORED_SLEEP`, ACTIVE accepted-P3 delegation, durable `IGNORED_REJECTED` for pre-JOB BUSY/BLOCKED/stale rejection, duplicate/no delayed queue, and control-before-prompt ordering.
 - [LATER] **P5.3** fleet status/version mismatch safeguards + final fake multi-controller group-routing acceptance, including self-active/non-target sleep/all-sleep/status/offline-restart safety.
 
 ## P6 — Response delivery/full local orchestration
