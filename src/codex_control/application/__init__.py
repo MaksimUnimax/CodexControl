@@ -125,6 +125,16 @@ from .fleet_control import (
     FleetControlResult,
     FleetControlService,
 )
+from .fleet_group_routing import (
+    DialogueTurnPort,
+    FleetControlPort,
+    FleetGroupRoutingService,
+    GroupRoutingError,
+    GroupRoutingErrorCategory,
+    GroupRoutingReason,
+    GroupRoutingResult,
+    GroupRoutingStatus,
+)
 
 __all__ = [
     "P3_INPUT_PAYLOAD_RETENTION_MS",
@@ -231,4 +241,12 @@ __all__ = [
     "FleetControlError",
     "FleetControlResult",
     "FleetControlService",
+    "FleetControlPort",
+    "DialogueTurnPort",
+    "FleetGroupRoutingService",
+    "GroupRoutingStatus",
+    "GroupRoutingReason",
+    "GroupRoutingErrorCategory",
+    "GroupRoutingError",
+    "GroupRoutingResult",
 ]
