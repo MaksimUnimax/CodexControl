@@ -51,7 +51,7 @@ P4 is complete at the fake/application private-management boundary. No live Tele
 
 ## P5 — Telegram group routing
 - [DONE] **P5.1** shared immutable fleet manifest + persistent reply keyboard + pure group normalization/auth + serialized durable activation/all-sleep routing + restart/current-boot SLEEP authority under ADR-0035. Accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777. Acceptance: `docs/evidence/p5/P5_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
-- [NEXT / ARCHITECT RESEARCH] **P5.2** serialized ordinary group TEXT admission: SLEEP terminal `IGNORED_SLEEP`, ACTIVE accepted-P3 delegation, durable `IGNORED_REJECTED` for pre-JOB BUSY/BLOCKED/stale rejection, duplicate/no delayed queue, and control-before-prompt ordering.
+- [NEXT / AUTHORITY FROZEN] **P5.2** serialized ordinary group TEXT admission under ADR-0037: short routing lock, non-durable in-flight prompt marker, stale prompt epoch rejection, SLEEP `IGNORED_SLEEP`, ACTIVE accepted-P3 execution outside the lock, terminal P2.C2 `IGNORED_REJECTED` for BUSY/BLOCKED/local-busy/invalid pre-JOB decisions, durable duplicate preservation, no queue, controls remain responsive while a turn runs.
 - [LATER] **P5.3** fleet status/version mismatch safeguards + final fake multi-controller group-routing acceptance, including self-active/non-target sleep/all-sleep/status/offline-restart safety.
 
 ## P6 — Response delivery/full local orchestration
