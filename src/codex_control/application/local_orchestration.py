@@ -449,23 +449,28 @@ class ApprovalAwareTurnLifecycle:
             raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_REQUEST_INVALID)
         job = await self._running_job(lease)
         lease.wait_started = True
-        client = lease.runtime.client
-        if type(client) is not CodexProtocolClient:
-            raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN)
-        approval_binding = ApprovalTurnBinding(job.job_id, job.profile_id, job.thread_id or "", job.codex_turn_id or "")
-        operator = DurableApprovalOperator(
-            self._storage,
-            binding=approval_binding,
-            signal=self._approval_signal,
-            now_ms=self._clock,
-            id_factory=self._id_factory,
-            sleep=self._approval_sleep,
-        )
-        response_service = OwnedApprovalResponseService(job.profile_id, client, operator)
-        turn_task = asyncio.create_task(self._delegate.wait_turn(binding))
+        turn_task: asyncio.Task[Any] | None = None
         get_task: asyncio.Task[Any] | None = None
         handler_task: asyncio.Task[Any] | None = None
         try:
+            # wait_started commits ownership of the exact runtime.  Setup is
+            # therefore inside the owned boundary: a malformed injected
+            # runtime or P6.2 construction failure must not strand the live
+            # Codex turn while P3 projects UNKNOWN.
+            client = lease.runtime.client
+            if type(client) is not CodexProtocolClient:
+                raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_STREAM_UNKNOWN)
+            approval_binding = ApprovalTurnBinding(job.job_id, job.profile_id, job.thread_id or "", job.codex_turn_id or "")
+            operator = DurableApprovalOperator(
+                self._storage,
+                binding=approval_binding,
+                signal=self._approval_signal,
+                now_ms=self._clock,
+                id_factory=self._id_factory,
+                sleep=self._approval_sleep,
+            )
+            response_service = OwnedApprovalResponseService(job.profile_id, client, operator)
+            turn_task = asyncio.create_task(self._delegate.wait_turn(binding))
             while True:
                 if handler_task is None:
                     get_task = asyncio.create_task(client.next_server_request())
@@ -506,6 +511,12 @@ class ApprovalAwareTurnLifecycle:
                     if turn_task.done():
                         terminal = await self._task_value(turn_task)
                         return self._terminal_projection(binding, terminal)
+        except asyncio.CancelledError:
+            await self._shutdown_once(lease)
+            raise
+        except (TurnLifecycleError, TypeError, ValueError, AttributeError):
+            await self._shutdown_once(lease)
+            return self._unknown_projection(binding, None)
         finally:
             if get_task is not None:
                 await self._cancel_join(get_task)
@@ -513,7 +524,9 @@ class ApprovalAwareTurnLifecycle:
                 if not handler_task.done():
                     await self._shutdown_once(lease)
                 await self._observe(handler_task)
-            await self._observe(turn_task)
+            if turn_task is not None:
+                await self._observe(turn_task)
+            self._retire_wait_lease(lease)
 
     async def interrupt_turn(self, binding: TurnBinding) -> TurnInterruptResult:
         lease = self._lease
@@ -590,6 +603,11 @@ class ApprovalAwareTurnLifecycle:
 
     def _clear_job(self, job_id: str) -> None:
         self._clear_lease(job_id)
+
+    def _retire_wait_lease(self, lease: _Lease) -> None:
+        """Release turn ownership without discarding its delivery hint."""
+        if self._lease is lease:
+            self._lease = None
 
     async def _cleanup_unconsumed_confirmed(self, job_id: str) -> None:
         lease = self._lease
@@ -742,6 +760,8 @@ class LocalControllerOrchestrator:
             if not _async_callable(value, method):
                 raise _invalid()
         if not callable(getattr(fleet_status, "project", None)) or not callable(getattr(fleet_status_renderer, "render", None)):
+            raise _invalid()
+        if turn_lifecycle._approval_signal is not approval_signal:
             raise _invalid()
         self._storage = storage
         self._group_routing = group_routing

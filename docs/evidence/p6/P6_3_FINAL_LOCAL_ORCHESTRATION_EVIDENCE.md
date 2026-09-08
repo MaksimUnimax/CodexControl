@@ -44,3 +44,76 @@ The full run showed the known historical P1.6 pending collector warning. No P6.3
 - Secret scan found no credentials, tokens, CODEX_HOME value, or production paths in the P6.3 production/evidence changes.
 
 This evidence does not claim architect acceptance, close Issue #37, or mark P6 complete.
+
+## Architect first repair
+
+This section records the first repair above rejected candidate
+`94238289602d0f52677bc21a5e847da3f1a97425`, against architect reviews
+`5583120656` and `5583148103`. It is repair evidence only and does not claim
+architect acceptance.
+
+### Repair closure
+
+- The constructor now requires the exact shared `ApprovalDecisionSignal`
+  instance owned by `ApprovalAwareTurnLifecycle`; a mismatched signal is
+  rejected before storage or external effects.
+- A terminal `wait_turn` retires the exact live turn lease after joining its
+  P6.3 helpers. The ACK hint remains independently available until final
+  delivery or terminal safe-status handling, then is cleared.
+- With the first final Telegram effect event-blocked, a second fresh prompt is
+  admitted, reaches `CODEX_RUNNING`, receives a distinct binding and hint, and
+  does not receive a false `TURN_OPERATION_BUSY`.
+- Wait-pump setup failure and cancellation after wait ownership each shut down
+  the captured runtime at most once, retire the exact lease, preserve the hint
+  for the UNKNOWN path, and leave no helper task or approval response.
+- Direct discovery covers CODEX_COMPLETED, DELIVERY_PENDING, and DELIVERING;
+  it excludes RECEIVED, CLAIMED, CODEX_STARTING, CODEX_RUNNING, DELIVERED,
+  FAILED, UNKNOWN, and DELIVERY_UNKNOWN. Ordering is `created_at_ms ASC,
+  job_id ASC`, limit is exact, invalid bool/0/4097 values are rejected, and
+  discovery performs zero clock calls and zero writes.
+
+### Startup, status, and approval matrix
+
+- The main fake path proves effective SLEEP, `recover_startup()` READY, then
+  ACTIVE and live input; P6.3 does not start polling.
+- Stranded SENDING is not resent: Telegram calls are zero and the job becomes
+  DELIVERY_UNKNOWN with accepted Telegram recovery ambiguity.
+- A confirmed prefix is not replayed; startup resumes at the pending suffix.
+- A recovered active job is marked UNKNOWN and its dialogue TURN_UNKNOWN before
+  its durable pending approval is cancelled; no old approval response or ACK is
+  replayed. Delivery recovery is bounded at 256 candidates, performs one final
+  probe, returns LIMIT_REACHED, has no background continuation, and a later
+  explicit recovery can continue.
+- Raw authorized group STATUS is a pure fleet projection with payload exactly
+  `{"text": <str>}` and zero Telegram/P3/job/mode/epoch mutation.
+- FAILED and UNKNOWN live outcomes each avoid P6.1 and make at most one exact
+  safe terminal status effect, without raw error content, retry, or durable
+  delivery plan; hints clear after handling.
+- Two sequential approvals use one captured runtime/client/binding and produce
+  exactly one Allow and one Deny response, with no runtime reacquisition.
+
+### Identity and race proofs
+
+- Clean terminal/request-get and captured-request races are both covered. The
+  clean race preserves the terminal result; the captured anomaly creates no
+  durable pending approval, makes one method-specific deny, shuts down once,
+  and projects UNKNOWN.
+- An equal-but-reconstructed `TurnBinding` is rejected for both wait and
+  interrupt. Concurrent direct start reserves once and the second call fails
+  immediately with TURN_OPERATION_BUSY without queueing or external effects.
+- Main Allow and Deny paths begin with raw Telegram-like private updates and
+  pass through `TelegramPrivateUpdateAdapter` before accepted application
+  requests are constructed.
+- The focused acceptance suite observes zero P6.3 helper-task leaks.
+
+### Final verification
+
+- Final focused counts: 6 unit, 3 integration, and 23 acceptance tests.
+- Full discovery: `954 = 922 + 6 + 3 + 23`, zero failures, zero errors, `OK`.
+- Required prior regression boundaries were rerun green, including P6.2,
+  P6.1, P5.3/P5.2, P4.3, P3.5/P3.4, P1.7 approvals, and P1.10; additional
+  Codex runtime/version checks were also green.
+- `SCHEMA_VERSION=2` and the historical v1 and v2 migration SHA-256 values
+  remain unchanged. Compileall, P6.3 import smoke, `git diff --check`, and the
+  repair-code/test secret scan passed. The known P1.6 warning remains
+  pre-existing; no P6.3 pending-task warning was observed.

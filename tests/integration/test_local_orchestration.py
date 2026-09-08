@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
 import unittest
+from unittest.mock import patch
 
 from codex_control.storage import TurnJobRepository, TurnJobState
 from tests.acceptance.test_p2_6b_support import (
     DeterministicClock,
     TempDatabase,
+    create_idle,
     create_received,
     open_storage,
 )
@@ -82,3 +85,49 @@ class LocalOrchestrationIntegrationTests(unittest.IsolatedAsyncioTestCase):
             (TurnJobState.CODEX_COMPLETED.value, TurnJobState.RECEIVED.value),
             await self.storage.read(states),
         )
+
+    async def test_discovery_complete_state_matrix_order_limit_bool_zero_clock_and_no_write(self):
+        await create_idle(self.storage)
+        states = (
+            ("received", TurnJobState.RECEIVED, None, None),
+            ("claimed", TurnJobState.CLAIMED, None, None),
+            ("starting", TurnJobState.CODEX_STARTING, None, None),
+            ("running", TurnJobState.CODEX_RUNNING, "turn-running", None),
+            ("completed", TurnJobState.CODEX_COMPLETED, "turn-completed", None),
+            ("pending", TurnJobState.DELIVERY_PENDING, "turn-pending", None),
+            ("delivering", TurnJobState.DELIVERING, "turn-delivering", None),
+            ("received-delivered", TurnJobState.DELIVERED, "turn-delivered", None),
+            ("failed", TurnJobState.FAILED, "turn-failed", "CODEX_TURN_FAILED"),
+            ("unknown", TurnJobState.UNKNOWN, "turn-unknown", "CODEX_AMBIGUOUS"),
+            ("delivery-unknown", TurnJobState.DELIVERY_UNKNOWN, "turn-delivery-unknown", "TELEGRAM_RECOVERY_AMBIGUOUS"),
+        )
+        digest = hashlib.sha256(b"matrix").hexdigest()
+
+        def insert(connection):
+            for index, (job_id, state, turn_id, error_class) in enumerate(states):
+                candidate_time = 100 if state in {
+                    TurnJobState.CODEX_COMPLETED, TurnJobState.DELIVERY_PENDING, TurnJobState.DELIVERING
+                } else 200 + index
+                connection.execute(
+                    "INSERT INTO turn_jobs (job_id, telegram_update_id, source_chat_id, source_message_id, "
+                    "dialogue_id, server_id, profile_id, thread_id, model_id, reasoning_effort, input_sha256, "
+                    "codex_turn_id, state, version, created_at_ms, updated_at_ms, error_class) "
+                    "VALUES (?, ?, ?, ?, 'dialogue-1', 'server-1', 'profile-1', ?, 'model-test', 'medium', ?, ?, ?, 0, ?, ?, ?)",
+                    (job_id, index + 1000, -1001, index + 1,
+                     None if state is TurnJobState.RECEIVED else "thread-1", digest, turn_id,
+                     state.value, candidate_time, candidate_time, error_class),
+                )
+
+        await self.storage.write(insert)
+        clock = DeterministicClock()
+        repository = TurnJobRepository(self.storage, now_ms=clock)
+        with patch.object(self.storage, "write", side_effect=AssertionError("discovery must be read-only")):
+            candidates = await repository.list_delivery_candidates(limit=4096)
+            limited = await repository.list_delivery_candidates(limit=2)
+        self.assertEqual(("completed", "delivering", "pending"), tuple(job.job_id for job in candidates))
+        self.assertEqual(("completed", "delivering"), tuple(job.job_id for job in limited))
+        self.assertEqual((TurnJobState.CODEX_COMPLETED, TurnJobState.DELIVERING, TurnJobState.DELIVERY_PENDING), tuple(job.state for job in candidates))
+        self.assertEqual(0, clock.calls)
+        for invalid in (True, False, 0, 4097):
+            with self.assertRaises(Exception):
+                await repository.list_delivery_candidates(limit=invalid)

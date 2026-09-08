@@ -5,6 +5,9 @@ import tempfile
 import unittest
 
 from codex_control.application import (
+    ApprovalAwareTurnLifecycle,
+    ApprovalDecisionSignal,
+    LocalControllerOrchestrator,
     LocalGroupResult,
     LocalOrchestrationError,
     LocalOrchestrationErrorCategory,
@@ -77,4 +80,76 @@ class LocalOrchestrationUnitTests(unittest.TestCase):
                         await TurnJobRepository(storage).list_delivery_candidates(limit=True)
                 finally:
                     await storage.close()
+        asyncio.run(check())
+
+    def test_controller_requires_the_lifecycle_approval_signal_identity(self):
+        class AsyncSurface:
+            async def handle(self, value):
+                return value
+
+            async def handle_command(self, value):
+                return value
+
+            async def handle_callback(self, value):
+                return value
+
+            async def deliver(self, value):
+                return value
+
+            async def recover_startup(self):
+                return value
+
+        class Projection:
+            def project(self, value):
+                return value
+
+        class Renderer:
+            def render(self, value):
+                return {"text": "status"}
+
+        async def check():
+            with tempfile.TemporaryDirectory() as directory:
+                storage = await __import__("codex_control.storage", fromlist=["SqliteStorage"]).SqliteStorage.open(
+                    os.path.join(directory, "state.sqlite3"), now_ms=lambda: 1
+                )
+                try:
+                    signal_a = ApprovalDecisionSignal()
+                    signal_b = ApprovalDecisionSignal()
+                    lifecycle = object.__new__(ApprovalAwareTurnLifecycle)
+                    lifecycle._approval_signal = signal_a
+                    services = AsyncSurface()
+                    with self.assertRaises(LocalOrchestrationError) as mismatch:
+                        LocalControllerOrchestrator(
+                            storage, group_routing=services, fleet_status=Projection(),
+                            fleet_status_renderer=Renderer(), private_control=services,
+                            turn_delivery=services, turn_lifecycle=lifecycle,
+                            approval_signal=signal_b, dialogue_recovery=services,
+                        )
+                    self.assertEqual(LocalOrchestrationErrorCategory.INVALID_ARGUMENT, mismatch.exception.category)
+                    controller = LocalControllerOrchestrator(
+                        storage, group_routing=services, fleet_status=Projection(),
+                        fleet_status_renderer=Renderer(), private_control=services,
+                        turn_delivery=services, turn_lifecycle=lifecycle,
+                        approval_signal=signal_a, dialogue_recovery=services,
+                    )
+                    self.assertIs(signal_a, controller._approval_signal)
+                finally:
+                    await storage.close()
+
+        asyncio.run(check())
+
+    def test_delivery_discovery_rejects_zero_and_upper_bound_before_storage(self):
+        async def check():
+            with tempfile.TemporaryDirectory() as directory:
+                storage = await __import__("codex_control.storage", fromlist=["SqliteStorage"]).SqliteStorage.open(
+                    os.path.join(directory, "state.sqlite3"), now_ms=lambda: 1
+                )
+                try:
+                    repository = TurnJobRepository(storage)
+                    for invalid in (0, 4097, "1"):
+                        with self.assertRaises(Exception):
+                            await repository.list_delivery_candidates(limit=invalid)
+                finally:
+                    await storage.close()
+
         asyncio.run(check())
