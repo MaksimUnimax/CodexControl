@@ -57,6 +57,27 @@ P5.2 never holds the group routing lock across the full P3 turn. Therefore a sec
 
 The process-local P5.2 prompt marker is conservative coordination only; it is non-content, non-durable and not restored after restart. Durable P3 recovery/state remains authority after crash/restart.
 
+## Fleet STATUS / manifest mismatch visibility
+Exact `📊 СТАТУС` remains a read-only group control. Each healthy controller projects its own accepted P5.1/P5.2 STATUS snapshot and may later send the pure P5.3 rendered text through the Telegram transport layer.
+
+The P5.3 status projection exposes only non-secret local fleet metadata:
+
+- local display name/server ID;
+- effective ACTIVE/SLEEP;
+- exact configured `fleet_version`;
+- member count;
+- deterministic SHA-256 identity of the complete ordered fleet manifest;
+- boot generation;
+- last applied control epoch.
+
+The renderer displays the first 16 hexadecimal characters of the manifest identity while the full 64-character value remains available in the local projection. The fingerprint is diagnostic only and never grants routing/effect authority.
+
+There is no peer compatibility RPC or local distributed MATCH decision. Different `fleet_version` values or different manifest fingerprints in the bots' STATUS responses make rollout/configuration mismatch visible to the operator.
+
+During manifest mismatch the reserved activation namespace remains the safety rule: a controller that does not know a newly added `🖥 ...` label must still parse it as ACTIVATE with unknown target and become/remain SLEEP, never treat it as a prompt.
+
+P5 fake acceptance proves local restart SLEEP/no restored prompt queue. Telegram polling backlog/offset freshness is a later live P9/P11 transport acceptance concern and is not inferred from application-only STATUS data.
+
 ## Work status
 Accepted prompt creates/identifies a status projection with safe server/profile/model/effort and short job ID. Prefer editing this known message for progress/final first segment to reduce ambiguous creation.
 
