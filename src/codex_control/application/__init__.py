@@ -135,6 +135,14 @@ from .fleet_group_routing import (
     GroupRoutingResult,
     GroupRoutingStatus,
 )
+from .fleet_status import (
+    P53_MANIFEST_FINGERPRINT_DISPLAY_CHARS,
+    FleetStatusError,
+    FleetStatusErrorCategory,
+    FleetStatusProjection,
+    FleetStatusService,
+    fleet_manifest_fingerprint_sha256,
+)
 
 __all__ = [
     "P3_INPUT_PAYLOAD_RETENTION_MS",
@@ -249,4 +257,10 @@ __all__ = [
     "GroupRoutingErrorCategory",
     "GroupRoutingError",
     "GroupRoutingResult",
+    "P53_MANIFEST_FINGERPRINT_DISPLAY_CHARS",
+    "FleetStatusError",
+    "FleetStatusErrorCategory",
+    "FleetStatusProjection",
+    "FleetStatusService",
+    "fleet_manifest_fingerprint_sha256",
 ]

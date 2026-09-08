@@ -11,6 +11,7 @@ from .private_updates import (
 )
 from .fleet_keyboard import TelegramFleetKeyboardRenderer
 from .group_updates import TelegramGroupUpdateAdapter
+from .fleet_status_render import TelegramFleetStatusRenderer
 
 __all__ = [
     "PrivateInboundKind",
@@ -22,4 +23,5 @@ __all__ = [
     "TelegramPrivateControlRenderer",
     "TelegramFleetKeyboardRenderer",
     "TelegramGroupUpdateAdapter",
+    "TelegramFleetStatusRenderer",
 ]
