@@ -7,6 +7,7 @@ from hashlib import sha256
 
 from codex_control.storage import (
     MIGRATION_ID,
+    SCHEMA_VERSION,
     SCHEMA_V1_CANONICAL_SQL,
     SCHEMA_V1_DDL_SHA256,
     SCHEMA_V1_STATEMENTS,
@@ -15,6 +16,7 @@ from codex_control.storage import (
     StorageErrorCategory,
 )
 from codex_control.storage.schema import INDEX_NAMES, TABLE_NAMES, canonicalize_sql
+from codex_control.storage.schema import SCHEMA_V2_MIGRATION_STATEMENTS
 
 
 class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
@@ -42,13 +44,18 @@ class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
     async def test_fresh_bootstrap_exact_objects_hash_and_no_seed_rows(self):
         storage = await self._open(now_ms=lambda: 1234567890)
         try:
-            row = await storage.read(
-                lambda c: tuple(c.execute(
+            rows = await storage.read(
+                lambda c: [tuple(item) for item in c.execute(
                     "SELECT version, migration_id, ddl_sha256, applied_at_ms "
-                    "FROM schema_migrations"
-                ).fetchone())
+                    "FROM schema_migrations ORDER BY version"
+                )]
             )
-            self.assertEqual((1, MIGRATION_ID, SCHEMA_V1_DDL_SHA256, 1234567890), row)
+            self.assertEqual([
+                (1, MIGRATION_ID, SCHEMA_V1_DDL_SHA256, 1234567890),
+                (2, "0002_ingress_rejected_disposition",
+                 "a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85", 1234567890),
+            ], rows)
+            self.assertEqual(2, await storage.read(lambda c: c.execute("PRAGMA user_version").fetchone()[0]))
             objects = await self._objects(storage)
             self.assertEqual(TABLE_NAMES, {name for kind, name, _ in objects if kind == "table"})
             self.assertEqual(INDEX_NAMES, {name for kind, name, _ in objects if kind == "index"})
@@ -91,10 +98,10 @@ class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_future_version_rejected(self):
         with sqlite3.connect(self.path) as connection:
-            connection.execute("PRAGMA user_version = 2")
+            connection.execute("PRAGMA user_version = 3")
         with self.assertRaises(StorageError) as raised:
             await self._open()
-        self.assertEqual(StorageErrorCategory.SCHEMA_UNSUPPORTED, raised.exception.category)
+            self.assertEqual(StorageErrorCategory.SCHEMA_UNSUPPORTED, raised.exception.category)
 
     async def test_v1_migration_hash_missing_index_extra_object_and_sql_drift_rejected(self):
         cases = ("hash", "row", "index", "extra", "table", "view", "trigger", "drift")
@@ -132,6 +139,7 @@ class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
         storage = await self._open(now_ms=lambda: 2)
         try:
             expected = {s.split()[2]: canonicalize_sql(s) for s in SCHEMA_V1_STATEMENTS}
+            expected["ingress_updates"] = canonicalize_sql(SCHEMA_V2_MIGRATION_STATEMENTS[1])
             actual = await self._objects(storage)
             actual_by_name = {name: canonicalize_sql(sql) for _, name, sql in actual}
             self.assertEqual(expected, actual_by_name)

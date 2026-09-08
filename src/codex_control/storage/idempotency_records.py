@@ -12,6 +12,7 @@ class IngressDispositionKind(StrEnum):
     CONTROL = "CONTROL"
     IGNORED_SLEEP = "IGNORED_SLEEP"
     IGNORED_UNAUTHORIZED = "IGNORED_UNAUTHORIZED"
+    IGNORED_REJECTED = "IGNORED_REJECTED"
     JOB = "JOB"
 
     def __str__(self) -> str:

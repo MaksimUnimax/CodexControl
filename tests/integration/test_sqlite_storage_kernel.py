@@ -188,7 +188,7 @@ class StorageKernelTests(unittest.IsolatedAsyncioTestCase):
                 c.execute("PRAGMA trusted_schema").fetchone()[0],
                 c.execute("PRAGMA user_version").fetchone()[0],
             ))
-            self.assertEqual((1, "wal", 5000, 2, 0, 1), values)
+            self.assertEqual((1, "wal", 5000, 2, 0, 2), values)
         finally:
             await storage.close()
 
@@ -283,7 +283,10 @@ class StorageKernelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_schema_migrations_is_kernel_owned(self):
         storage = await self.open(now_ms=lambda: 1)
-        expected = (1, "0001_initial_state", "b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c")
+        expected = [
+            (1, "0001_initial_state", "b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c"),
+            (2, "0002_ingress_rejected_disposition", "a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85"),
+        ]
         try:
             statements = (
                 "UPDATE schema_migrations SET ddl_sha256='c' || substr(ddl_sha256, 2)",
@@ -314,11 +317,11 @@ class StorageKernelTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(0, await storage.read(lambda c, index=index: c.execute(
                         "SELECT count(*) FROM ingress_updates WHERE update_id=?", (index,)
                     ).fetchone()[0]))
-                    row = await storage.read(lambda c: tuple(c.execute(
-                        "SELECT version, migration_id, ddl_sha256 FROM schema_migrations"
-                    ).fetchone()))
+                    row = await storage.read(lambda c: [tuple(item) for item in c.execute(
+                        "SELECT version, migration_id, ddl_sha256 FROM schema_migrations ORDER BY version"
+                    )])
                     self.assertEqual(expected, row)
-                    self.assertEqual(1, await storage.read(lambda c: c.execute(
+                    self.assertEqual(2, await storage.read(lambda c: c.execute(
                         "PRAGMA user_version"
                     ).fetchone()[0]))
         finally:

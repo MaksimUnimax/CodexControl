@@ -7,6 +7,8 @@ from .schema import (
     SCHEMA_V1_CANONICAL_SQL,
     SCHEMA_V1_DDL_SHA256,
     SCHEMA_V1_STATEMENTS,
+    SCHEMA_V2_MIGRATION_ID,
+    SCHEMA_V2_MIGRATION_SHA256,
 )
 from .sqlite import SqliteStorage
 from .core_repositories import (
@@ -98,6 +100,8 @@ __all__ = [
     "SCHEMA_V1_CANONICAL_SQL",
     "SCHEMA_V1_DDL_SHA256",
     "SCHEMA_V1_STATEMENTS",
+    "SCHEMA_V2_MIGRATION_ID",
+    "SCHEMA_V2_MIGRATION_SHA256",
     "SqliteStorage",
     "StorageError",
     "StorageErrorCategory",

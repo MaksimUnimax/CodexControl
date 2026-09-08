@@ -87,6 +87,8 @@ def _validate_disposition(value: object) -> IngressDispositionKind:
         return value
     if value is IngressDispositionKind.IGNORED_UNAUTHORIZED:
         return value
+    if value is IngressDispositionKind.IGNORED_REJECTED:
+        return value
     raise _invalid()
 
 
@@ -173,6 +175,9 @@ def _materialize_ingress(row: Any) -> IngressUpdateRecord:
         job_id = None
     elif raw_disposition == IngressDispositionKind.IGNORED_UNAUTHORIZED.value:
         disposition = IngressDispositionKind.IGNORED_UNAUTHORIZED
+        job_id = None
+    elif raw_disposition == IngressDispositionKind.IGNORED_REJECTED.value:
+        disposition = IngressDispositionKind.IGNORED_REJECTED
         job_id = None
     elif raw_disposition.startswith(_DISPOSITION_PREFIX):
         job_id = raw_disposition[len(_DISPOSITION_PREFIX):]

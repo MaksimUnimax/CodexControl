@@ -18,6 +18,8 @@ from codex_control.storage import (
     RepositoryError,
     RepositoryErrorCategory,
     SqliteStorage,
+    StorageError,
+    StorageErrorCategory,
 )
 from codex_control.storage.idempotency_repositories import (
     _ensure_exact_rowcount,
@@ -128,15 +130,9 @@ class IngressControlCallbackClaimsTests(unittest.IsolatedAsyncioTestCase):
                 "INSERT INTO ingress_updates(update_id, received_at_ms, completed_at_ms, disposition) VALUES(2, 1.5, 2, 'CONTROL')"
             )
 
-        storage = await self.open()
-        try:
-            for update_id in (1, 2):
-                with self.subTest(update_id=update_id):
-                    with self.assertRaises(RepositoryError) as raised:
-                        await IngressUpdateRepository(storage).get(update_id)
-                    self.assertEqual(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
-        finally:
-            await storage.close()
+        with self.assertRaises(StorageError) as raised:
+            await self.open()
+        self.assertEqual(StorageErrorCategory.SCHEMA_INVALID, raised.exception.category)
 
     async def test_ingress_fresh_clock_failure_rolls_back_and_redacts(self):
         storage = await self.open()
@@ -171,16 +167,9 @@ class IngressControlCallbackClaimsTests(unittest.IsolatedAsyncioTestCase):
                 "INSERT INTO ingress_updates(update_id, received_at_ms, completed_at_ms, disposition) "
                 "VALUES(11, 1, 1, ?)", ("JOB:" + "j" * 129,)
             )
-        storage = await self.open()
-        try:
-            valid = await IngressUpdateRepository(storage).get(10)
-            self.assertEqual(IngressDispositionKind.JOB, valid.disposition)
-            self.assertEqual("j" * 128, valid.job_id)
-            with self.assertRaises(RepositoryError) as raised:
-                await IngressUpdateRepository(storage).get(11)
-            self.assertEqual(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
-        finally:
-            await storage.close()
+        with self.assertRaises(StorageError) as raised:
+            await self.open()
+        self.assertEqual(StorageErrorCategory.SCHEMA_INVALID, raised.exception.category)
 
     async def test_control_missing_controller_no_clock(self):
         storage = await self.open()

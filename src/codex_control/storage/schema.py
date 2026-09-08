@@ -2,7 +2,7 @@
 
 from hashlib import sha256
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MIGRATION_ID = "0001_initial_state"
 
 SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
@@ -172,6 +172,30 @@ SCHEMA_V1_CANONICAL_SQL = "\n".join(
     canonicalize_sql(statement) for statement in SCHEMA_V1_STATEMENTS
 ) + "\n"
 SCHEMA_V1_DDL_SHA256 = sha256(SCHEMA_V1_CANONICAL_SQL.encode("utf-8")).hexdigest()
+
+SCHEMA_V2_MIGRATION_ID = "0002_ingress_rejected_disposition"
+
+SCHEMA_V2_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    "ALTER TABLE ingress_updates RENAME TO ingress_updates_v1",
+    """CREATE TABLE ingress_updates (
+    update_id INTEGER PRIMARY KEY CHECK (update_id >= 0),
+    received_at_ms INTEGER NOT NULL CHECK (received_at_ms >= 0),
+    completed_at_ms INTEGER CHECK (completed_at_ms IS NULL OR completed_at_ms >= received_at_ms),
+    disposition TEXT NOT NULL CHECK (
+        disposition IN ('CONTROL','IGNORED_SLEEP','IGNORED_UNAUTHORIZED','IGNORED_REJECTED')
+        OR (substr(disposition, 1, 4) = 'JOB:' AND length(disposition) > 4)
+    )
+)""",
+    "INSERT INTO ingress_updates(update_id, received_at_ms, completed_at_ms, disposition) "
+    "SELECT update_id, received_at_ms, completed_at_ms, disposition FROM ingress_updates_v1",
+    "DROP TABLE ingress_updates_v1",
+)
+SCHEMA_V2_MIGRATION_CANONICAL_SQL = "\n".join(
+    canonicalize_sql(statement) for statement in SCHEMA_V2_MIGRATION_STATEMENTS
+) + "\n"
+SCHEMA_V2_MIGRATION_SHA256 = sha256(
+    SCHEMA_V2_MIGRATION_CANONICAL_SQL.encode("utf-8")
+).hexdigest()
 
 TABLE_NAMES = frozenset(
     statement.split()[2]

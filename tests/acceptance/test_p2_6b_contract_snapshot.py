@@ -25,7 +25,7 @@ def defined_public_callables(cls: type) -> set[str]:
 
 class P26bContractSnapshotTests(unittest.IsolatedAsyncioTestCase):
     async def test_schema_version_hash_and_exact_object_sets(self):
-        self.assertEqual(1, SCHEMA_VERSION)
+        self.assertEqual(2, SCHEMA_VERSION)
         self.assertEqual("0001_initial_state", MIGRATION_ID)
         self.assertEqual(DDL_SHA, SCHEMA_V1_DDL_SHA256)
         with tempfile.TemporaryDirectory() as directory:
@@ -61,7 +61,7 @@ class P26bContractSnapshotTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(expected_indexes, actual["indexes"])
         self.assertEqual(expected_tables, set(TABLE_NAMES))
         self.assertEqual(expected_indexes, set(INDEX_NAMES))
-        self.assertEqual(1, actual["user_version"])
+        self.assertEqual(2, actual["user_version"])
 
     def test_repository_public_surfaces_are_exact(self):
         expected = {
@@ -91,7 +91,7 @@ class P26bContractSnapshotTests(unittest.IsolatedAsyncioTestCase):
     def test_enum_values_are_exact(self):
         expected = {
             DialogueState: "CREATING IDLE CREATE_UNKNOWN ERROR TURN_RUNNING INTERRUPTING TURN_UNKNOWN DELETE_PENDING DELETING DELETE_UNKNOWN",
-            IngressDispositionKind: "CONTROL IGNORED_SLEEP IGNORED_UNAUTHORIZED JOB",
+            IngressDispositionKind: "CONTROL IGNORED_SLEEP IGNORED_UNAUTHORIZED IGNORED_REJECTED JOB",
             ControlClaimStatus: "APPLIED STALE DUPLICATE",
             CallbackClaimStatus: "CLAIMED NOT_FOUND UNAUTHORIZED EXPIRED ALREADY_CONSUMED",
             TurnJobState: "RECEIVED CLAIMED CODEX_STARTING CODEX_RUNNING CODEX_COMPLETED FAILED UNKNOWN DELIVERY_PENDING DELIVERING DELIVERED DELIVERY_UNKNOWN",

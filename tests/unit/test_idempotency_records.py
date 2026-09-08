@@ -58,7 +58,7 @@ class IdempotencyRecordsAndSurfacesTests(unittest.TestCase):
                     setattr(value, field, None)
 
     def test_public_enums_have_exact_values(self):
-        self.assertEqual({"CONTROL", "IGNORED_SLEEP", "IGNORED_UNAUTHORIZED", "JOB"},
+        self.assertEqual({"CONTROL", "IGNORED_SLEEP", "IGNORED_UNAUTHORIZED", "IGNORED_REJECTED", "JOB"},
                          {value.value for value in PublicIngressDispositionKind})
         self.assertEqual({"APPLIED", "STALE", "DUPLICATE"},
                          {value.value for value in PublicControlClaimStatus})

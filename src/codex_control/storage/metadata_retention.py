@@ -182,7 +182,7 @@ def _standalone_ingress(connection: Any, cutoff: int, limit: int) -> list[Any]:
     rows = connection.execute(
         "SELECT update_id, received_at_ms, completed_at_ms, disposition "
         "FROM ingress_updates AS i WHERE i.completed_at_ms IS NOT NULL AND i.completed_at_ms <= ?"
-        " AND (i.disposition IN ('CONTROL', 'IGNORED_SLEEP', 'IGNORED_UNAUTHORIZED')"
+        " AND (i.disposition IN ('CONTROL', 'IGNORED_SLEEP', 'IGNORED_UNAUTHORIZED', 'IGNORED_REJECTED')"
         " OR (i.disposition LIKE 'JOB:%'"
         " AND NOT EXISTS (SELECT 1 FROM turn_jobs AS suffix_job "
         "WHERE suffix_job.job_id = substr(i.disposition, 5))"
