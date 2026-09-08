@@ -68,7 +68,7 @@ class TurnJobRecordTests(unittest.TestCase):
         public = lambda cls: {name for name, value in vars(cls).items() if not name.startswith("_") and callable(value)}
         self.assertEqual({"get", "claim_ingress", "claim_turn", "mark_codex_starting", "mark_codex_running", "finish_codex"},
                          public(TurnJobRepository))
-        self.assertEqual({"get", "get_input_for_job", "create"}, public(TransientPayloadRepository))
+        self.assertEqual({"get", "get_input_for_job", "get_output_for_job", "create"}, public(TransientPayloadRepository))
         for cls in (TurnJobRepository, TransientPayloadRepository):
             self.assertFalse(public(cls) & {"delete", "purge", "cleanup", "expire", "retry", "requeue", "transition"})
 

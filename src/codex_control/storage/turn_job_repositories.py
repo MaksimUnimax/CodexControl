@@ -419,6 +419,33 @@ class TransientPayloadRepository(_RepositoryBase):
 
         return await self._storage.read(read)
 
+    async def get_output_for_job(self, job_id: str) -> TransientPayloadRecord | None:
+        job_id = _validate_id(job_id)
+
+        def read(connection: Any) -> TransientPayloadRecord | None:
+            job_row = _job_row(connection, job_id)
+            if job_row is None:
+                raise _not_found()
+            job = _materialize_job(job_row)
+            rows = connection.execute(
+                _payload_select() + " WHERE job_id = ? AND kind = 'OUTPUT'",
+                (job_id,),
+            ).fetchall()
+            if len(rows) > 1:
+                raise _invariant()
+            if not rows:
+                return None
+            payload = _materialize_payload(connection, rows[0])
+            if (
+                payload.kind is not TransientPayloadKind.OUTPUT
+                or payload.job_id != job.job_id
+                or payload.dialogue_id != job.dialogue_id
+            ):
+                raise _invariant()
+            return payload
+
+        return await self._storage.read(read)
+
     async def create(
         self,
         *,

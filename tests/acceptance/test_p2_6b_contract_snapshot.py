@@ -72,7 +72,7 @@ class P26bContractSnapshotTests(unittest.IsolatedAsyncioTestCase):
             ControlIngressRepository: {"claim_control"},
             CallbackActionRepository: {"create", "claim"},
             TurnJobRepository: {"get", "claim_ingress", "claim_turn", "mark_codex_starting", "mark_codex_running", "finish_codex"},
-            TransientPayloadRepository: {"get", "get_input_for_job", "create"},
+            TransientPayloadRepository: {"get", "get_input_for_job", "get_output_for_job", "create"},
             DeliverySegmentRepository: {"get", "list_for_job", "plan", "claim_next", "finish_sending"},
             ApprovalRepository: {"get", "list_pending_for_job", "create_pending", "claim_callback", "cancel_pending_for_job"},
             RetentionRepository: {"sweep"},
