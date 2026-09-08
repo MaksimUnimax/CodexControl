@@ -67,7 +67,7 @@ class DeliveryApprovalRecordTests(unittest.TestCase):
                               if not name.startswith("_") and callable(value)}
         self.assertEqual({"get", "list_for_job", "plan", "claim_next", "finish_sending"},
                          public(DeliverySegmentRepository))
-        self.assertEqual({"get", "list_pending_for_job", "create_pending", "claim_callback", "cancel_pending_for_job"},
+        self.assertEqual({"get", "list_pending_for_job", "create_pending", "claim_callback", "cancel_pending_for_job", "terminalize_pending"},
                          public(ApprovalRepository))
         self.assertEqual({"sweep"}, public(RetentionRepository))
         for cls in (DeliverySegmentRepository, ApprovalRepository, RetentionRepository):

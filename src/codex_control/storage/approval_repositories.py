@@ -511,3 +511,56 @@ class ApprovalRepository(_RepositoryBase):
             return tuple(result)
 
         return await self._storage.write(write)
+
+    async def terminalize_pending(
+        self,
+        approval_id: str,
+        *,
+        target_state: ApprovalState,
+    ) -> ApprovalRecord:
+        approval_id = _validate_id(approval_id)
+        if type(target_state) is not ApprovalState or target_state not in (
+            ApprovalState.EXPIRED,
+            ApprovalState.CANCELLED,
+        ):
+            raise _invalid()
+
+        def write(connection: Any) -> ApprovalRecord:
+            row = _approval_row(connection, approval_id)
+            if row is None:
+                raise _not_found()
+            current = _materialize_approval(connection, row)
+            if current.state is not ApprovalState.PENDING:
+                return current
+
+            now = _validate_clock(self._clock)
+            effective_now = max(now, current.updated_at_ms)
+            if target_state is ApprovalState.EXPIRED and effective_now < current.expires_at_ms:
+                raise _error(RepositoryErrorCategory.STATE_CONFLICT)
+
+            changed = connection.execute(
+                "UPDATE approvals SET state = ?, updated_at_ms = ? "
+                "WHERE approval_id = ? AND state = ?",
+                (
+                    target_state.value,
+                    effective_now,
+                    approval_id,
+                    ApprovalState.PENDING.value,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise _invariant()
+            return ApprovalRecord(
+                current.approval_id,
+                current.profile_id,
+                current.wire_request_id,
+                current.kind,
+                current.job_id,
+                current.display_payload_id,
+                target_state,
+                current.created_at_ms,
+                effective_now,
+                current.expires_at_ms,
+            )
+
+        return await self._storage.write(write)

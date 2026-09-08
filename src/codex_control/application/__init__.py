@@ -161,6 +161,16 @@ from .response_delivery import (
     TurnDeliveryStatus,
     segment_telegram_text,
 )
+from .live_approval import (
+    P62_APPROVAL_TTL_MS,
+    P62_APPROVAL_PAYLOAD_RETENTION_MS,
+    LiveApprovalErrorCategory,
+    LiveApprovalError,
+    ApprovalTurnBinding,
+    ApprovalDecisionSignal,
+    DurableApprovalOperator,
+    OwnedApprovalResponseService,
+)
 
 __all__ = [
     "P3_INPUT_PAYLOAD_RETENTION_MS",
@@ -297,4 +307,12 @@ __all__ = [
     "TurnDeliveryResult",
     "TurnDeliveryService",
     "segment_telegram_text",
+    "P62_APPROVAL_TTL_MS",
+    "P62_APPROVAL_PAYLOAD_RETENTION_MS",
+    "LiveApprovalErrorCategory",
+    "LiveApprovalError",
+    "ApprovalTurnBinding",
+    "ApprovalDecisionSignal",
+    "DurableApprovalOperator",
+    "OwnedApprovalResponseService",
 ]
