@@ -130,7 +130,52 @@ P6.1 delivers only CODEX_COMPLETED work. Codex FAILED/UNKNOWN without a delivery
 Profile change: only NO_DIALOGUE. Model/reasoning: NO_DIALOGUE defaults or IDLE after runtime validation; rejected during create/run/interrupt/delete/unknown states.
 
 ## Approval
-`PENDING -> APPROVED | DENIED | EXPIRED | CANCELLED`. Only fresh PENDING record matching running job and exact operator/chat may mutate. EXPIRED fails closed.
+
+Durable approval state remains:
+
+```text
+PENDING -> APPROVED | DENIED | EXPIRED | CANCELLED
+```
+
+P4.3 Allow/Deny is an atomic PENDING-only transition bound to the exact running job/version and exact operator/chat. Terminal approval states never transition back to PENDING and are never overwritten by another terminal decision.
+
+P6.2 live approval coordination adds no durable state. Its exact flow is:
+
+```text
+exact P1.7 InboundServerRequest already owned by current client
+  -> normalize/bind to exact CODEX_RUNNING job/turn
+  -> register process-local wake waiter
+  -> publish durable PENDING approval
+  -> P4.3 callback OR expiry/lost-request terminalizer wins one durable terminal state
+  -> operator re-reads exact approval
+  -> APPROVED => ALLOW
+  -> DENIED|EXPIRED|CANCELLED => DENY
+  -> accepted P1.7 performs exactly one response attempt
+```
+
+The process-local decision signal is wake-only and is never decision authority. A notification while the approval remains PENDING causes only another durable read; it cannot grant ALLOW.
+
+P6.2 per-approval terminalization is:
+
+```text
+PENDING + due expiry -> EXPIRED
+PENDING + exact live P1.7 ownership lost/protocol terminal -> CANCELLED
+already terminal + terminalize request -> unchanged terminal record
+```
+
+Expiry and P4.3 callback decisions race through SQLite; exactly one terminal state wins. `CANCELLED`/`EXPIRED` never consume or revive an Allow/Deny callback; later callbacks become stale/terminal under accepted P2.4b/P4.3 authority.
+
+After a PENDING approval exists, transient storage/read failure is not authority to fabricate DENY while the row may still be actionable. Safety wins over liveness: remain waiting for durable terminal authority or exact P1.7 protocol terminal.
+
+Process restart destroys old P1.7 wire ownership:
+
+```text
+old InboundServerRequest / old CodexProtocolClient ownership -> GONE
+persisted APPROVED|DENIED|EXPIRED|CANCELLED/PENDING metadata -> never reconstruct old wire request
+new client + reconstructed same wire ID -> no response authority
+```
+
+P3/P6.3 startup recovery may later terminalize the job and use existing post-turn approval cleanup. No old approval response is replayed after restart.
 
 ## Hard-delete ordering
 Do not purge reconciliation identifiers before external delete is definitive. Do not clear binding before confirmed hard delete. DELETE_UNKNOWN blocks new work and retains minimum exact identifiers needed to reconcile.
