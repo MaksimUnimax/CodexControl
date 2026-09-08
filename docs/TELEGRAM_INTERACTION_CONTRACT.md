@@ -78,11 +78,31 @@ During manifest mismatch the reserved activation namespace remains the safety ru
 
 P5 fake acceptance proves local restart SLEEP/no restored prompt queue. Telegram polling backlog/offset freshness is a later live P9/P11 transport acceptance concern and is not inferred from application-only STATUS data.
 
-## Work status
-Accepted prompt creates/identifies a status projection with safe server/profile/model/effort and short job ID. Prefer editing this known message for progress/final first segment to reduce ambiguous creation.
+## Work status / acknowledgement boundary
+An accepted prompt should eventually create or identify a safe Telegram status message containing bounded server/profile/model/effort context. P6.3 owns that acknowledgement/progress orchestration.
 
-## Response segmentation
-Use conservative configured text limit; preserve Unicode/order and split by semantic boundaries where possible. Delivery durable per segment. Confirmed segment never recreated; ambiguous creation -> DELIVERY_UNKNOWN.
+P6.1 does not create acknowledgement/status messages. If P6.3 or another accepted caller already knows a status message ID, P6.1 may bind the **first final response segment** as EDIT to that exact message. Every later response segment is CREATE. If no status message ID is supplied, every final response segment is CREATE.
+
+Once a durable delivery plan exists, that plan is sole authority; a later request cannot rewrite CREATE/EDIT targets.
+
+## P6.1 response segmentation and durable delivery
+P6.1 delivers only accepted successful P3 user-visible OUTPUT content, or exact fallback `✅ Выполнено` when successful work has no OUTPUT payload. It does not deliver raw reasoning, raw command-event floods, stderr, environment or raw Codex protocol events.
+
+Configured P6.1 text limit is 512..4096 Unicode code points. Segmentation preserves the source exactly and chooses boundaries deterministically: paragraph (`\n\n`), then line (`\n`), then ASCII space, then hard cut. No Markdown/HTML parse mode is used.
+
+Before any final Telegram message effect, P6.1 creates transient DISPLAY chunks and an immutable accepted P2.4b delivery plan. For each segment:
+
+1. durable P2.4b `claim_next` commits that exact segment as `SENDING/attempt1` before the effect;
+2. exactly one application `TelegramDeliveryPort` CREATE or EDIT attempt is owned;
+3. P2.4b `finish_sending` records CONFIRMED, UNKNOWN or FAILED.
+
+Confirmed segments are never recreated. UNKNOWN/FAILED are not automatically retried.
+
+If a later delivery invocation finds an already durable SENDING segment, it sends **nothing** for that segment and converts it to `DELIVERY_UNKNOWN` with sanitized recovery-ambiguity authority. A confirmed prefix followed by untouched PENDING segments may safely resume from the first pending segment.
+
+A storage failure after a possible Telegram effect never causes an immediate resend. The durable SENDING record remains the fail-closed evidence and a later invocation follows the same recovery-to-UNKNOWN rule.
+
+P6.1 is application/fake only; no actual Telegram HTTP implementation is accepted in this slice.
 
 ## Private panel
 Private chat requires exact operator and private chat identity. Main panel shows safe mode/profile/model/reasoning/dialogue/app-server/diagnostic state. Buttons: account, model, reasoning, dialogue, status.
@@ -95,7 +115,7 @@ Dialogue buttons: NEW DIALOGUE, DELETE DIALOGUE, and STOP TURN only while runnin
 Callback payload carries an opaque token, not trusted business parameters. Durable record binds operator/chat/action/entity/version/state/expiry and is atomically consumed before effect. Delete uses explicit second confirmation. Double/stale clicks produce no repeat effect.
 
 ## Approval UI
-Blocking Codex approval shows only necessary sanitized context with explicit Allow/Deny buttons bound to exact request/job and expiry.
+Blocking Codex approval shows only necessary sanitized context with explicit Allow/Deny buttons bound to exact request/job and expiry. P4.3 stores the atomic decision only; P6.2 later owns the live P1.7 operator/wait/response composition.
 
 ## Commands/menu
 Tap-able `/panel`, `/status`, `/help` may exist as fallback. Normal operation must not require manual command typing.
