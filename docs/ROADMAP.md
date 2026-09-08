@@ -31,7 +31,7 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P2.6a bounded non-content metadata retention. Accepted `e6f59739b3091d00894d3434abb5a99e2af72885`.
 - [DONE] P2.6b crash/restart/idempotency harness and final historical P2 acceptance. Accepted `9db97f0dda109b4d0c0ecfa5f167733905df2766`; full 500.
 - [DONE] P2.C1 retention-compatible JOB duplicate replay correction. Accepted `4b6d226ce647fbf38a6ada7b82947be7ad3e30c2`; full 506.
-- [DONE] P2.C2 terminal authorized pre-JOB rejection + schema-v2 migration under ADR-0036. Accepted `082c6df79a7c3a6d8dd04b73f15563f1668b6c9b`; full 796. Acceptance: `docs/evidence/p2/P2_C2_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
+- [DONE] P2.C2 terminal authorized pre-JOB rejection + schema-v2 migration under ADR-0036. Accepted `082c6df79a7c3a6d8dd04b73f15563f1668b6c9b`; full 796.
 
 ## P3 — Dialogue application service
 - [DONE] P3.1 existing-dialogue prompt admission + immutable authenticated selection + one-turn orchestration. Accepted `9e0a86b311bb63d6a36a4641cb588321987e1550`; full 543.
@@ -58,8 +58,8 @@ P5 is complete at the fake/application group-routing boundary.
 
 ## P6 — Response delivery/full local orchestration
 - [DONE] **P6.1** deterministic successful-response segmentation + transient DISPLAY materialization + accepted P2.4b durable one-attempt delivery under ADR-0039 and architect bounded-segmentation addendum. Accepted `51902dcbd743cd91ad209cd96879b4ad45a26a9e`; full 900. Acceptance: `docs/evidence/p6/P6_1_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
-- [NEXT / ARCHITECT RESEARCH] **P6.2** live approval operator coordination from accepted P1.7 request ownership through durable P2.4b/P4.3 decision authority back to the exact P1.7 response owner. Exact cancellation/restart/duplicate/expiry semantics must be frozen before implementation.
-- [LATER] **P6.3** full local fake orchestration/recovery: acknowledgement/progress composition, delivery-job startup discovery, group/private composition and final P6 acceptance.
+- [NEXT / AUTHORITY FROZEN] **P6.2** durable live approval operator + owned exact P1.7 response under ADR-0040: per-approval EXPIRED/CANCELLED terminalizer, wake-only decision signal, exact running-turn binding, PENDING-before-wait, real P4.3 durable Allow/Deny, and one owned P1.7 response attempt. Restart never reconstructs wire authority. No P3 rewrite/live Telegram.
+- [LATER] **P6.3** full local fake orchestration/recovery: server-request dequeue/turn concurrency, acknowledgement/progress composition, delivery-job startup discovery, group/private composition and final P6 acceptance.
 
 P6 is NOT complete until P6.2 and P6.3 are independently accepted.
 
