@@ -11,7 +11,22 @@ ACTIVE|SLEEP --ACTIVATE_OTHER_OR_UNKNOWN(newer M)--> SLEEP
 ACTIVE|SLEEP --ALL_SLEEP(newer M)--> SLEEP
 any --STALE_CONTROL(M<=last_epoch)--> no mutation
 ```
-STATUS has no mode mutation. SLEEP ordinary text -> terminal IGNORED_SLEEP ingress disposition, no content retention.
+STATUS has no mode mutation.
+
+P5.2 ordinary group TEXT admission is:
+
+```text
+existing durable ingress(update_id) -> DUPLICATE, no new effect
+same-update local in-flight marker -> in-flight DUPLICATE, no rejected claim
+message_id <= last_control_epoch -> terminal IGNORED_REJECTED
+fresh TEXT + effective SLEEP -> terminal IGNORED_SLEEP
+fresh TEXT + ACTIVE + different local prompt marker -> terminal IGNORED_REJECTED/BUSY
+fresh TEXT + ACTIVE + no marker -> publish local marker -> accepted P3 execution outside group lock
+P3 pre-JOB BUSY/BLOCKED -> terminal IGNORED_REJECTED before return
+P3 COMPLETED/FAILED/UNKNOWN after JOB -> preserve JOB; never reclassify rejected
+```
+
+The P5.2 local marker is process-local, non-content and non-durable. It is not restored after restart and is never JOB/dialogue authority. Controls remain processable while accepted P3 runs. SLEEP does not implicitly interrupt an already admitted turn; interrupt is explicit P3.4/P4 authority.
 
 ## Dialogue
 ```text
