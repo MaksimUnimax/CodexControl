@@ -181,6 +181,13 @@ def _valid_context(lines: object) -> bool:
     return sum(len(line) for line in lines) <= 8192
 
 
+def _is_async_callable(value: object) -> bool:
+    return callable(value) and (
+        inspect.iscoroutinefunction(value)
+        or inspect.iscoroutinefunction(getattr(value, "__call__", None))
+    )
+
+
 async def _join_task(task: asyncio.Task[Any]) -> None:
     while not task.done():
         try:
@@ -222,7 +229,7 @@ class DurableApprovalOperator:
             raise _invalid()
         if id_factory is not None and not callable(id_factory):
             raise _invalid()
-        if sleep is not None and not callable(sleep):
+        if sleep is not None and not _is_async_callable(sleep):
             raise _invalid()
         self._storage = storage
         self.binding = binding
@@ -301,9 +308,7 @@ class DurableApprovalOperator:
 
     async def _sleep_expiry(self) -> None:
         try:
-            result = self._sleep(900.0)
-            if inspect.isawaitable(result):
-                await result
+            await self._sleep(900.0)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -367,34 +372,48 @@ class DurableApprovalOperator:
                     return decision
 
             wake_task = asyncio.create_task(waiter.wait())
-            done, _ = await asyncio.wait(
-                (wake_task, expiry_task),
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            if wake_task in done:
-                try:
-                    wake_task.result()
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    pass
-            if expiry_task in done and not expiry_attempted:
-                expiry_attempted = True
-                try:
-                    expiry_task.result()
-                except asyncio.CancelledError:
-                    # The outer cancellation path owns cancellation cleanup.
-                    raise
-                except Exception:
-                    terminal = None
+            try:
+                wait_tasks: tuple[asyncio.Task[Any], ...]
+                if expiry_attempted:
+                    wait_tasks = (wake_task,)
                 else:
-                    terminal = await self._terminalize_expired(approval_id)
-                if terminal is not None:
-                    decision = self._decision(terminal)
-                    if decision is not None:
-                        return decision
-            if wake_task not in done:
-                await _cancel_join(wake_task)
+                    wait_tasks = (wake_task, expiry_task)
+                done, _ = await asyncio.wait(
+                    wait_tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if wake_task in done:
+                    try:
+                        wake_task.result()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
+                if expiry_task in done and not expiry_attempted:
+                    expiry_attempted = True
+                    try:
+                        expiry_task.result()
+                    except asyncio.CancelledError:
+                        # The outer cancellation path owns cancellation cleanup.
+                        raise
+                    except Exception:
+                        terminal = None
+                    else:
+                        terminal = await self._terminalize_expired(approval_id)
+                    if terminal is not None:
+                        decision = self._decision(terminal)
+                        if decision is not None:
+                            return decision
+            finally:
+                # asyncio.wait does not own child tasks.  The operator does:
+                # no waiter helper may outlive this iteration or its owner.
+                if not wake_task.done():
+                    await _cancel_join(wake_task)
+                else:
+                    try:
+                        wake_task.result()
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
     async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
         if not self._valid_request(request):

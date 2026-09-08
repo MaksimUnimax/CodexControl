@@ -79,6 +79,7 @@ class LiveApprovalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.storage = await SqliteStorage.open(
             os.path.join(self.tempdir.name, "state.sqlite3"), now_ms=clock
         )
+        self.database_path = os.path.join(self.tempdir.name, "state.sqlite3")
         await ControllerRuntimeRepository(self.storage, now_ms=clock).begin_boot("fleet")
         await SettingsRepository(self.storage, now_ms=clock).initialize_if_absent(
             profile_id="profile-a", model_id="model-a", reasoning_effort="high"
@@ -164,6 +165,24 @@ class LiveApprovalIntegrationTests(unittest.IsolatedAsyncioTestCase):
             signal=signal, now_ms=lambda: self.now,
             id_factory=lambda label: label + "-generated", sleep=sleep,
         )
+
+    @staticmethod
+    async def blocked_sleeper(delay):
+        await asyncio.Event().wait()
+
+    async def wait_for_pending_waiter(self, signal):
+        for _ in range(1000):
+            wait_tasks = tuple(
+                candidate for candidate in asyncio.all_tasks()
+                if not candidate.done()
+                and getattr(candidate.get_coro(), "__qualname__", "") == "_SignalWaiter.wait"
+            )
+            if len(wait_tasks) == 1:
+                waiter = wait_tasks[0].get_coro().cr_frame.f_locals["self"]
+                if waiter._future is not None and waiter._signal is signal:
+                    return wait_tasks[0]
+            await asyncio.sleep(0)
+        self.fail("decision waiter was not pending")
 
     async def wait_pending(self, approval_id="approval-generated"):
         for _ in range(1000):
@@ -279,7 +298,11 @@ class LiveApprovalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.seed_running()
         signal = ApprovalDecisionSignal()
         gate = asyncio.Event()
-        operator = self.operator(signal, lambda _: gate.wait())
+
+        async def sleeper(delay):
+            await gate.wait()
+
+        operator = self.operator(signal, sleeper)
         result = await operator.decide(ApprovalRequest(
             1, "wrong", "wire", ApprovalKind.COMMAND_EXECUTION,
             "thread", "turn", "item", (),
@@ -312,13 +335,14 @@ class LiveApprovalIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def start_owned(self, method, params):
         transport, client = await self.protocol_client()
         signal = ApprovalDecisionSignal()
-        operator = self.operator(signal, lambda _: asyncio.Event().wait())
+        operator = self.operator(signal, self.blocked_sleeper)
         service = OwnedApprovalResponseService("profile-a", client, operator)
         transport.incoming.put_nowait(json.dumps({"id": "wire", "method": method, "params": params}))
         await asyncio.sleep(0)
         inbound = await client.next_server_request()
         task = asyncio.create_task(service.handle_owned(inbound))
         await self.wait_pending()
+        await self.wait_for_pending_waiter(signal)
         return transport, client, signal, service, inbound, task
 
     async def test_real_allow_and_deny_are_exact_one_method_specific_response(self):
@@ -355,13 +379,18 @@ class LiveApprovalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.seed_running()
         gate = asyncio.Event()
         signal = ApprovalDecisionSignal()
-        task = asyncio.create_task(self.operator(signal, lambda _: gate.wait()).decide(ApprovalRequest(
+
+        async def sleeper(delay):
+            await gate.wait()
+
+        task = asyncio.create_task(self.operator(signal, sleeper).decide(ApprovalRequest(
             1, "profile-a", "wire", ApprovalKind.COMMAND_EXECUTION, "thread", "turn", "item", ("safe",)
         )))
         record = await self.wait_pending()
         await ApprovalRepository(self.storage, now_ms=self.clock).terminalize_pending(record.approval_id, target_state=ApprovalState.CANCELLED)
-        signal.notify(); gate.set()
+        signal.notify()
         self.assertIs(ApprovalDecision.DENY, await task)
+        gate.set()
 
     async def test_outer_cancellation_is_shielded_and_protocol_terminal_is_unknown_with_cleanup(self):
         await self.seed_running()
@@ -379,12 +408,48 @@ class LiveApprovalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len([m for m in transport.sent if m.get("id") == "wire"]))
         await client.close()
 
+    async def test_operator_cancellation_joins_wake_task_and_cancels_pending(self):
+        await self.seed_running()
+        signal = ApprovalDecisionSignal()
+
+        operator = self.operator(signal, self.blocked_sleeper)
+        task = asyncio.create_task(operator.decide(ApprovalRequest(
+            1, "profile-a", "wire", ApprovalKind.COMMAND_EXECUTION,
+            "thread", "turn", "item", ("safe",),
+        )))
+        record = await self.wait_pending()
+        wake_task = await self.wait_for_pending_waiter(signal)
+        self.assertIs(ApprovalState.PENDING, record.state)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(wake_task.done())
+        self.assertEqual(set(), signal._waiters)
+        self.assertIs(ApprovalState.CANCELLED, (await ApprovalRepository(self.storage).get(record.approval_id)).state)
+
     async def test_protocol_terminal_is_unknown_with_pending_cleanup(self):
         await self.seed_running()
         transport, client, signal, service, inbound, task = await self.start_owned(
             "item/commandExecution/requestApproval",
             {"itemId": "item", "startedAtMs": 1, "threadId": "thread", "turnId": "turn", "reason": "safe"},
         )
+        wake_tasks = tuple(
+            candidate for candidate in asyncio.all_tasks()
+            if not candidate.done()
+            and getattr(candidate.get_coro(), "__qualname__", "") == "_SignalWaiter.wait"
+        )
+        self.assertEqual(1, len(wake_tasks))
+        wake_task = wake_tasks[0]
+        wake_waiter = wake_task.get_coro().cr_frame.f_locals["self"]
+        self.assertIsNotNone(wake_waiter._future)
+        self.assertEqual(1, len(signal._waiters))
+        expiry_tasks = tuple(
+            candidate for candidate in asyncio.all_tasks()
+            if not candidate.done()
+            and getattr(candidate.get_coro(), "__qualname__", "") == "DurableApprovalOperator._sleep_expiry"
+        )
+        self.assertEqual(1, len(expiry_tasks))
+        expiry_task = expiry_tasks[0]
         transport.incoming.put_nowait(None)
         done, _ = await asyncio.wait({task}, timeout=2)
         self.assertTrue(done)
@@ -392,25 +457,73 @@ class LiveApprovalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(ApprovalHandlingStatus.RESPONSE_UNKNOWN, result.status)
         self.assertEqual([], [m for m in transport.sent if m.get("id") == "wire"])
         self.assertIs(ApprovalState.CANCELLED, (await ApprovalRepository(self.storage).get("approval-generated")).state)
+        self.assertTrue(wake_task.done())
+        self.assertTrue(expiry_task.done())
+        self.assertEqual(set(), signal._waiters)
+        self.assertEqual(
+            [],
+            [
+                candidate for candidate in asyncio.all_tasks()
+                if not candidate.done()
+                and getattr(getattr(candidate.get_coro(), "cr_code", None), "co_filename", "").endswith(
+                    "codex_control/application/live_approval.py"
+                )
+            ],
+        )
         await client.close()
 
     async def test_restart_new_client_rejects_same_wire_value_without_replay(self):
-        await self.seed_pending("old", display=True)
+        await self.seed_running()
         old_transport, old_client = await self.protocol_client()
-        old_inbound = InboundServerRequest(1, "same-wire", "item/commandExecution/requestApproval", ())
-        self.assertFalse(old_client.owns_server_request(old_inbound))
+        old_transport.incoming.put_nowait(json.dumps({
+            "id": "same-wire",
+            "method": "item/commandExecution/requestApproval",
+            "params": {
+                "itemId": "item", "startedAtMs": 1,
+                "threadId": "thread", "turnId": "turn", "reason": "safe",
+            },
+        }))
+        await asyncio.sleep(0)
+        old_inbound = await old_client.next_server_request()
+        self.assertTrue(old_client.owns_server_request(old_inbound))
         signal = ApprovalDecisionSignal()
-        operator = self.operator(signal, lambda _: asyncio.Event().wait())
+        operator = self.operator(signal, self.blocked_sleeper)
         service = OwnedApprovalResponseService("profile-a", old_client, operator)
-        with self.assertRaises(Exception):
-            await service.handle_owned(old_inbound)
+        old_task = asyncio.create_task(service.handle_owned(old_inbound))
+        old_record = await self.wait_pending("approval-generated")
+        self.assertIs(ApprovalState.PENDING, old_record.state)
+        self.assertIsNotNone(old_record.display_payload_id)
+        self.assertTrue(old_client.owns_server_request(old_inbound))
+        await old_client.close()
+        old_result = await asyncio.wait_for(old_task, 2)
+        self.assertIs(ApprovalHandlingStatus.RESPONSE_UNKNOWN, old_result.status)
         self.assertEqual([], [m for m in old_transport.sent if m.get("id") == "same-wire"])
+        self.assertIs(ApprovalState.CANCELLED, (await ApprovalRepository(self.storage).get(old_record.approval_id)).state)
+
+        await self.storage.close()
+        self.storage = await SqliteStorage.open(self.database_path, now_ms=self.clock)
+        persisted = await ApprovalRepository(self.storage).get(old_record.approval_id)
+        self.assertIsNotNone(persisted)
+        self.assertIs(ApprovalState.CANCELLED, persisted.state)
+
         new_transport, new_client = await self.protocol_client()
         self.assertFalse(new_client.owns_server_request(old_inbound))
+        reconstructed = InboundServerRequest(
+            old_inbound.local_sequence,
+            old_inbound.request_id,
+            old_inbound.method,
+            old_inbound._params,
+        )
+        self.assertFalse(new_client.owns_server_request(reconstructed))
+        new_signal = ApprovalDecisionSignal()
+        new_operator = self.operator(new_signal, self.blocked_sleeper)
+        new_service = OwnedApprovalResponseService("profile-a", new_client, new_operator)
         with self.assertRaises(Exception):
-            await OwnedApprovalResponseService("profile-a", new_client, operator).handle_owned(old_inbound)
+            await new_service.handle_owned(old_inbound)
+        with self.assertRaises(Exception):
+            await new_service.handle_owned(reconstructed)
         self.assertEqual([], [m for m in new_transport.sent if m.get("id") == "same-wire"])
-        await old_client.close(); await new_client.close()
+        await new_client.close()
 
 
 if __name__ == "__main__":
