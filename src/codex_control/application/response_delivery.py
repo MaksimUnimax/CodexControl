@@ -41,6 +41,7 @@ P61_EMPTY_COMPLETION_TEXT = "✅ Выполнено"
 
 _MAX_SIGNED_64 = 9_223_372_036_854_775_807
 _ID_LENGTH = 128
+_P61_MAX_SEGMENTS = 4096
 
 
 class TelegramDeliveryEffectStatus(StrEnum):
@@ -72,6 +73,27 @@ class TelegramDeliveryEffectResult:
     status: TelegramDeliveryEffectStatus
     message_id: int | None
     error_class: TelegramDeliveryErrorClass | None
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not TelegramDeliveryEffectStatus:
+            raise _invalid()
+        if self.status is TelegramDeliveryEffectStatus.CONFIRMED:
+            if _positive_message_id(self.message_id) is None or self.error_class is not None:
+                raise _invalid()
+        elif self.status is TelegramDeliveryEffectStatus.FAILED:
+            if (
+                self.message_id is not None
+                or self.error_class is not TelegramDeliveryErrorClass.TELEGRAM_REQUEST_REJECTED
+            ):
+                raise _invalid()
+        elif self.status is TelegramDeliveryEffectStatus.UNKNOWN:
+            if (
+                self.message_id is not None
+                or self.error_class is not TelegramDeliveryErrorClass.TELEGRAM_NETWORK_AMBIGUOUS
+            ):
+                raise _invalid()
+        else:
+            raise _invalid()
 
     def __repr__(self) -> str:
         return (
@@ -140,6 +162,73 @@ class TurnDeliveryResult:
     job: TurnJobRecord | None
     segments: tuple[DeliverySegmentRecord, ...]
     reason: TurnDeliveryReason | None
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not TurnDeliveryStatus:
+            raise _invariant()
+        if type(self.segments) is not tuple:
+            raise _invariant()
+        if self.reason is not None and type(self.reason) is not TurnDeliveryReason:
+            raise _invariant()
+
+        try:
+            if self.status in (TurnDeliveryStatus.DELIVERED, TurnDeliveryStatus.ALREADY_DELIVERED):
+                if (
+                    type(self.job) is not TurnJobRecord
+                    or self.job.state is not TurnJobState.DELIVERED
+                    or not self.segments
+                    or self.reason is not None
+                ):
+                    raise _invariant()
+                _validate_p6_plan(self.job, self.segments)
+                if any(segment.state is not DeliverySegmentState.CONFIRMED for segment in self.segments):
+                    raise _invariant()
+            elif self.status is TurnDeliveryStatus.DELIVERY_UNKNOWN:
+                if (
+                    type(self.job) is not TurnJobRecord
+                    or self.job.state is not TurnJobState.DELIVERY_UNKNOWN
+                    or not self.segments
+                    or self.reason is not None
+                ):
+                    raise _invariant()
+                _validate_p6_plan(self.job, self.segments)
+            elif self.status is TurnDeliveryStatus.FAILED:
+                if (
+                    type(self.job) is not TurnJobRecord
+                    or self.job.state is not TurnJobState.FAILED
+                    or not self.segments
+                    or self.reason is not None
+                ):
+                    raise _invariant()
+                _validate_p6_plan(self.job, self.segments)
+            elif self.status is TurnDeliveryStatus.BLOCKED:
+                if self.segments:
+                    raise _invariant()
+                if self.reason is TurnDeliveryReason.JOB_NOT_FOUND:
+                    if self.job is not None:
+                        raise _invariant()
+                elif self.reason is TurnDeliveryReason.JOB_NOT_DELIVERABLE:
+                    if (
+                        type(self.job) is not TurnJobRecord
+                        or self.job.state
+                        not in (
+                            TurnJobState.FAILED,
+                            TurnJobState.UNKNOWN,
+                            TurnJobState.RECEIVED,
+                            TurnJobState.CLAIMED,
+                            TurnJobState.CODEX_STARTING,
+                            TurnJobState.CODEX_RUNNING,
+                        )
+                    ):
+                        raise _invariant()
+                else:
+                    raise _invariant()
+            else:
+                raise _invariant()
+        except TurnDeliveryError:
+            raise
+        except Exception:
+            raise _invariant() from None
 
     def __repr__(self) -> str:
         return (
@@ -247,10 +336,13 @@ def segment_telegram_text(text: str, limit: int) -> tuple[str, ...]:
     except UnicodeEncodeError:
         raise _invalid() from None
 
-    chunks: list[str] = []
+    if len(text) > limit * _P61_MAX_SEGMENTS:
+        raise _invalid()
+
+    preferred: list[str] = []
     remaining = text
     while len(remaining) > limit:
-        paragraph = remaining.rfind("\n\n", 0, limit)
+        paragraph = remaining.rfind("\n\n", 0, limit - 1)
         if paragraph >= 0:
             cut = paragraph + 2
         else:
@@ -260,10 +352,21 @@ def segment_telegram_text(text: str, limit: int) -> tuple[str, ...]:
             else:
                 space = remaining.rfind(" ", 0, limit)
                 cut = space + 1 if space >= 0 else limit
-        chunks.append(remaining[:cut])
+        preferred.append(remaining[:cut])
         remaining = remaining[cut:]
-    chunks.append(remaining)
-    return tuple(chunks)
+    preferred.append(remaining)
+    if len(preferred) <= _P61_MAX_SEGMENTS:
+        return tuple(preferred)
+
+    chunks = tuple(
+        text[offset:offset + limit]
+        for offset in range(0, len(text), limit)
+    )
+    if not 1 <= len(chunks) <= _P61_MAX_SEGMENTS:
+        raise _invariant()
+    if any(not chunk or len(chunk) > limit for chunk in chunks) or "".join(chunks) != text:
+        raise _invariant()
+    return chunks
 
 
 def _validate_p6_plan(job: TurnJobRecord, segments: tuple[DeliverySegmentRecord, ...]) -> None:
@@ -516,13 +619,9 @@ class TurnDeliveryService:
     async def _create_plan(
         self, job: TurnJobRecord, request: TurnDeliveryRequest
     ) -> tuple[TurnJobRecord, tuple[DeliverySegmentRecord, ...], DeliverySegmentRepository]:
-        now = _validate_clock_value(self._clock)
-        if now > _MAX_SIGNED_64 - P61_DISPLAY_PAYLOAD_RETENTION_MS:
-            raise _invariant()
-        expiry = now + P61_DISPLAY_PAYLOAD_RETENTION_MS
-        payloads = TransientPayloadRepository(self._storage, now_ms=_fixed_clock(now))
+        output_repo = TransientPayloadRepository(self._storage)
         try:
-            output = await payloads.get_output_for_job(job.job_id)
+            output = await output_repo.get_output_for_job(job.job_id)
         except (StorageError, RepositoryError) as error:
             raise _repository_error(error) from None
         except Exception:
@@ -539,12 +638,18 @@ class TurnDeliveryService:
                 raise _invariant()
             try:
                 text = output.content.decode("utf-8")
-            except UnicodeDecodeError:
+            except (AttributeError, UnicodeDecodeError):
                 raise _invariant() from None
         try:
             chunks = segment_telegram_text(text, self._text_limit)
         except TurnDeliveryError:
             raise _invariant() from None
+
+        now = _validate_clock_value(self._clock)
+        if now > _MAX_SIGNED_64 - P61_DISPLAY_PAYLOAD_RETENTION_MS:
+            raise _invariant()
+        expiry = now + P61_DISPLAY_PAYLOAD_RETENTION_MS
+        payloads = TransientPayloadRepository(self._storage, now_ms=_fixed_clock(now))
 
         created: list[TransientPayloadRecord] = []
         for chunk in chunks:

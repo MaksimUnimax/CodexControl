@@ -23,7 +23,7 @@ This is executor evidence for Issue #35. It is not architect acceptance and does
 
 ## Deterministic segmentation
 
-The public constants are 512, 4096, 86,400,000 ms, and the exact empty-completion fallback `✅ Выполнено`. The pure segmenter validates exact strings, NUL-free strict UTF-8, and exact non-boolean integer limits. It preserves every source code point and reconstructs the input by concatenation. Boundary selection is farthest paragraph, then line, then ASCII-space, then an exact hard cut. The accepted P3 maximum projected character bound is 2,000,510 characters, requiring at most `ceil(2,000,510 / 512) = 3,908` segments, below the accepted P2.4b maximum of 4,096.
+The public constants are 512, 4096, 86,400,000 ms, and the exact empty-completion fallback `✅ Выполнено`. The pure segmenter validates exact strings, NUL-free strict UTF-8, and exact non-boolean integer limits. It preserves every source code point and reconstructs the input by concatenation. Boundary selection is farthest paragraph, then line, then ASCII-space, then an exact hard cut. The first candidate recorded an invalid worst-case proof that applied `ceil(N / limit)` directly to the preferred semantic pass; the repair retains that pass but adds the binding bounded-fallback rule below.
 
 ## Restart-safe output and DISPLAY materialization
 
@@ -47,10 +47,69 @@ Codex FAILED and UNKNOWN jobs without a delivery plan are BLOCKED with zero port
 
 - P6.1 focused tests: 12 unit, 19 integration; 31 total; failures 0; errors 0.
 - Prior targeted regression set: 102 tests; failures 0; errors 0.
-- Full suite: 891 tests = 860 accepted base + 12 unit + 19 integration; failures 0; errors 0.
+- Rejected candidate full discovery: 891 tests = 860 accepted base + 12 unit + 19 integration; failures 0; errors 0.
 - Known P1.6 pending-task warning: observed; independently pre-existing and not introduced by P6.1.
 - Schema version: 2.
 - Historical schema-v1 DDL SHA-256: `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
 - Schema-v2 migration SHA-256: `a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85`.
 
 Temporary SQLite databases and fake Telegram ports were used. No real Telegram, network, Codex, approval-response, production database, production state root, or production service effect was used.
+
+## Architect first repair
+
+This is factual executor evidence for the first P6.1 repair. It does not claim
+architect acceptance and does not close Issue #35.
+
+- Rejected candidate: `8a8db2a792be2015e397f8c55dd7994fd1eba0a3`.
+- Architect review/addendum: `5579459223`.
+- Repair production/test/evidence paths: `src/codex_control/application/response_delivery.py`,
+  `tests/unit/test_response_delivery.py`, `tests/integration/test_response_delivery.py`,
+  and this evidence file. No architect-owned file was changed.
+
+### Factual closure
+
+- `TelegramDeliveryEffectResult` now accepts only the three canonical direct
+  construction shapes. Invalid effect shapes, including service-only error
+  classes, are rejected as `INVALID_ARGUMENT`; repr remains identifier-safe.
+- `TurnDeliveryResult` now enforces exact status/tuple/reason types and the
+  canonical DELIVERED, ALREADY_DELIVERED, DELIVERY_UNKNOWN, FAILED, and
+  BLOCKED relations. Impossible public results raise `INVARIANT`.
+- The first candidate's invalid semantic worst-case proof is retained as a
+  documented fact. The pathological preferred segmentation counterexample is
+  `("\n\n" + ("a" * 512)) * 2050`: length `1,053,700`, preferred count `4,100`
+  (`>4096`). The deterministic hard fallback returns at most `4096` exact
+  chunks, reconstructs the input exactly, and preserves all content.
+- Inputs longer than `limit * 4096` are rejected as `INVALID_ARGUMENT` before
+  the preferred list is built. The accepted P3 maximum is `2,000,510`; hard
+  fallback at limit `512` gives exactly `ceil(2,000,510 / 512) = 3,908`, so
+  accepted P3 output remains within the durable plan bound by fallback.
+- Initial planning now performs OUTPUT lookup/decode/fallback and segmentation
+  before reading the application clock. The invalid UTF-8 pre-clock proof has
+  zero application-clock calls, zero DISPLAY rows, zero delivery segments, and
+  zero Telegram calls; a normal valid plan reads the application clock exactly
+  once.
+- The multi-segment proof uses distinguishable exact texts `A*512`, `B*512`,
+  and `C`, verifies sequence `1,2,3`, exactly three port calls, and observes
+  durable SENDING/attempt 1 before each effect.
+- Existing one-attempt, SENDING-before-port, terminal FAILED/UNKNOWN no-retry,
+  malformed-port RESULT_INVALID, stranded-SENDING zero-resend recovery,
+  confirmed-prefix resume, caller-cancellation shielding, and
+  storage-after-effect no-resend proofs remain green. P2.4b and P2.5 behavior
+  is unchanged.
+
+### Validation
+
+- Final focused P6.1 tests: `14` unit and `20` integration; `34` total; all
+  passing.
+- P2.4b delivery and P2.5 deletion regressions: `53` tests; all passing.
+- Full suite: expected/observed `860 + 14 + 20 = 894` tests; failures `0`; errors `0`; final status `OK`.
+- Compileall, P6.1 import smoke, schema checks, `git diff --check`, and the
+  changed-path secret/effect scan passed. The full discovery output contained
+  no P1.6 pending-task warning in this repair pass.
+- No schema/DDL, P2.4b, P2.5, P3, P4 or P5 production change was made.
+- Schema version remains `2`; historical v1 DDL SHA-256 remains
+  `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c` and
+  schema-v2 migration SHA-256 remains
+  `a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85`.
+- No real Telegram, network, Codex, approval response, production database,
+  production state root, or production service effect was used.

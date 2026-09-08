@@ -58,6 +58,12 @@ class FakeTelegram:
             raise RuntimeError("synthetic transport failure")
         if self.mode == "malformed":
             return object()
+        if self.mode == "exact-malformed":
+            result = TelegramDeliveryEffectResult.__new__(TelegramDeliveryEffectResult)
+            object.__setattr__(result, "status", TelegramDeliveryEffectStatus.CONFIRMED)
+            object.__setattr__(result, "message_id", None)
+            object.__setattr__(result, "error_class", None)
+            return result
         if self.mode == "unknown":
             return TelegramDeliveryEffectResult(
                 TelegramDeliveryEffectStatus.UNKNOWN,
@@ -137,11 +143,12 @@ class ResponseDeliveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             def ids(kind):
                 self._display_number += 1
                 return f"display-{self._display_number}"
+        clock = now if callable(now) else lambda: now
         return TurnDeliveryService(
             self.storage,
             telegram=port,
             text_limit=limit,
-            now_ms=lambda: now,
+            now_ms=clock,
             id_factory=ids,
         )
 
@@ -168,6 +175,47 @@ class ResponseDeliveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RepositoryError) as raised:
             await TransientPayloadRepository(self.storage).get_output_for_job("missing")
         self.assertEqual(RepositoryErrorCategory.NOT_FOUND, raised.exception.category)
+
+    async def test_initial_plan_failures_happen_before_clock_and_valid_plan_reads_once(self):
+        completed = await self._completed(output=b"\xff")
+
+        class CountingClock:
+            def __init__(self):
+                self.calls = 0
+
+            def __call__(self):
+                self.calls += 1
+                return 1_000
+
+        clock = CountingClock()
+        port = FakeTelegram()
+        with self.assertRaises(TurnDeliveryError) as raised:
+            await self._service(port, now=clock).deliver(
+                TurnDeliveryRequest(completed.job.job_id)
+            )
+        self.assertEqual(TurnDeliveryErrorCategory.INVARIANT, raised.exception.category)
+        self.assertEqual(0, clock.calls)
+        self.assertEqual([], port.calls)
+        counts = await self.storage.read(
+            lambda connection: (
+                connection.execute(
+                    "SELECT COUNT(*) FROM transient_payloads WHERE job_id = ? AND kind = 'DISPLAY'",
+                    (completed.job.job_id,),
+                ).fetchone()[0],
+                connection.execute(
+                    "SELECT COUNT(*) FROM delivery_segments WHERE job_id = ?",
+                    (completed.job.job_id,),
+                ).fetchone()[0],
+            )
+        )
+        self.assertEqual((0, 0), counts)
+
+        valid_completed = await self._completed(output=b"valid")
+        valid_clock = CountingClock()
+        await self._service(FakeTelegram(), now=valid_clock).deliver(
+            TurnDeliveryRequest(valid_completed.job.job_id)
+        )
+        self.assertEqual(1, valid_clock.calls)
 
     async def test_restart_reads_output_without_running_p3(self):
         completed = await self._completed(output=b"restart-safe")
@@ -220,17 +268,39 @@ class ResponseDeliveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(payload.content), payload.byte_length)
             self.assertEqual(5_000 + P61_DISPLAY_PAYLOAD_RETENTION_MS, payload.expires_at_ms)
 
-    async def test_multi_segment_success_is_ordered_and_finally_delivered(self):
-        completed = await self._completed(output=b"a" * 1_100)
-        port = FakeTelegram()
+    async def test_multi_segment_success_is_distinguishable_and_ordered(self):
+        completed = await self._completed(output=b"A" * 512 + b"B" * 512 + b"C")
+        observed = []
+
+        class InspectingPort(FakeTelegram):
+            async def create_message(inner, *, chat_id, text):
+                sequence = len(inner.calls) + 1
+                job = await TurnJobRepository(self.storage).get(completed.job.job_id)
+                segment = await DeliverySegmentRepository(self.storage).get(
+                    completed.job.job_id, sequence
+                )
+                observed.append((sequence, job.state, segment.state, segment.attempt_count, text))
+                return await super().create_message(chat_id=chat_id, text=text)
+
+        port = InspectingPort()
         result = await self._service(port).deliver(TurnDeliveryRequest(completed.job.job_id))
         self.assertEqual(TurnDeliveryStatus.DELIVERED, result.status)
         self.assertEqual(["CREATE"] * 3, [call[0] for call in port.calls])
         self.assertEqual(
-            [segment.payload_id for segment in result.segments],
-            [segment.payload_id for segment in result.segments],
+            ["A" * 512, "B" * 512, "C"],
+            [call[2] for call in port.calls],
         )
-        self.assertEqual(TurnJobState.DELIVERED, (await TurnJobRepository(self.storage).get(completed.job.job_id)).state)
+        self.assertEqual([1, 2, 3], [entry[0] for entry in observed])
+        self.assertEqual(
+            [(TurnJobState.DELIVERING, DeliverySegmentState.SENDING, 1)] * 3,
+            [(entry[1], entry[2], entry[3]) for entry in observed],
+        )
+        self.assertEqual(3, len(port.calls))
+        self.assertEqual([1, 2, 3], [segment.sequence for segment in result.segments])
+        self.assertEqual(
+            TurnJobState.DELIVERED,
+            (await TurnJobRepository(self.storage).get(completed.job.job_id)).state,
+        )
 
     async def test_confirmed_delivery_replay_is_zero_effect(self):
         completed = await self._completed()
@@ -254,13 +324,14 @@ class ResponseDeliveryIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([], replay_port.calls)
 
     async def test_malformed_result_exception_and_edit_mismatch_become_unknown(self):
-        for mode in ("malformed", "exception", "mismatch"):
+        for mode in ("malformed", "exact-malformed", "exception", "mismatch"):
             with self.subTest(mode=mode):
                 completed = await self._completed(output=(mode + " output").encode())
                 port = FakeTelegram(mode=mode)
                 request = TurnDeliveryRequest(completed.job.job_id, 55) if mode == "mismatch" else TurnDeliveryRequest(completed.job.job_id)
                 result = await self._service(port).deliver(request)
                 self.assertEqual(TurnDeliveryStatus.DELIVERY_UNKNOWN, result.status)
+                self.assertEqual(1, len(port.calls))
                 self.assertIn(
                     result.job.error_class,
                     (TelegramDeliveryErrorClass.TELEGRAM_RESULT_INVALID.value,

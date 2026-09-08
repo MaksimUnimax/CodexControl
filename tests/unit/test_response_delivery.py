@@ -23,6 +23,13 @@ from codex_control.application import (
     TurnDeliveryStatus,
     segment_telegram_text,
 )
+from codex_control.storage import (
+    DeliveryOperation,
+    DeliverySegmentRecord,
+    DeliverySegmentState,
+    TurnJobRecord,
+    TurnJobState,
+)
 
 
 class ResponseDeliveryUnitTests(unittest.TestCase):
@@ -41,6 +48,19 @@ class ResponseDeliveryUnitTests(unittest.TestCase):
                 "TELEGRAM_RESULT_INVALID",
                 "TELEGRAM_RECOVERY_AMBIGUOUS",
             ],
+        )
+        from codex_control.application import TurnDeliveryReason
+        self.assertEqual(
+            [member.value for member in TurnDeliveryStatus],
+            ["DELIVERED", "ALREADY_DELIVERED", "DELIVERY_UNKNOWN", "FAILED", "BLOCKED"],
+        )
+        self.assertEqual(
+            [member.value for member in TurnDeliveryReason],
+            ["JOB_NOT_FOUND", "JOB_NOT_DELIVERABLE"],
+        )
+        self.assertEqual(
+            [member.value for member in TurnDeliveryErrorCategory],
+            ["INVALID_ARGUMENT", "STORAGE", "INVARIANT"],
         )
 
     def test_public_fields_are_exact_and_frozen(self):
@@ -127,7 +147,48 @@ class ResponseDeliveryUnitTests(unittest.TestCase):
 
     def test_p3_worst_case_is_within_accepted_delivery_segment_bound(self):
         projected_chars = MAX_TOTAL_AGENT_MESSAGE_CHARS + (MAX_AGENT_MESSAGES_PER_TURN - 1) * 2
+        self.assertEqual(2_000_510, projected_chars)
+        self.assertEqual(3908, math.ceil(projected_chars / P61_MIN_TEXT_LIMIT))
         self.assertLessEqual(math.ceil(projected_chars / P61_MIN_TEXT_LIMIT), 4096)
+
+    def test_pathological_preferred_segmentation_uses_bounded_hard_fallback(self):
+        limit = 512
+        text = ("\n\n" + ("a" * 512)) * 2050
+        self.assertEqual(1_053_700, len(text))
+
+        remaining = text
+        preferred_count = 0
+        while len(remaining) > limit:
+            paragraph = remaining.rfind("\n\n", 0, limit - 1)
+            if paragraph >= 0:
+                cut = paragraph + 2
+            else:
+                line = remaining.rfind("\n", 0, limit)
+                if line >= 0:
+                    cut = line + 1
+                else:
+                    space = remaining.rfind(" ", 0, limit)
+                    cut = space + 1 if space >= 0 else limit
+            preferred_count += 1
+            remaining = remaining[cut:]
+        preferred_count += 1
+        self.assertEqual(4100, preferred_count)
+        self.assertGreater(preferred_count, 4096)
+
+        chunks = segment_telegram_text(text, limit)
+        self.assertLessEqual(len(chunks), 4096)
+        self.assertEqual(512, len(chunks[0]))
+        self.assertEqual(text[:512], chunks[0])
+        self.assertEqual(text, "".join(chunks))
+        self.assertEqual(
+            tuple(text[offset:offset + limit] for offset in range(0, len(text), limit)),
+            chunks,
+        )
+        self.assertTrue(all(chunk and len(chunk) <= limit for chunk in chunks))
+
+        with self.assertRaises(TurnDeliveryError) as raised:
+            segment_telegram_text("a" * (limit * 4096 + 1), limit)
+        self.assertEqual(TurnDeliveryErrorCategory.INVALID_ARGUMENT, raised.exception.category)
 
     def test_request_validation_is_bounded(self):
         TurnDeliveryRequest("j")
@@ -138,20 +199,99 @@ class ResponseDeliveryUnitTests(unittest.TestCase):
             with self.assertRaises(TurnDeliveryError):
                 TurnDeliveryRequest("j", value)
 
-    def test_effect_result_shapes_can_be_constructed_but_service_contract_is_explicit(self):
-        confirmed = TelegramDeliveryEffectResult(
-            TelegramDeliveryEffectStatus.CONFIRMED, 1, None
+    def test_effect_result_constructor_accepts_only_canonical_shapes(self):
+        canonical = (
+            TelegramDeliveryEffectResult(TelegramDeliveryEffectStatus.CONFIRMED, 1, None),
+            TelegramDeliveryEffectResult(
+                TelegramDeliveryEffectStatus.FAILED,
+                None,
+                TelegramDeliveryErrorClass.TELEGRAM_REQUEST_REJECTED,
+            ),
+            TelegramDeliveryEffectResult(
+                TelegramDeliveryEffectStatus.UNKNOWN,
+                None,
+                TelegramDeliveryErrorClass.TELEGRAM_NETWORK_AMBIGUOUS,
+            ),
         )
-        rejected = TelegramDeliveryEffectResult(
-            TelegramDeliveryEffectStatus.FAILED,
-            None,
-            TelegramDeliveryErrorClass.TELEGRAM_REQUEST_REJECTED,
+        self.assertEqual(1, canonical[0].message_id)
+        self.assertIsNone(canonical[1].message_id)
+        self.assertIsNone(canonical[2].message_id)
+
+        invalid = (
+            ("CONFIRMED", 1, None),
+            (TelegramDeliveryEffectStatus.CONFIRMED, None, None),
+            (TelegramDeliveryEffectStatus.CONFIRMED, 0, None),
+            (TelegramDeliveryEffectStatus.CONFIRMED, -1, None),
+            (TelegramDeliveryEffectStatus.CONFIRMED, True, None),
+            (TelegramDeliveryEffectStatus.CONFIRMED, 2**63, None),
+            (TelegramDeliveryEffectStatus.CONFIRMED, 1, TelegramDeliveryErrorClass.TELEGRAM_REQUEST_REJECTED),
+            (TelegramDeliveryEffectStatus.FAILED, 1, TelegramDeliveryErrorClass.TELEGRAM_REQUEST_REJECTED),
+            (TelegramDeliveryEffectStatus.FAILED, None, None),
+            (TelegramDeliveryEffectStatus.FAILED, None, TelegramDeliveryEffectStatus.UNKNOWN),
+            (TelegramDeliveryEffectStatus.FAILED, None, TelegramDeliveryErrorClass.TELEGRAM_LOCAL_DISPATCH_FAILED),
+            (TelegramDeliveryEffectStatus.FAILED, None, TelegramDeliveryErrorClass.TELEGRAM_RESULT_INVALID),
+            (TelegramDeliveryEffectStatus.FAILED, None, TelegramDeliveryErrorClass.TELEGRAM_RECOVERY_AMBIGUOUS),
+            (TelegramDeliveryEffectStatus.UNKNOWN, 1, TelegramDeliveryErrorClass.TELEGRAM_NETWORK_AMBIGUOUS),
+            (TelegramDeliveryEffectStatus.UNKNOWN, None, None),
+            (TelegramDeliveryEffectStatus.UNKNOWN, None, TelegramDeliveryErrorClass.TELEGRAM_REQUEST_REJECTED),
+            (TelegramDeliveryEffectStatus.UNKNOWN, None, TelegramDeliveryErrorClass.TELEGRAM_LOCAL_DISPATCH_FAILED),
+            (TelegramDeliveryEffectStatus.UNKNOWN, None, TelegramDeliveryErrorClass.TELEGRAM_RESULT_INVALID),
+            (TelegramDeliveryEffectStatus.UNKNOWN, None, TelegramDeliveryErrorClass.TELEGRAM_RECOVERY_AMBIGUOUS),
         )
-        unknown = TelegramDeliveryEffectResult(
-            TelegramDeliveryEffectStatus.UNKNOWN,
-            None,
-            TelegramDeliveryErrorClass.TELEGRAM_NETWORK_AMBIGUOUS,
+        for shape in invalid:
+            with self.subTest(shape=repr(shape)):
+                with self.assertRaises(TurnDeliveryError) as raised:
+                    TelegramDeliveryEffectResult(*shape)
+                self.assertEqual(TurnDeliveryErrorCategory.INVALID_ARGUMENT, raised.exception.category)
+
+    def test_turn_delivery_result_constructor_enforces_public_relations(self):
+        from codex_control.application import TurnDeliveryReason
+
+        def job(state, error_class=None):
+            return TurnJobRecord(
+                "job-result", 1, -100, 2, "dialogue-result", "server-80", "profile-1",
+                "thread-1", None, None, "a" * 64, "turn-1", state, 1, 1, 1, error_class,
+            )
+
+        def segment(state, *, payload_id=None):
+            return DeliverySegmentRecord(
+                "job-result", 1, DeliveryOperation.CREATE, None, payload_id, "b" * 64,
+                state, 1, 99 if state is DeliverySegmentState.CONFIRMED else None, 1, 1,
+            )
+
+        delivered_job = job(TurnJobState.DELIVERED)
+        delivered_segments = (segment(DeliverySegmentState.CONFIRMED),)
+        unknown_job = job(TurnJobState.DELIVERY_UNKNOWN, "TELEGRAM_NETWORK_AMBIGUOUS")
+        unknown_segments = (segment(DeliverySegmentState.UNKNOWN, payload_id="display"),)
+        failed_job = job(TurnJobState.FAILED, "TELEGRAM_REQUEST_REJECTED")
+        failed_segments = (segment(DeliverySegmentState.FAILED, payload_id="display"),)
+
+        TurnDeliveryResult(TurnDeliveryStatus.DELIVERED, delivered_job, delivered_segments, None)
+        TurnDeliveryResult(TurnDeliveryStatus.ALREADY_DELIVERED, delivered_job, delivered_segments, None)
+        TurnDeliveryResult(TurnDeliveryStatus.DELIVERY_UNKNOWN, unknown_job, unknown_segments, None)
+        TurnDeliveryResult(TurnDeliveryStatus.FAILED, failed_job, failed_segments, None)
+        TurnDeliveryResult(TurnDeliveryStatus.BLOCKED, None, (), TurnDeliveryReason.JOB_NOT_FOUND)
+        TurnDeliveryResult(
+            TurnDeliveryStatus.BLOCKED, failed_job, (), TurnDeliveryReason.JOB_NOT_DELIVERABLE
         )
-        self.assertEqual(1, confirmed.message_id)
-        self.assertIsNone(rejected.message_id)
-        self.assertIsNone(unknown.message_id)
+
+        invalid = (
+            ("DELIVERED", delivered_job, delivered_segments, None),
+            (TurnDeliveryStatus.DELIVERED, None, (), None),
+            (TurnDeliveryStatus.DELIVERED, delivered_job, (), None),
+            (TurnDeliveryStatus.DELIVERED, failed_job, failed_segments, None),
+            (TurnDeliveryStatus.DELIVERY_UNKNOWN, delivered_job, delivered_segments, None),
+            (TurnDeliveryStatus.FAILED, failed_job, (), None),
+            (TurnDeliveryStatus.BLOCKED, delivered_job, (), TurnDeliveryReason.JOB_NOT_FOUND),
+            (TurnDeliveryStatus.BLOCKED, None, (), TurnDeliveryReason.JOB_NOT_DELIVERABLE),
+            (TurnDeliveryStatus.BLOCKED, None, (), None),
+            (TurnDeliveryStatus.BLOCKED, None, delivered_segments, TurnDeliveryReason.JOB_NOT_FOUND),
+            (TurnDeliveryStatus.DELIVERED, delivered_job, delivered_segments, TurnDeliveryReason.JOB_NOT_FOUND),
+            (TurnDeliveryStatus.DELIVERED, delivered_job, [], None),
+            (TurnDeliveryStatus.DELIVERED, delivered_job, delivered_segments, "JOB_NOT_FOUND"),
+        )
+        for shape in invalid:
+            with self.subTest(shape=repr(shape)):
+                with self.assertRaises(TurnDeliveryError) as raised:
+                    TurnDeliveryResult(*shape)
+                self.assertEqual(TurnDeliveryErrorCategory.INVARIANT, raised.exception.category)
