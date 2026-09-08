@@ -295,3 +295,195 @@ class ResponseDeliveryUnitTests(unittest.TestCase):
                 with self.assertRaises(TurnDeliveryError) as raised:
                     TurnDeliveryResult(*shape)
                 self.assertEqual(TurnDeliveryErrorCategory.INVARIANT, raised.exception.category)
+
+    def test_turn_delivery_result_accepts_canonical_terminal_segment_records(self):
+        def job(state, error_class=None):
+            return TurnJobRecord(
+                "job-canonical", 1, -100, 2, "dialogue-canonical", "server-80", "profile-1",
+                "thread-1", None, None, "a" * 64, "turn-1", state, 1, 1, 1, error_class,
+            )
+
+        def segment(state, *, operation=DeliveryOperation.CREATE, target=None, payload_id=None,
+                    confirmed_message_id=None):
+            return DeliverySegmentRecord(
+                "job-canonical", 1, operation, target, payload_id, "b" * 64,
+                state, 1, confirmed_message_id, 1, 1,
+            )
+
+        TurnDeliveryResult(
+            TurnDeliveryStatus.DELIVERED,
+            job(TurnJobState.DELIVERED),
+            (segment(DeliverySegmentState.CONFIRMED, confirmed_message_id=99),),
+            None,
+        )
+        TurnDeliveryResult(
+            TurnDeliveryStatus.DELIVERED,
+            job(TurnJobState.DELIVERED),
+            (segment(
+                DeliverySegmentState.CONFIRMED,
+                operation=DeliveryOperation.EDIT,
+                target=77,
+                confirmed_message_id=77,
+            ),),
+            None,
+        )
+        TurnDeliveryResult(
+            TurnDeliveryStatus.DELIVERY_UNKNOWN,
+            job(TurnJobState.DELIVERY_UNKNOWN, "TELEGRAM_NETWORK_AMBIGUOUS"),
+            (segment(DeliverySegmentState.UNKNOWN, payload_id="display"),),
+            None,
+        )
+        TurnDeliveryResult(
+            TurnDeliveryStatus.FAILED,
+            job(TurnJobState.FAILED, "TELEGRAM_REQUEST_REJECTED"),
+            (segment(DeliverySegmentState.FAILED),),
+            None,
+        )
+
+    def test_turn_delivery_result_accepts_terminal_payload_retention(self):
+        def job(state):
+            return TurnJobRecord(
+                "job-retained", 1, -100, 2, "dialogue-retained", "server-80", "profile-1",
+                "thread-1", None, None, "a" * 64, "turn-1", state, 1, 1, 1,
+                "TELEGRAM_REQUEST_REJECTED" if state is TurnJobState.FAILED else None,
+            )
+
+        def segment(state):
+            return DeliverySegmentRecord(
+                "job-retained", 1, DeliveryOperation.CREATE, None, None, "b" * 64,
+                state, 1, 99 if state is DeliverySegmentState.CONFIRMED else None, 1, 1,
+            )
+
+        TurnDeliveryResult(
+            TurnDeliveryStatus.DELIVERED,
+            job(TurnJobState.DELIVERED),
+            (segment(DeliverySegmentState.CONFIRMED),),
+            None,
+        )
+        TurnDeliveryResult(
+            TurnDeliveryStatus.FAILED,
+            job(TurnJobState.FAILED),
+            (segment(DeliverySegmentState.FAILED),),
+            None,
+        )
+
+    def test_turn_delivery_result_rejects_terminal_attempt_and_confirmation_forgery(self):
+        def job(state, error_class=None):
+            return TurnJobRecord(
+                "job-forged", 1, -100, 2, "dialogue-forged", "server-80", "profile-1",
+                "thread-1", None, None, "a" * 64, "turn-1", state, 1, 1, 1, error_class,
+            )
+
+        def result(status, job_state, segment_state, attempt_count, confirmed_message_id):
+            error_class = {
+                TurnJobState.DELIVERY_UNKNOWN: "TELEGRAM_NETWORK_AMBIGUOUS",
+                TurnJobState.FAILED: "TELEGRAM_REQUEST_REJECTED",
+            }.get(job_state)
+            record = DeliverySegmentRecord(
+                "job-forged", 1, DeliveryOperation.CREATE, None, "display", "b" * 64,
+                segment_state, attempt_count, confirmed_message_id, 1, 1,
+            )
+            return TurnDeliveryResult(
+                status, job(job_state, error_class), (record,), None,
+            )
+
+        invalid = (
+            (TurnDeliveryStatus.DELIVERED, TurnJobState.DELIVERED,
+             DeliverySegmentState.CONFIRMED, 0, 99),
+            (TurnDeliveryStatus.DELIVERY_UNKNOWN, TurnJobState.DELIVERY_UNKNOWN,
+             DeliverySegmentState.UNKNOWN, 0, None),
+            (TurnDeliveryStatus.FAILED, TurnJobState.FAILED,
+             DeliverySegmentState.FAILED, 0, None),
+            (TurnDeliveryStatus.DELIVERY_UNKNOWN, TurnJobState.DELIVERY_UNKNOWN,
+             DeliverySegmentState.UNKNOWN, 1, 99),
+            (TurnDeliveryStatus.FAILED, TurnJobState.FAILED,
+             DeliverySegmentState.FAILED, 1, 99),
+            (TurnDeliveryStatus.DELIVERED, TurnJobState.DELIVERED,
+             DeliverySegmentState.CONFIRMED, 1, None),
+        )
+        for shape in invalid:
+            with self.subTest(shape=shape):
+                with self.assertRaises(TurnDeliveryError) as raised:
+                    result(*shape)
+                self.assertEqual(TurnDeliveryErrorCategory.INVARIANT, raised.exception.category)
+
+    def test_turn_delivery_result_rejects_edit_identity_and_sequence_forgery(self):
+        job = TurnJobRecord(
+            "job-edit", 1, -100, 2, "dialogue-edit", "server-80", "profile-1",
+            "thread-1", None, None, "a" * 64, "turn-1", TurnJobState.DELIVERED,
+            1, 1, 1, None,
+        )
+        mismatched_edit = DeliverySegmentRecord(
+            "job-edit", 1, DeliveryOperation.EDIT, 77, None, "b" * 64,
+            DeliverySegmentState.CONFIRMED, 1, 88, 1, 1,
+        )
+        later_edit = (
+            DeliverySegmentRecord(
+                "job-edit", 1, DeliveryOperation.CREATE, None, None, "b" * 64,
+                DeliverySegmentState.CONFIRMED, 1, 99, 1, 1,
+            ),
+            DeliverySegmentRecord(
+                "job-edit", 2, DeliveryOperation.EDIT, 100, None, "c" * 64,
+                DeliverySegmentState.CONFIRMED, 1, 100, 1, 1,
+            ),
+        )
+        for segments in ((mismatched_edit,), later_edit):
+            with self.subTest(segments=segments):
+                with self.assertRaises(TurnDeliveryError) as raised:
+                    TurnDeliveryResult(TurnDeliveryStatus.DELIVERED, job, segments, None)
+                self.assertEqual(TurnDeliveryErrorCategory.INVARIANT, raised.exception.category)
+
+    def test_turn_delivery_result_rejects_sha_and_timestamp_forgery(self):
+        job = TurnJobRecord(
+            "job-fields", 1, -100, 2, "dialogue-fields", "server-80", "profile-1",
+            "thread-1", None, None, "a" * 64, "turn-1", TurnJobState.DELIVERED,
+            1, 1, 1, None,
+        )
+        invalid_sha = ("B" * 64, "b" * 63, "g" * 64)
+        for sha in invalid_sha:
+            with self.subTest(sha=sha):
+                segment = DeliverySegmentRecord(
+                    "job-fields", 1, DeliveryOperation.CREATE, None, None, sha,
+                    DeliverySegmentState.CONFIRMED, 1, 99, 1, 1,
+                )
+                with self.assertRaises(TurnDeliveryError) as raised:
+                    TurnDeliveryResult(TurnDeliveryStatus.DELIVERED, job, (segment,), None)
+                self.assertEqual(TurnDeliveryErrorCategory.INVARIANT, raised.exception.category)
+
+        segment = DeliverySegmentRecord(
+            "job-fields", 1, DeliveryOperation.CREATE, None, None, "b" * 64,
+            DeliverySegmentState.CONFIRMED, 1, 99, 2, 1,
+        )
+        with self.assertRaises(TurnDeliveryError) as raised:
+            TurnDeliveryResult(TurnDeliveryStatus.DELIVERED, job, (segment,), None)
+        self.assertEqual(TurnDeliveryErrorCategory.INVARIANT, raised.exception.category)
+
+    def test_turn_delivery_result_rejects_bool_and_out_of_bounds_segment_fields(self):
+        job = TurnJobRecord(
+            "job-types", 1, -100, 2, "dialogue-types", "server-80", "profile-1",
+            "thread-1", None, None, "a" * 64, "turn-1", TurnJobState.DELIVERED,
+            1, 1, 1, None,
+        )
+
+        variants = (
+            {"sequence": True},
+            {"attempt_count": True},
+            {"created_at_ms": True},
+            {"updated_at_ms": True},
+            {"sequence": 0},
+            {"created_at_ms": -1},
+            {"updated_at_ms": 2**63},
+        )
+        for changes in variants:
+            with self.subTest(changes=changes):
+                values = {
+                    "job_id": "job-types", "sequence": 1, "operation": DeliveryOperation.CREATE,
+                    "target_message_id": None, "payload_id": None, "payload_sha256": "b" * 64,
+                    "state": DeliverySegmentState.CONFIRMED, "attempt_count": 1,
+                    "confirmed_message_id": 99, "created_at_ms": 1, "updated_at_ms": 1,
+                }
+                values.update(changes)
+                segment = DeliverySegmentRecord(**values)
+                with self.assertRaises(TurnDeliveryError) as raised:
+                    TurnDeliveryResult(TurnDeliveryStatus.DELIVERED, job, (segment,), None)
+                self.assertEqual(TurnDeliveryErrorCategory.INVARIANT, raised.exception.category)

@@ -113,3 +113,61 @@ architect acceptance and does not close Issue #35.
   `a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85`.
 - No real Telegram, network, Codex, approval response, production database,
   production state root, or production service effect was used.
+
+## Architect second repair
+
+This is factual executor evidence for the second P6.1 repair. It does not
+claim architect acceptance and does not close Issue #35.
+
+- First candidate: `8a8db2a792be2015e397f8c55dd7994fd1eba0a3`.
+- First repair: `fa5d0f2b0fc19b73fd1499c59c94dda595d8ea73`.
+- Second architect review: `5579738262`.
+- The second repair production path is
+  `src/codex_control/application/response_delivery.py`; direct proof updates
+  are in `tests/unit/test_response_delivery.py`. No integration test change,
+  P2.4b production change, schema change, ADR change, P2.5 change, or later
+  P6/P7 work was made.
+
+### Canonical segment validation closure
+
+The P6.1-local validator used by `_validate_p6_plan()` and public
+`TurnDeliveryResult` construction now enforces:
+
+- exact `DeliverySegmentRecord` type, bounded exact job ID, contiguous bounded
+  sequence, and first-sequence-only EDIT;
+- exact operation/state types, CREATE target absence, and positive exact EDIT
+  target IDs;
+- bounded payload IDs when present, required payload IDs for PENDING/SENDING/
+  UNKNOWN, and terminal CONFIRMED/FAILED payload-null retention compatibility;
+- exact lowercase 64-character hexadecimal payload SHA;
+- PENDING attempt 0, SENDING/UNKNOWN/FAILED attempt 1, and CONFIRMED attempt
+  1 with a positive exact confirmed message ID;
+- no confirmed message ID for non-CONFIRMED states;
+- confirmed EDIT identity equality between confirmed and target message IDs;
+- bounded exact timestamps and `updated_at_ms >= created_at_ms`.
+
+Direct public-constructor proofs reject forged terminal records for all
+requested attempt/confirmation relations, confirmed EDIT identity mismatch,
+later EDIT, invalid SHA, timestamp ordering, boolean/boundary fields, and
+accept canonical CREATE, first EDIT, UNKNOWN, FAILED, and terminal retained
+payload-null shapes.
+
+### Regression and safety validation
+
+- Focused P6.1 tests: `20` unit and `20` integration; failures `0`, errors
+  `0`.
+- Accepted P2.4b delivery and P2.5 deletion focused suites: `53` tests;
+  failures `0`, errors `0`.
+- Full discovery: `900` tests; expected `860 + 20 + 20 = 900`; failures `0`,
+  errors `0`, status `OK`.
+- All previous segmentation, pre-clock ordering, SENDING-before-effect,
+  multi-segment order, confirmed replay, stranded-SENDING recovery,
+  confirmed-prefix resume, cancellation, storage-after-effect no-resend,
+  terminal no-retry, Codex blocking, and P2.5 readiness proofs remain green.
+- `SCHEMA_VERSION=2`; historical schema-v1 DDL SHA-256 and schema-v2
+  migration SHA-256 remain unchanged at the values recorded above.
+- Compile/import, `git diff --check`, repair-only/cumulative path checks, and
+  secret/effect scans passed. Tests used only temporary SQLite/fakes; no real
+  Telegram, network, Codex, approval-response, production DB, production
+  state root, or production service effect was used.
+- P1.6 pending-task warning observed: `NO`; introduced by P6.1: `NO`.

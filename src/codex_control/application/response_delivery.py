@@ -373,14 +373,23 @@ def _validate_p6_plan(job: TurnJobRecord, segments: tuple[DeliverySegmentRecord,
     if not segments:
         raise _invariant()
     for expected, segment in enumerate(segments, 1):
-        if not isinstance(segment, DeliverySegmentRecord) or segment.job_id != job.job_id:
+        if type(segment) is not DeliverySegmentRecord:
             raise _invariant()
-        if segment.sequence != expected:
-            raise _invariant()
-        if segment.payload_id is None and segment.state not in (
-            DeliverySegmentState.CONFIRMED,
-            DeliverySegmentState.FAILED,
+        if (
+            type(segment.job_id) is not str
+            or not segment.job_id
+            or "\x00" in segment.job_id
+            or len(segment.job_id) > _ID_LENGTH
+            or segment.job_id != job.job_id
         ):
+            raise _invariant()
+        if (
+            type(segment.sequence) is not int
+            or not 1 <= segment.sequence <= _MAX_SIGNED_64
+            or segment.sequence != expected
+        ):
+            raise _invariant()
+        if type(segment.operation) is not DeliveryOperation:
             raise _invariant()
         if segment.operation is DeliveryOperation.CREATE:
             if segment.target_message_id is not None:
@@ -390,8 +399,66 @@ def _validate_p6_plan(job: TurnJobRecord, segments: tuple[DeliverySegmentRecord,
                 raise _invariant()
         else:
             raise _invariant()
-        if segment.state is DeliverySegmentState.CONFIRMED:
-            if _positive_message_id(segment.confirmed_message_id) is None:
+
+        if segment.payload_id is not None and (
+            type(segment.payload_id) is not str
+            or not segment.payload_id
+            or "\x00" in segment.payload_id
+            or len(segment.payload_id) > _ID_LENGTH
+        ):
+            raise _invariant()
+        if (
+            type(segment.payload_sha256) is not str
+            or len(segment.payload_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in segment.payload_sha256)
+        ):
+            raise _invariant()
+        if type(segment.state) is not DeliverySegmentState:
+            raise _invariant()
+        if (
+            type(segment.created_at_ms) is not int
+            or not 0 <= segment.created_at_ms <= _MAX_SIGNED_64
+            or type(segment.updated_at_ms) is not int
+            or not 0 <= segment.updated_at_ms <= _MAX_SIGNED_64
+            or segment.updated_at_ms < segment.created_at_ms
+        ):
+            raise _invariant()
+
+        if segment.state is DeliverySegmentState.PENDING:
+            if (
+                segment.payload_id is None
+                or type(segment.attempt_count) is not int
+                or segment.attempt_count != 0
+                or segment.confirmed_message_id is not None
+            ):
+                raise _invariant()
+        elif segment.state in (
+            DeliverySegmentState.SENDING,
+            DeliverySegmentState.UNKNOWN,
+            DeliverySegmentState.FAILED,
+        ):
+            if (
+                segment.payload_id is None
+                and segment.state is not DeliverySegmentState.FAILED
+            ):
+                raise _invariant()
+            if (
+                type(segment.attempt_count) is not int
+                or segment.attempt_count != 1
+                or segment.confirmed_message_id is not None
+            ):
+                raise _invariant()
+        elif segment.state is DeliverySegmentState.CONFIRMED:
+            if (
+                type(segment.attempt_count) is not int
+                or segment.attempt_count != 1
+                or _positive_message_id(segment.confirmed_message_id) is None
+            ):
+                raise _invariant()
+            if (
+                segment.operation is DeliveryOperation.EDIT
+                and segment.confirmed_message_id != segment.target_message_id
+            ):
                 raise _invariant()
 
     states = tuple(segment.state for segment in segments)
