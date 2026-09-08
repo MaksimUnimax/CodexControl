@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 import os
 import tempfile
 import unittest
@@ -12,6 +13,8 @@ from codex_control.application import (
     FleetControlStatus,
     FleetGroupRoutingService,
     FleetModeSnapshot,
+    GroupRoutingError,
+    GroupRoutingErrorCategory,
     FleetControlService,
     FleetManifest,
     FleetMember,
@@ -32,7 +35,11 @@ from codex_control.storage import (
     IngressUpdateRepository,
     SettingsRepository,
     SqliteStorage,
+    TransientPayloadKind,
+    TransientPayloadRecord,
     TurnJobRepository,
+    TurnJobState,
+    TurnJobRecord,
 )
 from codex_control.domain import CodexProfile
 
@@ -145,6 +152,88 @@ class RealTurns:
         return TurnTerminalResult(binding, TurnTerminalStatus.COMPLETED, ())
 
 
+class StaticDialogueTurn:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    async def execute(self, request):
+        self.calls.append(request)
+        return self.result
+
+
+class RaceDuplicateDialogue:
+    def __init__(self, storage, *, job_duplicate=False, job_reason=None, non_job_reason=None):
+        self.storage = storage
+        self.job_duplicate = job_duplicate
+        self.job_reason = job_reason
+        self.non_job_reason = non_job_reason
+        self.calls = []
+        self.claim = None
+
+    async def execute(self, request):
+        self.calls.append(request)
+        if self.job_duplicate:
+            self.claim = await TurnJobRepository(self.storage, now_ms=lambda: 10).claim_ingress(
+                update_id=request.update_id,
+                job_id=f"job-race-{request.update_id}",
+                source_chat_id=request.source_chat_id,
+                source_message_id=request.source_message_id,
+                dialogue_id="dialogue",
+                server_id="self",
+                profile_id="profile",
+                thread_id="thread",
+                model_id="model",
+                reasoning_effort="high",
+                input_payload_id=f"input-race-{request.update_id}",
+                input_content=request.text.encode("utf-8"),
+                input_expires_at_ms=10000,
+            )
+            job = self.claim.job
+            reason = self.job_reason
+        else:
+            await IngressUpdateRepository(self.storage, now_ms=lambda: 10).claim_ignored(
+                update_id=request.update_id,
+                disposition=IngressDispositionKind.IGNORED_REJECTED,
+            )
+            job = None
+            reason = self.non_job_reason
+        return ExistingDialogueTurnResult(
+            ExistingDialogueTurnStatus.DUPLICATE, job, None, None, reason
+        )
+
+
+class RaceUnknownMismatchDialogue:
+    def __init__(self, storage):
+        self.storage = storage
+        self.calls = []
+
+    async def execute(self, request):
+        self.calls.append(request)
+        claim = await TurnJobRepository(self.storage, now_ms=lambda: 10).claim_ingress(
+            update_id=request.update_id,
+            job_id=f"job-race-{request.update_id}",
+            source_chat_id=request.source_chat_id,
+            source_message_id=request.source_message_id,
+            dialogue_id="dialogue",
+            server_id="self",
+            profile_id="profile",
+            thread_id="thread",
+            model_id="model",
+            reasoning_effort="high",
+            input_payload_id=f"input-race-{request.update_id}",
+            input_content=request.text.encode("utf-8"),
+            input_expires_at_ms=10000,
+        )
+        return ExistingDialogueTurnResult(
+            ExistingDialogueTurnStatus.UNKNOWN,
+            replace(claim.job, job_id=f"different-job-{request.update_id}"),
+            None,
+            None,
+            None,
+        )
+
+
 class FleetGroupRoutingIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -174,6 +263,46 @@ class FleetGroupRoutingIntegrationTests(unittest.IsolatedAsyncioTestCase):
             from codex_control.application import GroupControlKind
             control = GroupControlKind.ACTIVATE
         return GroupInboundUpdate(kind, update_id, message_id, 7, -100, control, target, text if kind is GroupInboundKind.TEXT else None)
+
+    @staticmethod
+    def synthetic_job(update_id, message_id, job_id="job-malformed"):
+        return TurnJobRecord(
+            job_id=job_id,
+            telegram_update_id=update_id,
+            source_chat_id=-100,
+            source_message_id=message_id,
+            dialogue_id="dialogue",
+            server_id="self",
+            profile_id="profile",
+            thread_id="thread",
+            model_id="model",
+            reasoning_effort="high",
+            input_sha256="input-hash",
+            codex_turn_id="turn",
+            state=TurnJobState.CODEX_COMPLETED,
+            version=1,
+            created_at_ms=10,
+            updated_at_ms=11,
+            error_class=None,
+        )
+
+    @staticmethod
+    def synthetic_output():
+        return TransientPayloadRecord(
+            "payload-malformed", "dialogue", "job-malformed", TransientPayloadKind.OUTPUT,
+            b"output", "output-hash", 6, 10, 20,
+        )
+
+    async def assert_malformed_result(self, update_id, message_id, turn_result):
+        turn = StaticDialogueTurn(turn_result)
+        self.service = FleetGroupRoutingService(
+            self.storage, fleet_control=self.control, dialogue_turn=turn, now_ms=lambda: 20
+        )
+        with self.assertRaises(GroupRoutingError) as raised:
+            await self.service.handle(self.update(update_id, message_id))
+        self.assertIs(GroupRoutingErrorCategory.INVARIANT, raised.exception.category)
+        self.assertIsNone(await IngressUpdateRepository(self.storage).get(update_id))
+        self.assertEqual(1, len(turn.calls))
 
     async def activate(self, update_id=1, message_id=1):
         result = await self.service.handle(self.update(update_id, message_id, kind=GroupInboundKind.CONTROL, target="self"))
@@ -354,6 +483,174 @@ class FleetGroupRoutingIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(GroupRoutingReason.INVALID_PROMPT, result.reason)
         self.assertEqual(IngressDispositionKind.IGNORED_REJECTED, result.disposition)
         self.assertEqual([], self.turn.calls)
+
+    async def test_p3_nonjob_duplicate_canonical_shape_preserves_durable_rejection(self):
+        await self.activate()
+        turn = RaceDuplicateDialogue(
+            self.storage, non_job_reason=ExistingDialogueTurnReason.DUPLICATE_NON_JOB
+        )
+        self.service = FleetGroupRoutingService(
+            self.storage, fleet_control=self.control, dialogue_turn=turn, now_ms=lambda: 20
+        )
+        result = await self.service.handle(self.update(111, 111))
+        self.assertEqual(GroupRoutingStatus.DUPLICATE, result.status)
+        self.assertEqual(IngressDispositionKind.IGNORED_REJECTED, result.disposition)
+        self.assertEqual(1, len(turn.calls))
+        self.assertEqual(
+            IngressDispositionKind.IGNORED_REJECTED,
+            (await IngressUpdateRepository(self.storage).get(111)).disposition,
+        )
+
+    async def test_p3_durable_job_duplicate_canonical_shape_preserves_job(self):
+        await self.activate()
+        turn = RaceDuplicateDialogue(self.storage, job_duplicate=True)
+        self.service = FleetGroupRoutingService(
+            self.storage, fleet_control=self.control, dialogue_turn=turn, now_ms=lambda: 20
+        )
+        result = await self.service.handle(self.update(112, 112))
+        self.assertEqual(GroupRoutingStatus.DUPLICATE, result.status)
+        self.assertEqual(IngressDispositionKind.JOB, result.disposition)
+        self.assertEqual(1, len(turn.calls))
+        self.assertEqual(
+            IngressDispositionKind.JOB,
+            (await IngressUpdateRepository(self.storage).get(112)).disposition,
+        )
+
+    async def test_malformed_p3_busy_with_reason_fails_without_rejected_claim(self):
+        await self.activate()
+        await self.assert_malformed_result(
+            113, 113,
+            ExistingDialogueTurnResult(
+                ExistingDialogueTurnStatus.BUSY, None, None, None,
+                ExistingDialogueTurnReason.DIALOGUE_NOT_READY,
+            ),
+        )
+
+    async def test_malformed_p3_busy_with_job_fails_without_rejected_claim(self):
+        await self.activate()
+        await self.assert_malformed_result(
+            114, 114,
+            ExistingDialogueTurnResult(
+                ExistingDialogueTurnStatus.BUSY, self.synthetic_job(114, 114), None, None, None
+            ),
+        )
+
+    async def test_malformed_p3_blocked_without_reason_fails_without_rejected_claim(self):
+        await self.activate()
+        await self.assert_malformed_result(
+            115, 115,
+            ExistingDialogueTurnResult(ExistingDialogueTurnStatus.BLOCKED, None, None, None, None),
+        )
+
+    async def test_malformed_p3_blocked_with_duplicate_nonjob_reason_fails(self):
+        await self.activate()
+        await self.assert_malformed_result(
+            116, 116,
+            ExistingDialogueTurnResult(
+                ExistingDialogueTurnStatus.BLOCKED, None, None, None,
+                ExistingDialogueTurnReason.DUPLICATE_NON_JOB,
+            ),
+        )
+
+    async def test_malformed_p3_blocked_with_duplicate_orphan_reason_fails(self):
+        await self.activate()
+        await self.assert_malformed_result(
+            117, 117,
+            ExistingDialogueTurnResult(
+                ExistingDialogueTurnStatus.BLOCKED, None, None, None,
+                ExistingDialogueTurnReason.DUPLICATE_ORPHAN_JOB,
+            ),
+        )
+
+    async def test_malformed_p3_blocked_with_job_fails_without_rejected_claim(self):
+        await self.activate()
+        await self.assert_malformed_result(
+            118, 118,
+            ExistingDialogueTurnResult(
+                ExistingDialogueTurnStatus.BLOCKED,
+                self.synthetic_job(118, 118), None, None,
+                ExistingDialogueTurnReason.DIALOGUE_NOT_READY,
+            ),
+        )
+
+    async def test_malformed_p3_blocked_with_output_fails_without_rejected_claim(self):
+        await self.activate()
+        await self.assert_malformed_result(
+            119, 119,
+            ExistingDialogueTurnResult(
+                ExistingDialogueTurnStatus.BLOCKED, None, None, self.synthetic_output(),
+                ExistingDialogueTurnReason.DIALOGUE_NOT_READY,
+            ),
+        )
+
+    async def test_malformed_p3_duplicate_without_job_or_reason_is_not_masked(self):
+        await self.activate()
+        turn = RaceDuplicateDialogue(self.storage, non_job_reason=None)
+        self.service = FleetGroupRoutingService(
+            self.storage, fleet_control=self.control, dialogue_turn=turn, now_ms=lambda: 20
+        )
+        with self.assertRaises(GroupRoutingError) as raised:
+            await self.service.handle(self.update(120, 120))
+        self.assertIs(GroupRoutingErrorCategory.INVARIANT, raised.exception.category)
+        ingress = await IngressUpdateRepository(self.storage).get(120)
+        self.assertIsNotNone(ingress)
+        self.assertEqual(IngressDispositionKind.IGNORED_REJECTED, ingress.disposition)
+        self.assertEqual(1, len(turn.calls))
+
+    async def test_malformed_p3_duplicate_job_with_nonjob_reason_fails(self):
+        await self.activate()
+        turn = RaceDuplicateDialogue(
+            self.storage, job_duplicate=True,
+            job_reason=ExistingDialogueTurnReason.DUPLICATE_NON_JOB,
+        )
+        self.service = FleetGroupRoutingService(
+            self.storage, fleet_control=self.control, dialogue_turn=turn, now_ms=lambda: 20
+        )
+        with self.assertRaises(GroupRoutingError) as raised:
+            await self.service.handle(self.update(121, 121))
+        self.assertIs(GroupRoutingErrorCategory.INVARIANT, raised.exception.category)
+        self.assertEqual(IngressDispositionKind.JOB, (await IngressUpdateRepository(self.storage).get(121)).disposition)
+
+    async def test_malformed_p3_duplicate_job_with_orphan_reason_fails(self):
+        await self.activate()
+        turn = RaceDuplicateDialogue(
+            self.storage, job_duplicate=True,
+            job_reason=ExistingDialogueTurnReason.DUPLICATE_ORPHAN_JOB,
+        )
+        self.service = FleetGroupRoutingService(
+            self.storage, fleet_control=self.control, dialogue_turn=turn, now_ms=lambda: 20
+        )
+        with self.assertRaises(GroupRoutingError) as raised:
+            await self.service.handle(self.update(122, 122))
+        self.assertIs(GroupRoutingErrorCategory.INVARIANT, raised.exception.category)
+        self.assertEqual(IngressDispositionKind.JOB, (await IngressUpdateRepository(self.storage).get(122)).disposition)
+
+    async def test_malformed_p3_completed_without_job_fails_without_rejected_claim(self):
+        await self.activate()
+        await self.assert_malformed_result(
+            123, 123,
+            ExistingDialogueTurnResult(ExistingDialogueTurnStatus.COMPLETED, None, None, None, None),
+        )
+
+    async def test_malformed_p3_failed_without_durable_job_ingress_fails(self):
+        await self.activate()
+        await self.assert_malformed_result(
+            124, 124,
+            ExistingDialogueTurnResult(
+                ExistingDialogueTurnStatus.FAILED, self.synthetic_job(124, 124), None, None, None
+            ),
+        )
+
+    async def test_malformed_p3_unknown_job_identity_mismatch_fails_without_reclassification(self):
+        await self.activate()
+        turn = RaceUnknownMismatchDialogue(self.storage)
+        self.service = FleetGroupRoutingService(
+            self.storage, fleet_control=self.control, dialogue_turn=turn, now_ms=lambda: 20
+        )
+        with self.assertRaises(GroupRoutingError) as raised:
+            await self.service.handle(self.update(125, 125))
+        self.assertIs(GroupRoutingErrorCategory.INVARIANT, raised.exception.category)
+        self.assertEqual(IngressDispositionKind.JOB, (await IngressUpdateRepository(self.storage).get(125)).disposition)
 
     async def test_malformed_p3_result_fails_invariant_without_rejected_claim(self):
         await self.activate()

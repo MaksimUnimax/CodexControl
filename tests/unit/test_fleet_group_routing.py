@@ -18,7 +18,7 @@ from codex_control.application import (
     GroupRoutingStatus,
 )
 from codex_control.domain import ControllerMode
-from codex_control.storage import IngressDispositionKind
+from codex_control.storage import IngressDispositionKind, TurnJobRecord, TurnJobState
 
 
 class _AsyncFleet:
@@ -32,6 +32,39 @@ class _AsyncTurns:
 
 
 class FleetGroupRoutingContractTests(unittest.TestCase):
+    @staticmethod
+    def _terminal_turn_result():
+        job = TurnJobRecord(
+            job_id="job-synthetic",
+            telegram_update_id=7,
+            source_chat_id=-100,
+            source_message_id=8,
+            dialogue_id="dialogue-synthetic",
+            server_id="SERVER",
+            profile_id="profile-synthetic",
+            thread_id="thread-synthetic",
+            model_id="model-synthetic",
+            reasoning_effort="high",
+            input_sha256="input-hash-synthetic",
+            codex_turn_id="turn-synthetic",
+            state=TurnJobState.DELIVERED,
+            version=1,
+            created_at_ms=10,
+            updated_at_ms=11,
+            error_class=None,
+        )
+        return ExistingDialogueTurnResult(ExistingDialogueTurnStatus.COMPLETED, job, None, None, None)
+
+    def _prompt(self, snapshot):
+        return GroupRoutingResult(
+            GroupRoutingStatus.PROMPT,
+            snapshot,
+            None,
+            self._terminal_turn_result(),
+            IngressDispositionKind.JOB,
+            None,
+        )
+
     def test_exact_public_enum_order(self):
         self.assertEqual(
             ["CONTROL", "STATUS", "PROMPT", "DUPLICATE", "BUSY", "BLOCKED", "IGNORED_SLEEP", "REJECTED", "UNAUTHORIZED", "UNSUPPORTED", "MALFORMED"],
@@ -114,6 +147,23 @@ class FleetGroupRoutingContractTests(unittest.TestCase):
         self.assertIs(p3_busy, delegated.turn_result)
         with self.assertRaises(GroupRoutingError) as raised:
             GroupRoutingResult(GroupRoutingStatus.BUSY, snapshot, None, None, IngressDispositionKind.IGNORED_REJECTED, None)
+        self.assertIs(GroupRoutingErrorCategory.INVARIANT, raised.exception.category)
+
+    def test_prompt_requires_exact_active_snapshot(self):
+        snapshot = FleetModeSnapshot("SERVER", ControllerMode.ACTIVE, 1, 2, "fleet")
+        result = self._prompt(snapshot)
+        self.assertIs(GroupRoutingStatus.PROMPT, result.status)
+        self.assertIs(snapshot, result.snapshot)
+
+    def test_prompt_none_snapshot_fails_invariant(self):
+        with self.assertRaises(GroupRoutingError) as raised:
+            self._prompt(None)
+        self.assertIs(GroupRoutingErrorCategory.INVARIANT, raised.exception.category)
+
+    def test_prompt_sleep_snapshot_fails_invariant(self):
+        snapshot = FleetModeSnapshot("SERVER", ControllerMode.SLEEP, 1, 2, "fleet")
+        with self.assertRaises(GroupRoutingError) as raised:
+            self._prompt(snapshot)
         self.assertIs(GroupRoutingErrorCategory.INVARIANT, raised.exception.category)
 
     def test_invalid_result_relations_fail_closed(self):

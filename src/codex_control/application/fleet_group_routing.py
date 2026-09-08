@@ -301,7 +301,12 @@ def _validate_turn_result(value: object) -> ExistingDialogueTurnResult:
         if value.job is not None or value.output_payload is not None or value.reason not in _BLOCKED_REASONS:
             raise _invariant()
     elif value.status is ExistingDialogueTurnStatus.DUPLICATE:
-        if value.output_payload is not None or value.reason not in (_DUPLICATE_REASONS | {None}):
+        if value.output_payload is not None:
+            raise _invariant()
+        if value.job is None:
+            if value.reason not in _DUPLICATE_REASONS:
+                raise _invariant()
+        elif value.reason is not None:
             raise _invariant()
     elif value.status in _TERMINAL_TURN_STATUSES:
         if value.job is None or value.reason is not None:
@@ -353,6 +358,8 @@ def _validate_group_result(value: GroupRoutingResult) -> None:
             value.control_result is not None
             or value.turn_result is None
             or value.turn_result.status not in _TERMINAL_TURN_STATUSES
+            or type(value.snapshot) is not FleetModeSnapshot
+            or value.snapshot.effective_mode is not ControllerMode.ACTIVE
             or value.disposition is not IngressDispositionKind.JOB
             or value.reason is not None
         ):

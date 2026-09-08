@@ -113,3 +113,42 @@ response effect.
 
 P5.3, P6 and later slices were not started. Issue #33 remains open and this
 evidence does not claim architect acceptance.
+
+## Architect first repair
+
+This section is implementation evidence for the first repair pass. It does
+not claim architect acceptance.
+
+- Rejected candidate: `428fb93056358b898d2e7cc95d94ae61de8617de`.
+- Architect review: `5578312547`.
+- Repair parent remains the rejected candidate above; the original architect
+  base remains `d325260034650d11743ef8ed96a9b8c70d699349`.
+- `PROMPT` now requires an exact `FleetModeSnapshot` whose effective mode is
+  `ACTIVE`. Direct public construction with an absent snapshot or a `SLEEP`
+  snapshot fails `INVARIANT`; a canonical ACTIVE snapshot passes.
+- P3 `DUPLICATE` validation now accepts only the exact non-JOB reasons with no
+  job, or an exact `TurnJobRecord` with no reason. Impossible job/reason
+  combinations fail before any durable ingress reread.
+- Canonical non-JOB and durable JOB duplicate races preserve their durable
+  disposition with no new P3 effect. A malformed duplicate cannot be masked
+  by the durable reread.
+- The malformed-P3 matrix independently covers invalid BUSY reason/job,
+  invalid BLOCKED reason/job/output, all required duplicate relations,
+  terminal results missing or mismatching durable JOB authority, and a
+  duck-typed result. Every malformed result fails `INVARIANT` without a blind
+  `IGNORED_REJECTED` claim.
+- Original P5.2 routing, no-queue, control-responsiveness, cancellation and
+  restart-marker proofs remain green.
+- Final focused counts: `11` unit and `34` integration tests.
+- Full-suite arithmetic: `796 + 11 + 34 = 841`.
+- Full discovery: `841` tests, `0` failures, `0` errors, unittest status `OK`.
+- The known P1.6 pending-task warning was observed during full discovery and
+  was not introduced by this repair.
+- Schema version remains `2`; the historical v1 DDL hash and schema-v2
+  migration hash remain unchanged:
+  `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c` and
+  `a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85`.
+- Compile/import, diff, and security/effect checks pass. No real Telegram,
+  network, Codex, production database/state-root or service effect occurred.
+- No architecture, schema, P5.1, P3 or P2 production source was changed;
+  P5.3 and P6 were not started; Issue #33 remains open.
