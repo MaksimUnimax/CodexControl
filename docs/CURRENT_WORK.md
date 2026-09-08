@@ -7,11 +7,10 @@ Date: 2026-09-08
 - Repository: `MaksimUnimax/CodexControl`.
 - Installed server-80 Codex authority: `codex-cli 0.144.6`; app-server schema SHA-256 `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`.
 - Historical schema-v1 DDL SHA-256 remains immutable: `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
-- Current schema target is version `2` under accepted P2.C2; exact v2 migration ID `0002_ingress_rejected_disposition`, migration-statement SHA-256 `a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85`.
+- Current schema target is version `2` under accepted P2.C2; migration ID `0002_ingress_rejected_disposition`; migration-statement SHA-256 `a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85`.
 - P1 is complete through accepted P1.10 T0/T1/T2; isolated real-Codex T3 remains deferred to P7.
 - P2 historical final acceptance: `9db97f0dda109b4d0c0ecfa5f167733905df2766`; P2.C1 accepted `4b6d226ce647fbf38a6ada7b82947be7ad3e30c2`.
-- P2.C2 accepted `082c6df79a7c3a6d8dd04b73f15563f1668b6c9b`; full 796, failures 0, errors 0, unittest `OK`.
-- P2.C2 acceptance authority: `docs/evidence/p2/P2_C2_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
+- P2.C2 accepted `082c6df79a7c3a6d8dd04b73f15563f1668b6c9b`; full 796. Acceptance: `docs/evidence/p2/P2_C2_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
 - P3.1 accepted `9e0a86b311bb63d6a36a4641cb588321987e1550`; full 543.
 - P3.2 accepted `c484c56db007569170363b3d08c24766148c3e30`; full 566.
 - P3.3 accepted `66a37d8b8065ecd31e17351e8062f9ebf1ee8828`; full 596.
@@ -22,125 +21,107 @@ Date: 2026-09-08
 - P4.2 accepted `a5a8ee6773936b1dcbb777e36ffa33519cd8ab39`; full 728.
 - P4.3 accepted `d053f24061e20aa44e07e5b92c9b92c6506647fd`; final P4 full 762.
 - P4 is COMPLETE at the fake/application private-management boundary.
-- P5.1 accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777.
-- P5.1 acceptance authority: `docs/evidence/p5/P5_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
+- P5.1 accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777. Acceptance: `docs/evidence/p5/P5_1_ARCHITECT_ACCEPTANCE_2026-09-07.md`.
+- P5.2 accepted `345c48722c4faa03be19d38b6f07304276075f64`; full 841, failures 0, errors 0, unittest `OK`.
+- P5.2 acceptance: `docs/evidence/p5/P5_2_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
 - No live Telegram/network acceptance has occurred.
 
 ## Current slice
 
-**P5.2 — NEXT / AUTHORITY FROZEN under ADR-0037.**
+**P5.3 — NEXT / AUTHORITY FROZEN under ADR-0038.**
 
-P5.2 adds the final local group-routing facade `FleetGroupRoutingService` over accepted P5.1/P2.C2/P3.2.
+P5.3 closes the fake/application P5 milestone with:
 
-It owns only serialized ordinary authorized group TEXT admission and exact non-TEXT delegation.
+1. deterministic local fleet-status identity/projection;
+2. human-visible fleet-version/manifest mismatch diagnostics;
+3. final fake multi-controller group-routing acceptance.
 
-## P5.2 ordering authority
+P5.3 does not add a coordinator, peer RPC or shared runtime database.
 
-One short application `asyncio.Lock` linearizes group routing decisions, but it is never held for the duration of a Codex turn.
+## Fleet status identity
 
-The lock protects:
+Every exact accepted `FleetManifest` has a deterministic lowercase SHA-256 identity over the NUL-separated canonical sequence:
 
-- P5.1 control/status/auth delegation;
-- TEXT current-mode projection;
-- durable ingress duplicate precheck;
-- stale/SLEEP/local-busy terminal claim;
-- publication/clearing of one process-local prompt marker.
+`codex-control-fleet-v1`, exact `fleet_version`, decimal member count, then each exact `server_id` and `display_name` in manifest order.
 
-The accepted P3 turn task executes outside the routing lock. Therefore:
+This fingerprint is diagnostic metadata only. It never authorizes activation or any external effect.
 
-- a second prompt cannot wait until the first completes and then run;
-- SLEEP/ALL_SLEEP controls remain processable while the first turn runs;
-- a newer control affects later prompts but does not implicitly interrupt an already admitted turn.
+P5.3 status exposes both:
 
-## P5.2 prompt marker
+- exact configured `fleet_version`;
+- full manifest SHA-256 identity.
 
-At most one process-local marker may represent a prompt logically admitted by the group facade while its exact P3 invocation is still in flight.
+Therefore mismatch is visible even when two controllers accidentally reuse the same `fleet_version` string with different member lists/order/labels.
 
-The marker is non-content and non-durable. It is not JOB/dialogue/effect authority and is never restored after restart.
+## Status projection
 
-A different update while the marker exists and effective mode remains ACTIVE is BUSY and is terminally `IGNORED_REJECTED` without P3.
+P5.3 adds pure `FleetStatusService` over an exact P5.2 STATUS result.
 
-A duplicate of the SAME marker update must not claim rejected and suppress the original prompt. It returns an in-flight duplicate result and zero P3 redispatch while the original owned invocation continues.
+Frozen `FleetStatusProjection` fields exactly:
 
-## P5.2 TEXT decision order
+`server_id, display_name, effective_mode, fleet_version, manifest_fingerprint_sha256, member_count, boot_generation, last_control_epoch`.
 
-For exact authorized P5.1 TEXT:
+The service requires the P5.2 STATUS snapshot to match its configured local server and manifest version. Malformed/mismatched local composition fails `INVARIANT`.
 
-1. delegate to accepted `FleetControlService.handle` to revalidate principal/current boot and obtain exact mode snapshot;
-2. read durable ingress by update ID;
-3. existing ingress -> DUPLICATE, no reclassification/P3;
-4. same-update local marker -> in-flight DUPLICATE, no durable claim/P3 redispatch;
-5. `message_id <= last_control_epoch` -> terminal `IGNORED_REJECTED` / stale prompt;
-6. effective SLEEP -> terminal `IGNORED_SLEEP`;
-7. different active marker while ACTIVE -> terminal `IGNORED_REJECTED` / BUSY;
-8. construct accepted P3 `ExistingDialoguePromptRequest`; P3-invalid authorized text is terminal `IGNORED_REJECTED` / invalid prompt;
-9. publish marker and launch exactly one owned accepted P3.2 `DialogueTurnService.execute` task outside the lock.
+No storage read, clock read, mode mutation or network action occurs in status projection.
 
-No direct TurnJobRepository/P1/model/settings/ActiveTurnRegistry call is allowed in P5.2.
+Pure `TelegramFleetStatusRenderer` returns only `{"text": ...}`. The text includes local display/server identity, ACTIVE/SLEEP, fleet version, member count, first 16 manifest-fingerprint hex characters, boot generation and control epoch. No parse mode, callbacks or send/edit action.
 
-## P3 mapping
+## Version-mismatch safety
 
-Accepted P3 COMPLETED/FAILED/UNKNOWN already owns a durable JOB. P5.2 verifies the ingress is exact JOB for the returned job and never reclassifies it.
+P5.3 does not attempt distributed peer compatibility decisions.
 
-Accepted P3 DUPLICATE is mapped from the current durable ingress without new claim.
+Runtime safety remains accepted P5.1 reserved activation parsing:
 
-Accepted P3 BUSY/BLOCKED with no JOB/output is a pre-JOB rejection. Before successful return, P5.2 claims exact `IGNORED_REJECTED`. If another durable classification already won, P5.2 returns DUPLICATE instead and preserves it.
+- a new controller that knows a new server label parses exact ACTIVATE target=new server;
+- an old controller whose manifest does not contain that label still sees the reserved `🖥 ` prefix and parses ACTIVATE target=None;
+- the old controller therefore applies local SLEEP;
+- neither controller may treat the activation-looking text as a Codex prompt.
 
-`FAILED`/`UNKNOWN` after JOB are admitted work, never `IGNORED_REJECTED`.
+Status responses make the different fleet version/fingerprint visible to the operator.
 
-## Result authority
+## Final fake multi-controller acceptance
 
-`GroupRoutingStatus` exactly:
+The final P5 acceptance must compose separate temporary SQLite/controller stacks with the real accepted group adapter, keyboard, P5.1 control service, P5.2 routing facade, status projection/renderer and accepted P3 orchestration with fake local P1 lifecycle ports.
 
-`CONTROL | STATUS | PROMPT | DUPLICATE | BUSY | BLOCKED | IGNORED_SLEEP | REJECTED | UNAUTHORIZED | UNSUPPORTED | MALFORMED`.
+For matching manifests it proves:
 
-`GroupRoutingReason` exactly:
+- all controllers boot effective SLEEP;
+- identical persistent keyboards;
+- exact target activation makes target ACTIVE and non-target SLEEP;
+- ordinary prompt executes only on ACTIVE target and is terminally SLEEP-ignored elsewhere;
+- switching activation moves routing authority;
+- all-sleep sleeps all controllers;
+- STATUS is read-only and produces matching fleet identity values;
+- restart after historical ACTIVE returns effective SLEEP and no local P5.2 queue/marker is restored;
+- no prompt executes after restart until a fresh current-boot activation is processed.
 
-`STALE_PROMPT | LOCAL_PROMPT_IN_FLIGHT | IN_FLIGHT_DUPLICATE | INVALID_PROMPT`.
+For mismatched old/new manifests it proves:
 
-`GroupRoutingErrorCategory` exactly:
+- fleet version/fingerprint difference is visible;
+- new-server activation is exact on the new controller;
+- old controller treats it as reserved unknown activation and sleeps;
+- old controller performs zero P3 prompt execution from that control text;
+- all-sleep and STATUS remain common safe controls.
 
-`INVALID_ARGUMENT | STORAGE | CODEX | INVARIANT`.
+## Offline/restart boundary
 
-Frozen repr-redacted `GroupRoutingResult` fields exactly:
-
-`status, snapshot, control_result, turn_result, disposition, reason`.
-
-Nested P5.1/P3 results are excluded from repr. P5.2 sends no Telegram response; P6 may later consume the accepted nested P3 result for delivery.
-
-## Binding accepted lower authority
-
-P5.1 remains exact:
-
-- operator/control-supergroup/user-origin trust edge;
-- reserved control classification before TEXT;
-- self activation ACTIVE; other/unknown/all-sleep SLEEP;
-- STATUS read-only;
-- historical ACTIVE never restored after boot;
-- current mode derived from durable control epoch.
-
-P2.C2 remains exact:
-
-`CONTROL | IGNORED_SLEEP | IGNORED_UNAUTHORIZED | IGNORED_REJECTED | JOB`.
-
-Duplicate ignored claims are clock-free and never reclassify original durable ingress.
-
-P3 remains the only dialogue/JOB/thread/turn authority.
+P5.3 proves the accepted local application restart invariant only. It does not claim to distinguish a Telegram message sent before restart but delivered only afterwards from a genuinely fresh operator message. Live polling offset/backlog behavior remains later P9/P11 acceptance authority.
 
 ## P5 split
 
 - **P5.1 — DONE:** accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777.
-- **P5.2 — NEXT / AUTHORITY FROZEN:** ADR-0037 serialized group prompt admission/no queue over accepted P2.C2/P3.
-- **P5.3 — LATER:** fleet status/version mismatch safeguards and final fake multi-controller group-routing acceptance.
+- **P5.2 — DONE:** accepted `345c48722c4faa03be19d38b6f07304276075f64`; full 841.
+- **P5.3 — NEXT / AUTHORITY FROZEN:** ADR-0038 fleet status identity/version-mismatch visibility + final fake multi-controller routing acceptance.
 
 ## Current non-goals
 
 Do not start:
 
-- P5.3;
 - P6 response delivery/approval-response orchestration;
 - Telegram HTTP/polling/webhook/token loading;
 - production config/secrets/systemd;
+- live backlog/offset acceptance;
 - real Codex/network effects;
 - P7+.
 
