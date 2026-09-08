@@ -122,17 +122,18 @@ class IngressControlCallbackClaimsTests(unittest.IsolatedAsyncioTestCase):
         storage = await self.open()
         await storage.close()
         with sqlite3.connect(self.path) as connection:
-            connection.execute(
-                "INSERT INTO ingress_updates(update_id, received_at_ms, completed_at_ms, disposition) VALUES"
-                "(1, 1, 2, 'JOB:" + "x" * 129 + "')"
-            )
+            connection.execute("PRAGMA ignore_check_constraints = ON")
             connection.execute(
                 "INSERT INTO ingress_updates(update_id, received_at_ms, completed_at_ms, disposition) VALUES(2, 1.5, 2, 'CONTROL')"
             )
 
-        with self.assertRaises(StorageError) as raised:
-            await self.open()
-        self.assertEqual(StorageErrorCategory.SCHEMA_INVALID, raised.exception.category)
+        storage = await self.open()
+        try:
+            with self.assertRaises(RepositoryError) as raised:
+                await IngressUpdateRepository(storage).get(2)
+            self.assertEqual(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+        finally:
+            await storage.close()
 
     async def test_ingress_fresh_clock_failure_rolls_back_and_redacts(self):
         storage = await self.open()
@@ -156,20 +157,31 @@ class IngressControlCallbackClaimsTests(unittest.IsolatedAsyncioTestCase):
         await storage.close()
 
     async def test_job_suffix_materialization_uses_suffix_bound(self):
-        storage = await self.open()
-        await storage.close()
-        with sqlite3.connect(self.path) as connection:
-            connection.execute(
-                "INSERT INTO ingress_updates(update_id, received_at_ms, completed_at_ms, disposition) "
-                "VALUES(10, 1, 1, ?)", ("JOB:" + "j" * 128,)
-            )
-            connection.execute(
-                "INSERT INTO ingress_updates(update_id, received_at_ms, completed_at_ms, disposition) "
-                "VALUES(11, 1, 1, ?)", ("JOB:" + "j" * 129,)
-            )
-        with self.assertRaises(StorageError) as raised:
-            await self.open()
-        self.assertEqual(StorageErrorCategory.SCHEMA_INVALID, raised.exception.category)
+        for suffix_length, expected in ((128, IngressDispositionKind.JOB), (129, None)):
+            with self.subTest(suffix_length=suffix_length):
+                storage = await self.open()
+                await storage.close()
+                with sqlite3.connect(self.path) as connection:
+                    connection.execute(
+                        "INSERT INTO ingress_updates(update_id, received_at_ms, completed_at_ms, disposition) "
+                        "VALUES(10, 1, 1, ?)", ("JOB:" + "j" * suffix_length,)
+                    )
+                if expected is IngressDispositionKind.JOB:
+                    storage = await self.open()
+                    try:
+                        record = await IngressUpdateRepository(storage).get(10)
+                        self.assertIsNotNone(record)
+                        self.assertEqual(expected, record.disposition)
+                        self.assertEqual("j" * suffix_length, record.job_id)
+                    finally:
+                        await storage.close()
+                else:
+                    with self.assertRaises(StorageError) as raised:
+                        await self.open()
+                    self.assertEqual(StorageErrorCategory.SCHEMA_INVALID, raised.exception.category)
+                self.tempdir.cleanup()
+                self.tempdir = tempfile.TemporaryDirectory()
+                self.path = os.path.join(self.tempdir.name, "controller.sqlite3")
 
     async def test_control_missing_controller_no_clock(self):
         storage = await self.open()

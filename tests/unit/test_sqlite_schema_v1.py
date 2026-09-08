@@ -101,7 +101,7 @@ class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
             connection.execute("PRAGMA user_version = 3")
         with self.assertRaises(StorageError) as raised:
             await self._open()
-            self.assertEqual(StorageErrorCategory.SCHEMA_UNSUPPORTED, raised.exception.category)
+        self.assertEqual(StorageErrorCategory.SCHEMA_UNSUPPORTED, raised.exception.category)
 
     async def test_v1_migration_hash_missing_index_extra_object_and_sql_drift_rejected(self):
         cases = ("hash", "row", "index", "extra", "table", "view", "trigger", "drift")

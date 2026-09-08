@@ -99,3 +99,27 @@ The prior regression command groups all passed. Required accepted counts were pr
 - The known P1.6 pending-task warning was observed in prior accepted lifecycle/regression history; no new P2.C2 warning was introduced.
 
 The final implementation commit SHA is reported by the executor after the single commit; this evidence file was prepared before that commit and was not subsequently amended.
+
+## Architect first repair
+
+- Rejected candidate: `cdc46ce17ab9c990280c7758ee0a40892ff46c40`
+- Architect review: `5577725383`
+- Repair status: implementation evidence only; P2.C2 remains not architect-accepted.
+
+The first repair adds a private, read-only historical-v1 ingress migration-eligibility preflight in `src/codex_control/storage/sqlite.py`. It validates exact signed-64 integer storage/ranges for update and timestamp fields, timestamp ordering, the three historical non-JOB dispositions, and the historical P2.3 `JOB:` suffix boundary (nonempty, NUL-free, at most 128 characters). It selects only a constant `1` and exposes no corrupt value. Historical schema-v1 constants, canonical derivation, and SQL remain unchanged.
+
+The preflight runs after accepted v1 schema/ledger validation and before any v2 DDL, v2 migration clock call, v2 ledger insert, or `user_version=2` change. This ordering applies to both direct v1 opening and v0 bootstrap after the historical v1 bootstrap/validation. v2 opening continues to use the existing exact v2 validation and does not run the historical preflight.
+
+Independent temporary-SQLite proofs now show:
+
+- forged historical-v1 `IGNORED_REJECTED` is rejected as `SCHEMA_INVALID`, is not legalized by v2, makes zero v2 migration-clock calls, remains at user version 1 with the one historical ledger row, exact historical ingress SQL/row, no `ingress_updates_v1`, and no v2 ledger;
+- a SQL-check-compatible historical-v1 `JOB:` suffix of 129 characters is rejected before migration with the same zero-clock/no-backup/no-v2-ledger/unmodified-v1 result;
+- a historical-v1 `received_at_ms=1.5` row with v2-valid `CONTROL` disposition is rejected before migration with `SCHEMA_INVALID`, zero v2 clock calls, user version 1, and no schema mutation;
+- the exact 128-character historical-v1 JOB suffix migrates successfully and materializes as `JOB` with the exact suffix;
+- the historical materializer proof is isolated on a structurally valid v2 database with a v2-valid disposition and a noncanonical numeric timestamp, so `IngressUpdateRepository.get()` independently remains `INVARIANT_VIOLATION`;
+- valid 128 and invalid 129 v2 JOB boundary cases use isolated fixtures rather than allowing one corrupt row to mask the accepted boundary proof;
+- the unsupported-version test now asserts `SCHEMA_UNSUPPORTED` outside `assertRaises`.
+
+The v1 DDL hash remains `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`; the exact four-statement v2 migration ID/hash remain `0002_ingress_rejected_disposition` / `a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85`. Focused P2.C2 counts are unit `5`, integration `13`, acceptance `1`. The accepted pre-P2.C2 full baseline is `777`; the required formula is `777 + 5 + 13 + 1 = 796`, and full discovery passed at 796 tests with zero failures and zero errors.
+
+The required prior P5.1, P4.3, P4.2, P4.1, P3.5, P3.4, P3.3, P3.2, P3.1, P2.C1, P2.6b, P2.6a, P2.5, P2.4b, P2.4a, P2.3, P2.2, P2.1, P1.9, P1.8, and P1.10 regression groups were green at their accepted focused counts. Compile/import, hash, diff, and security checks passed. All tests used temporary synthetic SQLite fixtures and deterministic clocks only; no Telegram, network, Codex, production database/state root, or service effect was used. The known P1.6 pending-task warning remains pre-existing and was not introduced by this repair.

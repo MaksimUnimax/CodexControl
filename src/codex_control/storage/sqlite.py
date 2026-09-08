@@ -296,6 +296,7 @@ class SqliteStorage:
                     raise _schema_failure(StorageErrorCategory.SCHEMA_INVALID)
             elif user_version == 1:
                 self._validate_v1(connection)
+                self._validate_v1_ingress_for_v2(connection)
             elif user_version != 2:
                 raise _schema_failure(StorageErrorCategory.SCHEMA_UNSUPPORTED)
             journal = connection.execute("PRAGMA journal_mode = WAL").fetchone()[0]
@@ -320,6 +321,7 @@ class SqliteStorage:
             if user_version == 0:
                 self._migrate_v1(connection, now_ms)
                 self._validate_v1(connection)
+                self._validate_v1_ingress_for_v2(connection)
                 self._migrate_v2(connection, now_ms)
                 self._validate_v2(connection)
             elif user_version == 1:
@@ -469,6 +471,33 @@ class SqliteStorage:
             ).fetchone()
             if row is None or row[0] is None or canonicalize_sql(row[0]) != expected_sql:
                 raise _schema_failure(StorageErrorCategory.SCHEMA_INVALID)
+
+    @staticmethod
+    def _validate_v1_ingress_for_v2(connection: sqlite3.Connection) -> None:
+        # Historical v1 SQL permits a wider JOB suffix than the accepted
+        # ingress materializer.  Prove every physical row is canonical before
+        # the v2 table can widen the disposition CHECK or copy any data.
+        try:
+            invalid = connection.execute(
+                "SELECT 1 FROM ingress_updates WHERE NOT ("
+                "typeof(update_id) = 'integer' AND update_id BETWEEN 0 AND ? "
+                "AND typeof(received_at_ms) = 'integer' AND received_at_ms BETWEEN 0 AND ? "
+                "AND (completed_at_ms IS NULL OR ("
+                "typeof(completed_at_ms) = 'integer' "
+                "AND completed_at_ms BETWEEN 0 AND ? "
+                "AND completed_at_ms >= received_at_ms)) "
+                "AND typeof(disposition) = 'text' AND ("
+                "disposition IN ('CONTROL','IGNORED_SLEEP','IGNORED_UNAUTHORIZED') "
+                "OR (substr(disposition, 1, 4) = 'JOB:' "
+                "AND length(disposition) BETWEEN 5 AND 132 "
+                "AND instr(disposition, char(0)) = 0)"
+                ")) LIMIT 1",
+                (_MAX_SQLITE_INT, _MAX_SQLITE_INT, _MAX_SQLITE_INT),
+            ).fetchone()
+        except sqlite3.Error:
+            raise _schema_failure(StorageErrorCategory.SCHEMA_INVALID) from None
+        if invalid is not None:
+            raise _schema_failure(StorageErrorCategory.SCHEMA_INVALID)
 
     @staticmethod
     def _validate_v2(connection: sqlite3.Connection) -> None:

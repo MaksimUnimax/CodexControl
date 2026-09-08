@@ -18,7 +18,7 @@ from codex_control.storage import (
     StorageError,
     StorageErrorCategory,
 )
-from codex_control.storage.schema import SCHEMA_V1_STATEMENTS
+from codex_control.storage.schema import SCHEMA_V1_STATEMENTS, canonicalize_sql
 
 
 class RejectedIngressSchemaV2IntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -30,13 +30,21 @@ class RejectedIngressSchemaV2IntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.tempdir.cleanup()
 
     @staticmethod
-    def _make_v1(path: str, *, populated: bool = False) -> list[tuple]:
+    def _make_v1(
+        path: str,
+        *,
+        populated: bool = False,
+        ingress_rows: list[tuple] | None = None,
+        bypass_ingress_checks: bool = False,
+    ) -> list[tuple]:
         rows = [
             (1, 10, 10, "CONTROL"),
             (2, 11, 11, "IGNORED_SLEEP"),
             (3, 12, 12, "IGNORED_UNAUTHORIZED"),
             (4, 13, 13, "JOB:job-1"),
         ] if populated else []
+        if ingress_rows is not None:
+            rows = ingress_rows
         with sqlite3.connect(path) as connection:
             for statement in SCHEMA_V1_STATEMENTS:
                 connection.execute(statement)
@@ -50,8 +58,10 @@ class RejectedIngressSchemaV2IntegrationTests(unittest.IsolatedAsyncioTestCase):
                     "VALUES ('job-1', 4, -100, 40, 'dialogue-1', 'server-1', 'profile-1', 'thread-1', ?, 'turn-1', 'FAILED', 0, 1, 1, 'CODEX_TURN_FAILED')",
                     (hashlib.sha256(b"x").hexdigest(),),
                 )
-                for row in rows:
-                    connection.execute("INSERT INTO ingress_updates VALUES (?, ?, ?, ?)", row)
+            if bypass_ingress_checks:
+                connection.execute("PRAGMA ignore_check_constraints = ON")
+            for row in rows:
+                connection.execute("INSERT INTO ingress_updates VALUES (?, ?, ?, ?)", row)
             connection.execute(
                 "INSERT INTO schema_migrations VALUES (1, '0001_initial_state', ?, 123)",
                 (SCHEMA_V1_DDL_SHA256,),
@@ -59,6 +69,32 @@ class RejectedIngressSchemaV2IntegrationTests(unittest.IsolatedAsyncioTestCase):
             connection.execute("PRAGMA user_version = 1")
         os.chmod(path, 0o600)
         return rows
+
+    @staticmethod
+    def _assert_exact_unmigrated_v1(path: str, expected_ingress: list[tuple]) -> None:
+        historical_ingress_sql = next(
+            statement for statement in SCHEMA_V1_STATEMENTS
+            if statement.lstrip().startswith("CREATE TABLE ingress_updates")
+        )
+        with sqlite3.connect(path) as connection:
+            assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT version, migration_id, ddl_sha256 FROM schema_migrations ORDER BY version"
+            ).fetchall() == [(1, "0001_initial_state", SCHEMA_V1_DDL_SHA256)]
+            assert connection.execute(
+                "SELECT name FROM sqlite_master WHERE name = 'ingress_updates_v1'"
+            ).fetchall() == []
+            assert connection.execute(
+                "SELECT version FROM schema_migrations WHERE version = 2"
+            ).fetchall() == []
+            actual_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE name = 'ingress_updates'"
+            ).fetchone()[0]
+            assert canonicalize_sql(actual_sql) == canonicalize_sql(historical_ingress_sql)
+            assert connection.execute(
+                "SELECT update_id, received_at_ms, completed_at_ms, disposition "
+                "FROM ingress_updates ORDER BY update_id"
+            ).fetchall() == expected_ingress
 
     @staticmethod
     def _mutate(path: str, statement: str, parameters: tuple = ()) -> None:
@@ -102,6 +138,62 @@ class RejectedIngressSchemaV2IntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         storage = await self._fresh_v2(now_ms=trap)
         await storage.close()
+
+    async def test_historical_rejected_value_is_not_legalized_by_v2(self):
+        rows = [(101, 10, 10, "IGNORED_REJECTED")]
+        self._make_v1(
+            self.path,
+            ingress_rows=rows,
+            bypass_ingress_checks=True,
+        )
+        calls = []
+        with self.assertRaises(StorageError) as raised:
+            await SqliteStorage.open(self.path, now_ms=lambda: calls.append(1) or 456)
+        self.assertEqual(StorageErrorCategory.SCHEMA_INVALID, raised.exception.category)
+        self.assertEqual([], calls)
+        self._assert_exact_unmigrated_v1(self.path, rows)
+
+    async def test_historical_overlong_job_fails_before_v2_migration(self):
+        rows = [(102, 10, 10, "JOB:" + "j" * 129)]
+        self._make_v1(self.path, ingress_rows=rows)
+        calls = []
+        with self.assertRaises(StorageError) as raised:
+            await SqliteStorage.open(self.path, now_ms=lambda: calls.append(1) or 456)
+        self.assertEqual(StorageErrorCategory.SCHEMA_INVALID, raised.exception.category)
+        self.assertEqual([], calls)
+        self._assert_exact_unmigrated_v1(self.path, rows)
+
+    async def test_historical_noncanonical_timestamp_fails_before_v2_migration(self):
+        rows = [(103, 1.5, 2, "CONTROL")]
+        self._make_v1(self.path, ingress_rows=rows)
+        with sqlite3.connect(self.path) as connection:
+            self.assertEqual("real", connection.execute(
+                "SELECT typeof(received_at_ms) FROM ingress_updates WHERE update_id = 103"
+            ).fetchone()[0])
+        calls = []
+        with self.assertRaises(StorageError) as raised:
+            await SqliteStorage.open(self.path, now_ms=lambda: calls.append(1) or 456)
+        self.assertEqual(StorageErrorCategory.SCHEMA_INVALID, raised.exception.category)
+        self.assertEqual([], calls)
+        self._assert_exact_unmigrated_v1(self.path, rows)
+
+    async def test_historical_maximum_job_suffix_migrates_and_materializes(self):
+        suffix = "j" * 128
+        rows = [(104, 10, 10, "JOB:" + suffix)]
+        self._make_v1(self.path, ingress_rows=rows)
+        calls = []
+        storage = await SqliteStorage.open(self.path, now_ms=lambda: calls.append(1) or 456)
+        try:
+            self.assertEqual([1], calls)
+            self.assertEqual(2, await storage.read(
+                lambda c: c.execute("PRAGMA user_version").fetchone()[0]
+            ))
+            record = await IngressUpdateRepository(storage).get(104)
+            self.assertIsNotNone(record)
+            self.assertEqual(IngressDispositionKind.JOB, record.disposition)
+            self.assertEqual(suffix, record.job_id)
+        finally:
+            await storage.close()
 
     async def test_populated_v1_migrates_row_for_row_and_preserves_job_relation(self):
         before = self._make_v1(self.path, populated=True)
