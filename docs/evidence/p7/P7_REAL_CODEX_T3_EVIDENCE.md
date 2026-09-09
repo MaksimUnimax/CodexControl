@@ -178,3 +178,60 @@ Reference architect comment: `5594652685`.
 This is sanitized forensic evidence only. It does not authorize ALLOW, does not
 alter `_safe_command_relation()`, does not establish P7 acceptance, and does
 not start P8. Issue #38 remains open.
+
+## Architect final split ALLOW/interrupt continuation
+
+Reference architect comment: `5594845910`.
+
+- Harness Commit H: `be0267161816a69d5f945475fedb4c65aba3d6be`; the harness-only
+  change added exactly one gated final-continuation method. No production source
+  changed.
+- The mandatory pre-run suite from clean H passed exactly once: `957` tests,
+  `3` skipped, `0` failures, `0` errors, `OK`, with all real P7 gates unset.
+- Fresh installed authority passed: executable path kind `SYMLINK`, resolved
+  target safety `PASS`; fresh isolation selected `codex3`.
+- Exactly one matching retained recovery record was found. The original
+  unrelated-session baseline reconciliation before RPC passed with zero scan
+  errors. The record was retained because the final destructive proof did not
+  complete.
+- Final continuation invocation count: exactly `1`; no seventh turn, second
+  ALLOW attempt, second interrupt, second delete, new thread, or rerun was
+  performed.
+- Same-thread resume: `RESUME_CONFIRMED`; safe model metadata was acquired.
+
+Turn 5 ALLOW proof:
+
+- Turn 5 start: `TURN_START_CONFIRMED`.
+- Approval request observed: `YES`; request count `1`; kind
+  `COMMAND_EXECUTION`; thread, turn, cwd, marker, and sentinel diagnostics all
+  matched.
+- Finite grammar class: `ONE_SHELL_WRAPPER`; mismatch flags: empty.
+- ALLOW count: `1`; approval result: `ALLOWED`; wire response count: `1`.
+- Turn 5 terminal: `COMPLETED`.
+- Exact P7-owned sentinel content proof: `PASS`; sentinel removed: `YES`.
+
+Turn 6 interrupt proof:
+
+- Turn 6 start: `TURN_START_CONFIRMED`.
+- The single interrupt result was `REJECTED`; terminal result: `NOT_RUN`;
+  runtime reacquire: `NO`.
+- The final method stopped at `P7_FINAL_INTERRUPT_STOP`. No Turn 6 terminal
+  `FAILED` proof was claimed, and no later storage or delete gate was entered.
+- P7 child-process cleanup: no attributed delayed process remained. The final
+  temporary workdir was removed and the final P7 sentinel was absent.
+
+Delete and storage gates:
+
+- Pre-delete physical proof: `NOT_RUN`; pre-delete scan errors and new-marker
+  counts: `NOT_RUN`.
+- Official delete call count: `0`; delete status: `NOT_RUN`; delete retry: `NO`.
+- Post-delete residual scan and after-delete baseline reconciliation: `NOT_RUN`.
+- Recovery-record cleanup: `NO` (retained). No manual Codex-store cleanup was
+  performed.
+- The final result artifact was sanitized and root-only; it records the final
+  status as `FAIL` at the interrupt gate without raw thread ID, command,
+  prompt, marker, sentinel, path, PID, environment, or exception data.
+
+The final split continuation does not establish definitive interrupt support,
+official delete behavior, or hard-delete erasure. P7 remains **NOT ACCEPTED**;
+Issue #38 remains open and P8 was not started.
