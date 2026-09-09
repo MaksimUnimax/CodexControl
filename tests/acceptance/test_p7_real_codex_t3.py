@@ -56,6 +56,7 @@ PROFILE_HOMES = {
 CATEGORIES = ("SESSION_HISTORY", "STATE_DB", "LOG", "CACHE", "OTHER")
 CONTENT_MARKER = "content_marker"
 THREAD_ID = "thread_id"
+CODEX_BASENAMES = frozenset(("codex", "codex-cli", "codex.js"))
 
 
 class _P7Stop(Exception):
@@ -113,6 +114,30 @@ def _proc_environment(pid: int) -> dict[str, str] | None:
     return result
 
 
+def _proc_cmdline(pid: int) -> tuple[str, ...] | None:
+    try:
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except (OSError, ValueError):
+        return None
+    try:
+        return tuple(
+            token.decode("utf-8", errors="strict")
+            for token in raw.split(b"\0")
+            if token
+        )
+    except UnicodeDecodeError:
+        return None
+
+
+def _authority_targets() -> tuple[str, ...]:
+    targets = [os.path.abspath(CODEX)]
+    try:
+        targets.append(str(Path(CODEX).resolve(strict=True)))
+    except OSError:
+        pass
+    return tuple(dict.fromkeys(targets))
+
+
 def _path_is_under(path: str, root: Path) -> bool:
     try:
         return os.path.commonpath((os.path.abspath(path), str(root))) == str(root)
@@ -123,35 +148,28 @@ def _path_is_under(path: str, root: Path) -> bool:
 def _codex_process_owns_candidate(pid: int, candidate: Path) -> bool:
     """Return true for ownership or ambiguity, without exposing /proc data."""
     try:
-        executable = os.path.basename(os.readlink(f"/proc/{pid}/exe")).lower()
+        executable_path = os.readlink(f"/proc/{pid}/exe")
     except OSError:
-        return False
-    try:
-        command_line = Path(f"/proc/{pid}/cmdline").read_bytes()
-        command_tokens = tuple(
-            token.decode("utf-8", errors="strict")
-            for token in command_line.split(b"\0")
-            if token
-        )
-    except (OSError, UnicodeDecodeError):
-        return True if executable in {"codex", "codex-cli"} else False
-    invoked_codex = executable in {"codex", "codex-cli"} or any(
-        os.path.basename(token) in {"codex", "codex-cli"}
-        for token in command_tokens
+        executable_path = None
+    executable = os.path.basename(executable_path).lower() if executable_path else ""
+    command_tokens = _proc_cmdline(pid)
+    authority_targets = set(_authority_targets())
+    invoked_codex = executable in CODEX_BASENAMES or (
+        executable_path is not None and os.path.abspath(executable_path) in authority_targets
     )
+    if command_tokens is not None:
+        invoked_codex = invoked_codex or any(
+            os.path.basename(token).lower() in CODEX_BASENAMES
+            or os.path.abspath(token) in authority_targets
+            or "@openai/codex" in token
+            for token in command_tokens
+        )
     if not invoked_codex:
         return False
     environment = _proc_environment(pid)
     if environment is None:
         return True
-    home = environment.get("CODEX_HOME")
-    if home == str(candidate):
-        return True
-    if home is None:
-        # An unqualified Codex process is the excluded default profile, not
-        # evidence that either named non-default candidate is in use.
-        return str(candidate) == "/root/.codex"
-    if not os.path.isabs(home):
+    if environment.get("CODEX_HOME") == str(candidate) or environment.get("HOME") == str(candidate):
         return True
     try:
         cwd = os.readlink(f"/proc/{pid}/cwd")
@@ -187,6 +205,14 @@ def _is_regular(path: Path) -> os.stat_result | None:
     return info if stat.S_ISREG(info.st_mode) else None
 
 
+def _lstat_regular(path: Path) -> tuple[os.stat_result | None, bool]:
+    try:
+        info = path.lstat()
+    except OSError:
+        return None, True
+    return (info if stat.S_ISREG(info.st_mode) else None), False
+
+
 def _category(relative: Path) -> str:
     lowered = relative.as_posix().lower()
     parts = set(lowered.split("/"))
@@ -206,15 +232,37 @@ def _empty_categories() -> dict[str, int]:
     return {name: 0 for name in CATEGORIES}
 
 
+def _walk_directories(root: Path, directories: list[str], scan_errors: list[int]) -> None:
+    kept: list[str] = []
+    for name in directories:
+        path = root / name
+        try:
+            info = path.lstat()
+        except OSError:
+            scan_errors[0] += 1
+            continue
+        if not stat.S_ISLNK(info.st_mode):
+            kept.append(name)
+    directories[:] = kept
+
+
 def _home_baseline(home: Path) -> dict[str, Any]:
     identities: set[tuple[str, str]] = set()
     regular_count = 0
     total_bytes = 0
-    for root, directories, files in os.walk(home, followlinks=False):
-        directories[:] = [name for name in directories if not (Path(root) / name).is_symlink()]
+    scan_errors = [0]
+
+    def onerror(_error: OSError) -> None:
+        scan_errors[0] += 1
+
+    for root, directories, files in os.walk(home, followlinks=False, onerror=onerror):
+        _walk_directories(Path(root), directories, scan_errors)
         for name in files:
             path = Path(root) / name
-            info = _is_regular(path)
+            info, lstat_failed = _lstat_regular(path)
+            if lstat_failed:
+                scan_errors[0] += 1
+                continue
             if info is None:
                 continue
             relative = path.relative_to(home)
@@ -229,22 +277,31 @@ def _home_baseline(home: Path) -> dict[str, Any]:
         "total_regular_bytes": total_bytes,
         "session_identities": identities,
         "session_identity_sha256": _sha256(identity_bytes),
+        "scan_errors": scan_errors[0],
     }
 
 
-def _scan_file(path: Path, needles: tuple[tuple[str, bytes], ...]) -> tuple[dict[str, int], int, int]:
+def _scan_file(path: Path, needles: tuple[tuple[str, bytes], ...]) -> tuple[dict[str, int], int, int, int]:
     counts = {name: 0 for name, _ in needles}
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError:
-        return counts, 0, 0
+        return counts, 0, 0, 1
     total_bytes = 0
     hit_bytes = 0
     overlap = b""
     offset = 0
     maximum = max((len(needle) for _, needle in needles), default=1)
     try:
-        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+        stream = os.fdopen(descriptor, "rb", closefd=True)
+    except OSError:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        return {name: 0 for name, _ in needles}, 0, 0, 1
+    try:
+        with stream:
             while True:
                 chunk = stream.read(1024 * 1024)
                 if not chunk:
@@ -263,10 +320,10 @@ def _scan_file(path: Path, needles: tuple[tuple[str, bytes], ...]) -> tuple[dict
                         position = combined.find(needle, position + 1)
                 overlap = combined[-(maximum - 1):] if maximum > 1 else b""
     except OSError:
-        return {name: 0 for name, _ in needles}, 0, 0
+        return {name: 0 for name, _ in needles}, 0, 0, 1
     if any(counts.values()):
         hit_bytes = total_bytes
-    return counts, hit_bytes, total_bytes
+    return counts, hit_bytes, total_bytes, 0
 
 
 def _scan_home(home: Path, *, thread_id: str, markers: tuple[str, ...]) -> dict[str, Any]:
@@ -282,16 +339,25 @@ def _scan_home(home: Path, *, thread_id: str, markers: tuple[str, ...]) -> dict[
     content_matches = 0
     matched_files = 0
     aggregate_bytes = 0
-    for root, directories, files in os.walk(home, followlinks=False):
-        directories[:] = [name for name in directories if not (Path(root) / name).is_symlink()]
+    scan_errors = [0]
+
+    def onerror(_error: OSError) -> None:
+        scan_errors[0] += 1
+
+    for root, directories, files in os.walk(home, followlinks=False, onerror=onerror):
+        _walk_directories(Path(root), directories, scan_errors)
         for name in files:
             path = Path(root) / name
-            info = _is_regular(path)
+            info, lstat_failed = _lstat_regular(path)
+            if lstat_failed:
+                scan_errors[0] += 1
+                continue
             if info is None:
                 continue
             relative = path.relative_to(home)
             category = _category(relative)
-            counts, matched_bytes, _ = _scan_file(path, needles)
+            counts, matched_bytes, _, file_scan_errors = _scan_file(path, needles)
+            scan_errors[0] += file_scan_errors
             file_thread = counts[THREAD_ID]
             file_content = counts[CONTENT_MARKER]
             if file_thread or file_content:
@@ -315,6 +381,7 @@ def _scan_home(home: Path, *, thread_id: str, markers: tuple[str, ...]) -> dict[
         "matched_file_count_by_category": files_by_category,
         "aggregate_bytes_by_category": bytes_by_category,
         "log_only_identifier_matches": log_only_identifier_matches,
+        "scan_errors": scan_errors[0],
     }
 
 
@@ -327,13 +394,58 @@ def _isolated_environment(home: Path) -> dict[str, str]:
     }
 
 
-def _verify_installed_authority() -> None:
+def _verify_parent_directories(path: Path) -> bool:
+    current = path.parent
+    while True:
+        try:
+            info = current.lstat()
+        except OSError:
+            return False
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or info.st_uid != 0
+            or info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            return False
+        if current == current.parent:
+            return True
+        current = current.parent
+
+
+def _verify_installed_authority() -> tuple[str, bool]:
     executable = Path(CODEX)
+    _require(executable.is_absolute(), "P7_INSTALLED_AUTHORITY_DRIFT_STOP")
     try:
         info = executable.lstat()
     except OSError:
         raise _P7Stop("P7_INSTALLED_AUTHORITY_DRIFT_STOP") from None
-    _require(stat.S_ISREG(info.st_mode) and os.access(executable, os.X_OK), "P7_INSTALLED_AUTHORITY_DRIFT_STOP")
+    if stat.S_ISREG(info.st_mode):
+        path_kind = "REGULAR"
+        _require(
+            info.st_uid == 0
+            and os.access(executable, os.X_OK)
+            and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            and _verify_parent_directories(executable),
+            "P7_INSTALLED_AUTHORITY_DRIFT_STOP",
+        )
+    elif stat.S_ISLNK(info.st_mode):
+        path_kind = "SYMLINK"
+        _require(info.st_uid == 0 and _verify_parent_directories(executable), "P7_INSTALLED_AUTHORITY_DRIFT_STOP")
+        try:
+            resolved = executable.resolve(strict=True)
+            target_info = resolved.lstat()
+        except OSError:
+            raise _P7Stop("P7_INSTALLED_AUTHORITY_DRIFT_STOP") from None
+        _require(
+            stat.S_ISREG(target_info.st_mode)
+            and target_info.st_uid == 0
+            and os.access(resolved, os.X_OK)
+            and not target_info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            and _verify_parent_directories(resolved),
+            "P7_INSTALLED_AUTHORITY_DRIFT_STOP",
+        )
+    else:
+        raise _P7Stop("P7_INSTALLED_AUTHORITY_DRIFT_STOP")
     with tempfile.TemporaryDirectory(prefix="codex-control-p7-authority-") as directory:
         root = Path(directory)
         home = root / "codex-home"
@@ -368,6 +480,7 @@ def _verify_installed_authority() -> None:
         except OSError:
             raise _P7Stop("P7_INSTALLED_AUTHORITY_DRIFT_STOP") from None
         _require(observed == SCHEMA_SHA256, "P7_INSTALLED_AUTHORITY_DRIFT_STOP")
+    return path_kind, True
 
 
 def _git_facts(expected_head: str) -> None:
@@ -522,8 +635,13 @@ class P7RealCodexT3Acceptance(unittest.IsolatedAsyncioTestCase):
             "credential_copy": False,
             "auth_migration": False,
             "runtime_generations": [],
+            "executable_path_kind": None,
+            "executable_resolved_target_safe": None,
             "thread_id_sha256": None,
             "marker_sha256": [],
+            "baseline_scan_errors": None,
+            "predelete_scan_errors": None,
+            "postdelete_scan_errors": None,
             "real_thread_count": 0,
             "real_turn_count": 0,
             "thread_delete_calls": 0,
@@ -550,11 +668,15 @@ class P7RealCodexT3Acceptance(unittest.IsolatedAsyncioTestCase):
 
         try:
             _git_facts(expected_head)
-            _verify_installed_authority()
+            path_kind, resolved_target_safe = _verify_installed_authority()
+            result["executable_path_kind"] = path_kind
+            result["executable_resolved_target_safe"] = "PASS" if resolved_target_safe else "FAIL"
             selected = _eligible_profile_alias()
             _require(selected == alias, "P7_ISOLATION_GATE_BLOCKED", blocked=True)
             home = _safe_profile_path(selected)
             baseline = _home_baseline(home)
+            result["baseline_scan_errors"] = baseline["scan_errors"]
+            _require(baseline["scan_errors"] == 0, "P7_STORAGE_SCAN_ERROR_STOP")
             result["preexisting_session_count"] = len(baseline["session_identities"])
             result["preexisting_session_identity_sha256"] = baseline["session_identity_sha256"]
             nonce = secrets.token_hex(24)
@@ -665,10 +787,12 @@ class P7RealCodexT3Acceptance(unittest.IsolatedAsyncioTestCase):
             )
             _require(turn2_start.status is TurnStartStatus.CONFIRMED and turn2_start.binding is not None, "P7_TURN2_FAILED")
             turn2_terminal = await turn_adapter.wait_turn(turn2_start.binding)
+            turn2_projection = "\n".join(message.text for message in turn2_terminal.messages)
             _require(
                 turn2_terminal.status is TurnTerminalStatus.COMPLETED
                 and bool(turn2_terminal.messages)
-                and any(m1 in message.text and a2 in message.text for message in turn2_terminal.messages),
+                and m1 in turn2_projection
+                and a2 in turn2_projection,
                 "P7_TURN2_FAILED",
             )
             result["real_turn_count"] = 2
@@ -738,6 +862,8 @@ class P7RealCodexT3Acceptance(unittest.IsolatedAsyncioTestCase):
             await manager.shutdown_profile(selected)
             predelete = _scan_home(home, thread_id=thread_binding.thread_id, markers=markers)
             result["predelete_scan"] = predelete
+            result["predelete_scan_errors"] = predelete["scan_errors"]
+            _require(predelete["scan_errors"] == 0, "P7_STORAGE_SCAN_ERROR_STOP")
             _require(
                 predelete["thread_id_matches"] > 0 or predelete["content_marker_matches"] > 0,
                 "P7_PREDELETE_STORAGE_PROOF_INCONCLUSIVE",
@@ -752,6 +878,8 @@ class P7RealCodexT3Acceptance(unittest.IsolatedAsyncioTestCase):
             await manager.shutdown_profile(selected)
             postdelete = _scan_home(home, thread_id=thread_binding.thread_id, markers=markers)
             result["postdelete_scan"] = postdelete
+            result["postdelete_scan_errors"] = postdelete["scan_errors"]
+            _require(postdelete["scan_errors"] == 0, "P7_STORAGE_SCAN_ERROR_STOP")
             active_thread_residuals = sum(postdelete["thread_id_matches_by_category"][name] for name in ("SESSION_HISTORY", "STATE_DB"))
             unclassified_residuals = sum(postdelete["thread_id_matches_by_category"][name] for name in ("CACHE", "OTHER"))
             _require(postdelete["content_marker_matches"] == 0, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
@@ -762,6 +890,7 @@ class P7RealCodexT3Acceptance(unittest.IsolatedAsyncioTestCase):
             result["postdelete_content_marker_matches"] = postdelete["content_marker_matches"]
 
             final_baseline = _home_baseline(home)
+            _require(final_baseline["scan_errors"] == 0, "P7_STORAGE_SCAN_ERROR_STOP")
             removed = baseline["session_identities"] - final_baseline["session_identities"]
             result["removed_preexisting_count"] = len(removed)
             _require(not removed, "P7_UNRELATED_STORAGE_MUTATION_BLOCKER")
