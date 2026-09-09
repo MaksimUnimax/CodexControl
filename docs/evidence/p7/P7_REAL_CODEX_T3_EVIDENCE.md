@@ -117,3 +117,40 @@ and evidence record.
 P7 remains **NOT ACCEPTED**. The retained recovery record identifies an
 undeleted disposable thread requiring architect review; no manual Codex-store
 cleanup was performed. Issue #38 remains open and P8 was not started.
+
+## Architect same-thread recovery continuation
+
+Reference architect comment: `5594389257`.
+
+- Recovery harness Commit E: `b17a9053595b03ffabf1ce62a8b30b15f1960d9f`.
+- Recovery invocation count: exactly `1`; no original T3 rerun, second thread,
+  second approval attempt, interrupt attempt, or delete attempt was made.
+- Old delayed-command safety cleanup found `0` exact P7-owned processes; live
+  processes after cleanup: `0`; old sentinel present after cleanup: `NO`.
+- Fresh executable authority passed with path kind `SYMLINK` and resolved-target
+  safety `PASS`; fresh isolation selected `codex3`.
+- Fail-closed baseline scanning reported `0` errors. Original pre-thread
+  baseline reconciliation passed before recovery RPC.
+- Same-thread resume: `RESUME_CONFIRMED`.
+- Recovery Turn 4 start: `TURN_START_CONFIRMED`; the cumulative real turn
+  count reached `4` on the one existing P7-owned thread.
+- Approval diagnostics: request observed `YES`; request count `1`; request kind
+  `COMMAND_EXECUTION`; finite mismatch flags `COMMAND_GRAMMAR`; allow count
+  `0`; result `DENIED`; wire response count `1`.
+- The recovery stopped at `P7_RECOVERY_APPROVAL_STRICT_MISMATCH`. The command
+  did not pass the narrow safe-command relation, so no ALLOW decision was made.
+- Interrupt: `NOT_RUN`. Pre-delete storage proof: `NOT_RUN`. Official delete:
+  `NOT_RUN` with delete call count `0`. Post-delete gate and after-delete
+  original-baseline reconciliation: `NOT_RUN`.
+- P7 runtime cleanup passed; the new recovery sentinel was absent after
+  cleanup, no exact recovery delayed process remained, and the temporary
+  recovery workdir was removed.
+- Recovery record cleanup: retained (`NO` removal), because approval and
+  delete/post-delete proof did not pass. No manual Codex-store cleanup was
+  performed.
+- The single pre-recovery full regression on clean Commit E passed with `956`
+  tests, `2` skipped, `0` failures, `0` errors, and `OK`.
+
+This continuation does not establish approval support, interrupt support, or
+hard-delete behavior. P7 remains **NOT ACCEPTED**; Issue #38 remains open and
+P8 was not started.
