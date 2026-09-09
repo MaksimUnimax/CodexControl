@@ -2922,7 +2922,17 @@ class P7RealCodexT3Acceptance(unittest.IsolatedAsyncioTestCase):
 
             recovered_by_hash = {_sha256(marker): marker for marker in recovered}
             markers = tuple(recovered_by_hash[marker_hash] for marker_hash in k_marker_hashes)
-            predelete = _scan_home(home, thread_id=thread_id, markers=markers[0:2])
+            marker_texts = tuple(marker.decode("ascii") for marker in markers)
+            _require(
+                len(marker_texts) == 2
+                and all(
+                    len(marker_text) == 48
+                    and all(character in "0123456789abcdef" for character in marker_text)
+                    for marker_text in marker_texts
+                ),
+                "P7_DELETE_MARKER_RECOVERY_STOP",
+            )
+            predelete = _scan_home(home, thread_id=thread_id, markers=marker_texts)
             per_marker_predelete = [_marker_scan(home, thread_id, marker) for marker in markers]
             predelete_errors = predelete["scan_errors"] + sum(scan["scan_errors"] for scan in per_marker_predelete)
             result["predelete_scan_errors"] = predelete_errors
@@ -2971,7 +2981,7 @@ class P7RealCodexT3Acceptance(unittest.IsolatedAsyncioTestCase):
             result["delete_runtime_shutdown"] = "PASS" if runtime_shutdown_pass else "FAIL"
             _require(runtime_shutdown_pass, "P7_DELETE_RUNTIME_SHUTDOWN_STOP")
 
-            postdelete = _scan_home(home, thread_id=thread_id, markers=markers[0:2])
+            postdelete = _scan_home(home, thread_id=thread_id, markers=marker_texts)
             per_marker_postdelete = [_marker_scan(home, thread_id, marker) for marker in markers]
             postdelete_errors = postdelete["scan_errors"] + sum(scan["scan_errors"] for scan in per_marker_postdelete)
             result["postdelete_scan_errors"] = postdelete_errors
