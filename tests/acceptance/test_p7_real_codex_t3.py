@@ -2215,6 +2215,492 @@ class P7RealCodexT3Acceptance(unittest.IsolatedAsyncioTestCase):
         if result["status"] != "PASS":
             self.fail(str(result["stage"]))
 
+    async def test_authorized_synchronized_interrupt_delete(self) -> None:
+        if os.environ.get("CODEXCONTROL_P7_SYNC_T3") != "AUTHORIZED_SYNC_2026_09_09":
+            raise unittest.SkipTest("P7 synchronized interrupt continuation is not authorized")
+
+        expected_head = os.environ.get("CODEXCONTROL_P7_EXPECTED_HEAD", "")
+        expected_thread_sha = os.environ.get("CODEXCONTROL_P7_RECOVERY_THREAD_SHA256", "")
+        result_value = os.environ.get("CODEXCONTROL_P7_SYNC_RESULT_PATH", "")
+        result_path = Path(result_value)
+        _require(
+            len(expected_head) == 40
+            and all(character in "0123456789abcdef" for character in expected_head)
+            and expected_thread_sha == RECOVERY_THREAD_SHA256
+            and result_path.is_absolute()
+            and result_path.parent == Path("/var/tmp")
+            and 1 <= len(result_path.name) <= 128
+            and all(
+                character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+                for character in result_path.name
+            )
+            and not result_path.exists()
+            and not result_path.is_symlink(),
+            "P7_GATE_INVALID",
+        )
+
+        result: dict[str, Any] = {
+            "status": "FAIL",
+            "stage": "P7_SYNC_NOT_STARTED",
+            "commit_k_sha": expected_head,
+            "profile_alias": "codex3",
+            "thread_id_sha256": RECOVERY_THREAD_SHA256,
+            "executable_path_kind": None,
+            "executable_resolved_target_safe": None,
+            "model_id": None,
+            "reasoning_effort": None,
+            "resume_status": "NOT_RUN",
+            "turn7_start": "NOT_RUN",
+            "turn7_id_sha256": None,
+            "marker_sha256": [],
+            "turn7_barrier_file": "NOT_RUN",
+            "turn7_sleep_process_count": 0,
+            "turn7_activity_barrier": "NOT_RUN",
+            "turn7_interrupt_status": "NOT_RUN",
+            "turn7_interrupt_terminal": "NONE",
+            "turn7_interrupt_runtime_reacquire": "NOT_RUN",
+            "turn7_child_natural_exit": "NOT_RUN",
+            "turn7_child_cleanup_signal_used": "NO",
+            "turn7_child_final_live_count": "UNKNOWN",
+            "baseline_scan_errors": "NOT_RUN",
+            "original_baseline_reconciliation_before": False,
+            "predelete_scan_errors": "NOT_RUN",
+            "predelete_new_content_marker_matches": "NOT_RUN",
+            "predelete_new_content_categories": {},
+            "predelete_physical_proof": "NOT_RUN",
+            "thread_delete_calls": 0,
+            "delete_status": "NOT_RUN",
+            "delete_retry": "NO",
+            "postdelete_scan_errors": "NOT_RUN",
+            "postdelete_new_content_marker_matches": "NOT_RUN",
+            "postdelete_active_thread_id_matches": "NOT_RUN",
+            "postdelete_log_thread_id_residuals": "NOT_RUN",
+            "postdelete_unclassified_thread_id_matches": "NOT_RUN",
+            "original_baseline_reconciliation_after": False,
+            "preexisting_session_artifacts_removed": "NOT_RUN",
+            "recovery_record_matches": 0,
+            "recovery_record_removed": "NO",
+            "runtime_cleanup_pass": "NOT_RUN",
+            "sync_temp_workdir_removed": "NO",
+            "sync_barrier_file_removed": "NO",
+            "sync_child_process_live": "UNKNOWN",
+        }
+
+        def _barrier_file_proof(path: Path, marker: str) -> bool:
+            descriptor: int | None = None
+            marker_bytes = marker.encode("utf-8")
+            try:
+                info = path.lstat()
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or stat.S_ISLNK(info.st_mode)
+                    or info.st_uid != 0
+                    or info.st_size > 4096
+                ):
+                    return False
+                descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_uid != 0
+                    or opened.st_size > 4096
+                    or opened.st_size != info.st_size
+                ):
+                    return False
+                content = bytearray()
+                while len(content) <= 4096:
+                    chunk = os.read(descriptor, 4097 - len(content))
+                    if not chunk:
+                        break
+                    content.extend(chunk)
+                return opened.st_size == len(marker_bytes) and bytes(content) == marker_bytes
+            except OSError:
+                return False
+            finally:
+                if descriptor is not None:
+                    try:
+                        os.close(descriptor)
+                    except OSError:
+                        pass
+
+        def _sync_sleep_pids(workdir: Path) -> list[int]:
+            matches: list[int] = []
+            try:
+                entries = tuple(os.scandir("/proc"))
+            except OSError:
+                return matches
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                try:
+                    tokens = tuple(
+                        token.decode("utf-8", errors="strict")
+                        for token in Path("/proc", entry.name, "cmdline").read_bytes().split(b"\0")
+                        if token
+                    )
+                    cwd = os.readlink(f"/proc/{entry.name}/cwd")
+                except (OSError, UnicodeError):
+                    continue
+                if (
+                    tokens
+                    and os.path.basename(tokens[0]) == "sleep"
+                    and "120" in tokens[1:]
+                    and cwd == str(workdir)
+                ):
+                    matches.append(int(entry.name))
+            return matches
+
+        def _safety_reap_sync_children(workdir: Path) -> tuple[int, bool]:
+            initial = _sync_sleep_pids(workdir)
+            signal_used = bool(initial)
+            for pid in initial:
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            deadline = time.monotonic() + 5.0
+            live = _sync_sleep_pids(workdir)
+            while live and time.monotonic() < deadline:
+                time.sleep(0.05)
+                live = _sync_sleep_pids(workdir)
+            for pid in live:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            deadline = time.monotonic() + 5.0
+            live = _sync_sleep_pids(workdir)
+            while live and time.monotonic() < deadline:
+                time.sleep(0.05)
+                live = _sync_sleep_pids(workdir)
+            return len(live), signal_used
+
+        def _remove_barrier(path: Path, workdir: Path) -> bool:
+            if path.parent != workdir:
+                return False
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                return True
+            except OSError:
+                return False
+            if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or info.st_uid != 0:
+                return False
+            try:
+                path.unlink()
+            except OSError:
+                return False
+            return not path.exists() and not path.is_symlink()
+
+        manager: CodexRuntimeManager | None = None
+        counting: Any | None = None
+        recovery_path: Path | None = None
+        recovery_record: dict[str, Any] | None = None
+        temp_workdir: Path | None = None
+        barrier_path: Path | None = None
+        delete_confirmed = False
+        postdelete_gate_pass = False
+        interrupt_pass = False
+        child_natural_pass = False
+        barrier_cleanup_pass = False
+        runtime_shutdown_pass = False
+        try:
+            _git_facts(expected_head)
+            path_kind, resolved_target_safe = _verify_installed_authority()
+            result["executable_path_kind"] = path_kind
+            result["executable_resolved_target_safe"] = "PASS" if resolved_target_safe else "FAIL"
+            _require(_eligible_profile_alias() == "codex3", "P7_SYNC_ISOLATION_BLOCKED", blocked=True)
+            home = _safe_profile_path("codex3")
+            recovery_path, recovery_record = _recovery_record_identity()
+            result["recovery_record_matches"] = 1
+            original = _original_result_identity()
+
+            baseline = _home_baseline(home)
+            owned_before, owned_before_errors = _session_identities_with_thread(home, recovery_record["thread_id"])
+            result["baseline_scan_errors"] = baseline["scan_errors"] + owned_before_errors
+            _require(result["baseline_scan_errors"] == 0, "P7_SYNC_BASELINE_RECONCILIATION_STOP")
+            unrelated_before = baseline["session_identities"] - owned_before
+            unrelated_before_bytes = "\n".join(
+                f"{path}\0{category}" for path, category in sorted(unrelated_before)
+            ).encode("utf-8")
+            original_before = (
+                len(unrelated_before) == original["preexisting_session_count"]
+                and _sha256(unrelated_before_bytes) == original["preexisting_session_identity_sha256"]
+            )
+            result["original_baseline_reconciliation_before"] = original_before
+            _require(original_before, "P7_SYNC_BASELINE_RECONCILIATION_STOP")
+
+            temp_workdir = Path(tempfile.mkdtemp(prefix="codex-control-p7-sync-", dir="/tmp"))
+            cwd = TrustedWorkingDirectory(str(temp_workdir))
+            sync_nonce = secrets.token_hex(24)
+            barrier_marker = secrets.token_hex(24)
+            prompt_marker = secrets.token_hex(24)
+            barrier_path = temp_workdir / f"p7-interrupt-ready-{sync_nonce}.txt"
+            _require(
+                barrier_path.parent == temp_workdir
+                and not barrier_path.exists()
+                and not barrier_path.is_symlink(),
+                "P7_SYNC_BARRIER_PREEXISTING",
+            )
+            result["marker_sha256"] = [
+                _sha256(barrier_marker.encode("utf-8")),
+                _sha256(prompt_marker.encode("utf-8")),
+            ]
+            command = f"printf {barrier_marker} > {barrier_path} && sleep 120"
+
+            profile = CodexProfile("codex3", str(home), "P7 codex3 synchronized continuation")
+            parent_environment = dict(os.environ)
+            parent_environment["CODEX_HOME"] = str(home)
+            parent_environment["HOME"] = str(home)
+            manager = CodexRuntimeManager(
+                [profile],
+                client_version=VERSION,
+                executable=CODEX,
+                parent_environment=parent_environment,
+            )
+            counting = _counting_manager(manager)
+            catalog_adapter = CodexModelCatalogAdapter(counting)
+            thread_adapter = CodexThreadLifecycleAdapter(counting, catalog_adapter)
+            turn_adapter = CodexTurnLifecycleAdapter(counting, catalog_adapter)
+
+            runtime = await counting.acquire("codex3")
+            catalog = await catalog_adapter.get_catalog("codex3", refresh=True)
+            visible_defaults = tuple(model for model in catalog.models if not model.hidden and model.is_default)
+            _require(len(catalog.models) > 0 and len(visible_defaults) == 1, "P7_SYNC_CATALOG_INVALID")
+            model = visible_defaults[0]
+            effort = model.default_reasoning_effort
+            _require(effort in model.supported_reasoning_efforts, "P7_SYNC_CATALOG_INVALID")
+            result["model_id"] = model.model_id
+            result["reasoning_effort"] = effort
+
+            retained_binding = ThreadBinding("codex3", recovery_record["thread_id"])
+            resumed = await thread_adapter.resume(binding=retained_binding, working_directory=cwd)
+            _require(
+                resumed.status is ThreadOperationStatus.RESUME_CONFIRMED
+                and resumed.binding is retained_binding,
+                "P7_SYNC_RESUME_FAILED",
+            )
+            result["resume_status"] = resumed.status.name
+
+            turn7_start = await turn_adapter.start_turn(
+                thread_binding=retained_binding,
+                model_id=model.model_id,
+                reasoning_effort=effort,
+                user_text=(
+                    f"Use command execution and execute exactly this supplied workspace-only command once: {command}. "
+                    "Do not simulate. Do not explain instead. Do not substitute. Do not prepend or append another "
+                    f"requested action. Do not request escalation. The ordinary prompt marker is {prompt_marker}."
+                ),
+                working_directory=cwd,
+            )
+            result["turn7_start"] = turn7_start.status.name
+            _require(
+                turn7_start.status is TurnStartStatus.CONFIRMED and turn7_start.binding is not None,
+                "P7_SYNC_TURN_START_FAILED",
+            )
+            turn7_binding = turn7_start.binding
+            result["turn7_id_sha256"] = _sha256(turn7_binding.turn_id.encode("utf-8"))
+
+            barrier_file_seen = False
+            final_sleep_count = 0
+            activity_deadline = time.monotonic() + 30.0
+            while time.monotonic() < activity_deadline:
+                file_pass = _barrier_file_proof(barrier_path, barrier_marker)
+                barrier_file_seen = barrier_file_seen or file_pass
+                sleep_count = len(_sync_sleep_pids(temp_workdir))
+                final_sleep_count = sleep_count
+                if file_pass and sleep_count >= 1 and _barrier_file_proof(barrier_path, barrier_marker):
+                    result["turn7_barrier_file"] = "PASS"
+                    result["turn7_sleep_process_count"] = sleep_count
+                    result["turn7_activity_barrier"] = "PASS"
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                result["turn7_barrier_file"] = "PASS" if barrier_file_seen else "FAIL"
+                result["turn7_sleep_process_count"] = final_sleep_count
+                result["turn7_activity_barrier"] = "FAIL"
+                raise _P7Stop("P7_SYNC_ACTIVITY_BARRIER_NOT_REACHED")
+
+            acquire_before_interrupt = counting.acquire_count
+            try:
+                interrupt = await turn_adapter.interrupt_turn(turn7_binding)
+            except Exception:
+                result["turn7_interrupt_status"] = "UNKNOWN"
+                result["turn7_interrupt_terminal"] = "NONE"
+                result["turn7_interrupt_runtime_reacquire"] = "FAIL"
+                raise _P7Stop("P7_SYNC_INTERRUPT_FAILED") from None
+            result["turn7_interrupt_status"] = interrupt.status.name
+            result["turn7_interrupt_terminal"] = (
+                interrupt.terminal_result.status.name if interrupt.terminal_result is not None else "NONE"
+            )
+            result["turn7_interrupt_runtime_reacquire"] = (
+                "YES" if counting.acquire_count != acquire_before_interrupt else "NO"
+            )
+            _require(
+                interrupt.status in {TurnInterruptStatus.CONFIRMED, TurnInterruptStatus.RECONCILED}
+                and interrupt.terminal_result is not None
+                and interrupt.terminal_result.status is TurnTerminalStatus.FAILED
+                and counting.acquire_count == acquire_before_interrupt,
+                "P7_SYNC_INTERRUPT_FAILED",
+            )
+            interrupt_pass = True
+
+            child_deadline = time.monotonic() + 5.0
+            child_count = len(_sync_sleep_pids(temp_workdir))
+            while child_count and time.monotonic() < child_deadline:
+                await asyncio.sleep(0.05)
+                child_count = len(_sync_sleep_pids(temp_workdir))
+            result["turn7_child_final_live_count"] = child_count
+            result["sync_child_process_live"] = "YES" if child_count else "NO"
+            child_natural_pass = child_count == 0
+            result["turn7_child_natural_exit"] = "PASS" if child_natural_pass else "FAIL"
+            _require(child_natural_pass, "P7_SYNC_CHILD_NATURAL_EXIT_FAILED")
+
+            barrier_cleanup_pass = _remove_barrier(barrier_path, temp_workdir)
+            result["sync_barrier_file_removed"] = "YES" if barrier_cleanup_pass else "NO"
+            _require(barrier_cleanup_pass, "P7_SYNC_BARRIER_CLEANUP_FAILED")
+
+            await manager.shutdown_profile("codex3")
+            runtime_shutdown_pass = True
+            result["runtime_cleanup_pass"] = "PASS" if runtime_shutdown_pass else "FAIL"
+            _require(runtime_shutdown_pass, "P7_SYNC_RUNTIME_CLEANUP_FAILED")
+
+            predelete = _scan_home(
+                home,
+                thread_id=retained_binding.thread_id,
+                markers=(barrier_marker, prompt_marker),
+            )
+            result["predelete_scan_errors"] = predelete["scan_errors"]
+            result["predelete_new_content_marker_matches"] = predelete["content_marker_matches"]
+            result["predelete_new_content_categories"] = predelete["content_marker_matches_by_category"]
+            _require(predelete["scan_errors"] == 0, "P7_SYNC_PREDELETE_SCAN_FAILED")
+            _require(
+                predelete["content_marker_matches"] > 0,
+                "P7_SYNC_PREDELETE_PROOF_INCONCLUSIVE",
+            )
+            result["predelete_physical_proof"] = "PASS"
+
+            result["thread_delete_calls"] = 1
+            try:
+                delete = await thread_adapter.delete(binding=retained_binding)
+            except Exception:
+                result["delete_status"] = "DELETE_UNKNOWN"
+                raise _P7Stop("P7_SYNC_DELETE_UNKNOWN_STOP") from None
+            result["delete_status"] = delete.status.name
+            _require(delete.status is ThreadOperationStatus.DELETE_CONFIRMED, "P7_SYNC_DELETE_UNKNOWN_STOP")
+            delete_confirmed = True
+
+            postdelete_shutdown = await _shutdown_manager(manager)
+            result["runtime_cleanup_pass"] = "PASS" if postdelete_shutdown else "FAIL"
+            _require(postdelete_shutdown, "P7_SYNC_RUNTIME_CLEANUP_FAILED")
+
+            postdelete = _scan_home(
+                home,
+                thread_id=retained_binding.thread_id,
+                markers=(barrier_marker, prompt_marker),
+            )
+            result["postdelete_scan_errors"] = postdelete["scan_errors"]
+            result["postdelete_new_content_marker_matches"] = postdelete["content_marker_matches"]
+            result["postdelete_active_thread_id_matches"] = sum(
+                postdelete["thread_id_matches_by_category"][name] for name in ("SESSION_HISTORY", "STATE_DB")
+            )
+            result["postdelete_log_thread_id_residuals"] = postdelete["log_only_identifier_matches"]
+            result["postdelete_unclassified_thread_id_matches"] = sum(
+                postdelete["thread_id_matches_by_category"][name] for name in ("CACHE", "OTHER")
+            )
+            _require(postdelete["scan_errors"] == 0, "P7_SYNC_POSTDELETE_SCAN_FAILED")
+            _require(postdelete["content_marker_matches"] == 0, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+            _require(
+                all(
+                    postdelete["thread_id_matches_by_category"][name] == 0
+                    for name in ("SESSION_HISTORY", "STATE_DB", "CACHE", "OTHER")
+                ),
+                "P7_HARD_DELETE_RESIDUAL_BLOCKER",
+            )
+            _require(result["postdelete_active_thread_id_matches"] == 0, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+            _require(result["postdelete_unclassified_thread_id_matches"] == 0, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+
+            final_baseline = _home_baseline(home)
+            final_owned, final_owned_errors = _session_identities_with_thread(home, retained_binding.thread_id)
+            _require(final_baseline["scan_errors"] + final_owned_errors == 0, "P7_SYNC_POSTDELETE_SCAN_FAILED")
+            _require(not final_owned, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+            final_identity_bytes = "\n".join(
+                f"{path}\0{category}" for path, category in sorted(final_baseline["session_identities"])
+            ).encode("utf-8")
+            original_after = (
+                len(final_baseline["session_identities"]) == original["preexisting_session_count"]
+                and _sha256(final_identity_bytes) == original["preexisting_session_identity_sha256"]
+            )
+            result["original_baseline_reconciliation_after"] = original_after
+            result["preexisting_session_artifacts_removed"] = 0
+            _require(original_after, "P7_UNRELATED_STORAGE_MUTATION_BLOCKER")
+            postdelete_gate_pass = True
+            result["status"] = "PASS"
+            result["stage"] = "COMPLETE"
+        except _P7Stop as stop:
+            result["status"] = "BLOCKED" if stop.blocked else "FAIL"
+            result["stage"] = stop.stage
+        except Exception:
+            result["status"] = "FAIL"
+            result["stage"] = "P7_SYNC_UNEXPECTED_FAILURE"
+        finally:
+            if manager is not None:
+                shutdown_ok = await _shutdown_manager(manager)
+            else:
+                shutdown_ok = True
+            if temp_workdir is not None:
+                if not child_natural_pass:
+                    final_count, signal_used = _safety_reap_sync_children(temp_workdir)
+                    result["turn7_child_cleanup_signal_used"] = "YES" if signal_used else "NO"
+                else:
+                    final_count = len(_sync_sleep_pids(temp_workdir))
+                result["turn7_child_final_live_count"] = final_count
+                result["sync_child_process_live"] = "YES" if final_count else "NO"
+                if barrier_path is not None and result["sync_barrier_file_removed"] != "YES":
+                    barrier_cleanup_pass = _remove_barrier(barrier_path, temp_workdir)
+                    result["sync_barrier_file_removed"] = "YES" if barrier_cleanup_pass else "NO"
+                try:
+                    shutil.rmtree(temp_workdir)
+                except OSError:
+                    pass
+                result["sync_temp_workdir_removed"] = "YES" if not temp_workdir.exists() else "NO"
+            result["runtime_cleanup_pass"] = "PASS" if shutdown_ok and result["sync_child_process_live"] == "NO" else "FAIL"
+            if result["status"] == "PASS" and result["runtime_cleanup_pass"] != "PASS":
+                result["status"] = "FAIL"
+                result["stage"] = "P7_SYNC_RUNTIME_CLEANUP_FAILED"
+            if result["status"] == "PASS" and result["sync_temp_workdir_removed"] != "YES":
+                result["status"] = "FAIL"
+                result["stage"] = "P7_SYNC_TEMP_CLEANUP_FAILED"
+            if result["status"] == "PASS" and result["sync_barrier_file_removed"] != "YES":
+                result["status"] = "FAIL"
+                result["stage"] = "P7_SYNC_BARRIER_CLEANUP_FAILED"
+            if (
+                result["status"] == "PASS"
+                and interrupt_pass
+                and child_natural_pass
+                and runtime_shutdown_pass
+                and result["predelete_physical_proof"] == "PASS"
+                and delete_confirmed
+                and postdelete_gate_pass
+                and result["runtime_cleanup_pass"] == "PASS"
+                and result["sync_temp_workdir_removed"] == "YES"
+                and recovery_path is not None
+            ):
+                try:
+                    recovery_path.unlink()
+                    result["recovery_record_removed"] = "YES"
+                except OSError:
+                    result["status"] = "FAIL"
+                    result["stage"] = "P7_SYNC_RECOVERY_CLEANUP_FAILED"
+            try:
+                _write_result(result_path, result)
+            except _P7Stop:
+                result["status"] = "FAIL"
+                result["stage"] = "P7_SYNC_RESULT_WRITE_FAILED"
+
+        if result["status"] != "PASS":
+            self.fail(str(result["stage"]))
+
 
 if __name__ == "__main__" and "--isolation-preflight" in sys.argv:
     print(f"ELIGIBLE_PROFILE={_eligible_profile_alias() or 'P7_ISOLATION_GATE_BLOCKED'}")
