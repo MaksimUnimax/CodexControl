@@ -12,11 +12,14 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shlex
+import signal
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from typing import Any
 
@@ -49,6 +52,8 @@ VERSION = "codex-cli 0.144.6"
 SCHEMA_SHA256 = "40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466"
 ARCHITECT_BASE = "66f094f3592467d16382482f133b288d521c4873"
 REAL_GATE = "AUTHORIZED_2026_09_08"
+RECOVERY_GATE = "AUTHORIZED_RECOVERY_2026_09_09"
+RECOVERY_THREAD_SHA256 = "8faed122df2a4b7d331eb20493bde272160b5f1ef2cf856c758090cd6369a266"
 PROFILE_HOMES = {
     "codex3": "/root/.codex_third",
     "codex2": "/root/.codex_second",
@@ -279,6 +284,34 @@ def _home_baseline(home: Path) -> dict[str, Any]:
         "session_identity_sha256": _sha256(identity_bytes),
         "scan_errors": scan_errors[0],
     }
+
+
+def _session_identities_with_thread(home: Path, thread_id: str) -> tuple[set[tuple[str, str]], int]:
+    identities: set[tuple[str, str]] = set()
+    scan_errors = [0]
+    needle = ((THREAD_ID, thread_id.encode("utf-8")),)
+
+    def onerror(_error: OSError) -> None:
+        scan_errors[0] += 1
+
+    for root, directories, files in os.walk(home, followlinks=False, onerror=onerror):
+        _walk_directories(Path(root), directories, scan_errors)
+        for name in files:
+            path = Path(root) / name
+            info, lstat_failed = _lstat_regular(path)
+            if lstat_failed:
+                scan_errors[0] += 1
+                continue
+            if info is None:
+                continue
+            relative = path.relative_to(home)
+            if _category(relative) != "SESSION_HISTORY":
+                continue
+            counts, _matched_bytes, _total_bytes, file_scan_errors = _scan_file(path, needle)
+            scan_errors[0] += file_scan_errors
+            if counts[THREAD_ID]:
+                identities.add((relative.as_posix(), "SESSION_HISTORY"))
+    return identities, scan_errors[0]
 
 
 def _scan_file(path: Path, needles: tuple[tuple[str, bytes], ...]) -> tuple[dict[str, int], int, int, int]:
@@ -591,6 +624,250 @@ class _StrictApprovalOperator:
             and f"cwd: {self.cwd}" in context
             and self.target in "\n".join(request.context_lines)
         )
+        if allowed:
+            self.allow_count += 1
+            return ApprovalDecision.ALLOW
+        return ApprovalDecision.DENY
+
+
+def _safe_json_file(path: Path, maximum_bytes: int) -> dict[str, Any] | None:
+    try:
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or info.st_uid != 0
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_size > maximum_bytes
+        ):
+            return None
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _recovery_record_identity() -> tuple[Path, dict[str, Any]]:
+    matches: list[tuple[Path, dict[str, Any]]] = []
+    for path in Path("/var/tmp").glob("codex-control-p7-recovery-*.json"):
+        value = _safe_json_file(path, 64 * 1024)
+        if value is None:
+            continue
+        thread_id = value.get("thread_id")
+        nonce = value.get("run_nonce")
+        if (
+            value.get("profile_alias") == "codex3"
+            and value.get("codex_home") == PROFILE_HOMES["codex3"]
+            and value.get("commit_a_sha") == "740decef73627c9b44dfce1a0f85703e59fd6183"
+            and value.get("stage") == "START_CONFIRMED"
+            and isinstance(thread_id, str)
+            and _sha256(thread_id.encode("utf-8")) == RECOVERY_THREAD_SHA256
+            and isinstance(nonce, str)
+            and len(nonce) == 48
+            and all(character in "0123456789abcdef" for character in nonce)
+        ):
+            matches.append((path, value))
+    _require(len(matches) == 1, "P7_RECOVERY_RECORD_IDENTITY_STOP")
+    return matches[0]
+
+
+def _original_result_identity() -> dict[str, Any]:
+    matches: list[dict[str, Any]] = []
+    try:
+        candidates = tuple(Path("/var/tmp").iterdir())
+    except OSError:
+        candidates = ()
+    for path in candidates:
+        value = _safe_json_file(path, 256 * 1024)
+        if value is None:
+            continue
+        if (
+            value.get("commit_a_sha") == "740decef73627c9b44dfce1a0f85703e59fd6183"
+            and value.get("thread_id_sha256") == RECOVERY_THREAD_SHA256
+            and value.get("stage") == "P7_REAL_APPROVAL_NOT_OBSERVED"
+            and value.get("profile_alias") == "codex3"
+            and isinstance(value.get("preexisting_session_count"), int)
+            and not isinstance(value.get("preexisting_session_count"), bool)
+            and isinstance(value.get("preexisting_session_identity_sha256"), str)
+        ):
+            matches.append(value)
+    _require(len(matches) == 1, "P7_RECOVERY_BASELINE_IDENTITY_STOP")
+    return {
+        "preexisting_session_count": matches[0]["preexisting_session_count"],
+        "preexisting_session_identity_sha256": matches[0]["preexisting_session_identity_sha256"],
+    }
+
+
+def _exact_sentinel_processes(path: Path) -> list[int]:
+    encoded = str(path).encode("utf-8")
+    matches: list[int] = []
+    try:
+        entries = tuple(os.scandir("/proc"))
+    except OSError:
+        return matches
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            tokens = Path("/proc", entry.name, "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if any(encoded in token for token in tokens):
+            matches.append(int(entry.name))
+    return matches
+
+
+def _safe_sentinel_cleanup(path: Path) -> tuple[int, int, bool, bool]:
+    owned = _exact_sentinel_processes(path)
+    for pid in owned:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+    deadline = time.monotonic() + 5.0
+    live: list[int] = []
+    while time.monotonic() < deadline:
+        live = []
+        for pid in owned:
+            try:
+                os.kill(pid, 0)
+                live.append(pid)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                live.append(pid)
+        if not live:
+            break
+        time.sleep(0.05)
+    for pid in live:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            pass
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        live = []
+        for pid in owned:
+            try:
+                os.kill(pid, 0)
+                live.append(pid)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                live.append(pid)
+        if not live:
+            break
+        time.sleep(0.05)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return len(owned), len(live), True, True
+    except OSError:
+        return len(owned), len(live), False, False
+    safe_file = stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode) and info.st_uid == 0
+    if not safe_file:
+        return len(owned), len(live), False, False
+    try:
+        path.unlink()
+    except OSError:
+        return len(owned), len(live), False, False
+    return len(owned), len(live), True, True
+
+
+class _RecoveryApprovalOperator:
+    _WRAPPERS = frozenset(("bash", "/bin/bash", "sh", "/bin/sh"))
+
+    def __init__(
+        self,
+        *,
+        thread_id: str,
+        recovery_cwd: str,
+        command: str,
+        marker: str,
+        sentinel: str,
+        expected_turn_id: asyncio.Future[str],
+    ) -> None:
+        self._thread_id = thread_id
+        self._recovery_cwd = recovery_cwd
+        self._command = command
+        self._marker = marker
+        self._sentinel = sentinel
+        self._expected_turn_id = expected_turn_id
+        self.request_count = 0
+        self.first_request_kind: ApprovalKind | None = None
+        self.allow_count = 0
+        self.request_observed = False
+        self.mismatch_flags: tuple[str, ...] = ()
+
+    @staticmethod
+    def _context_value(lines: tuple[str, ...], prefix: str) -> str | None:
+        for line in lines:
+            if line.startswith(prefix):
+                return line[len(prefix):]
+        return None
+
+    def _safe_command_relation(self, requested: str | None) -> bool:
+        if requested is None:
+            return False
+        try:
+            expected = shlex.split(self._command)
+            observed = shlex.split(requested)
+        except ValueError:
+            return False
+        if observed == expected:
+            return True
+        return (
+            len(expected) == 3
+            and len(observed) == 3
+            and observed[0] in self._WRAPPERS
+            and observed[1] == "-lc"
+            and observed[2] == expected[2]
+        )
+
+    async def decide(self, request: ApprovalRequest) -> ApprovalDecision:
+        self.request_count += 1
+        self.request_observed = True
+        self.first_request_kind = request.kind
+        flags: set[str] = set()
+        if self.request_count != 1:
+            flags.add("REQUEST_COUNT")
+        if request.kind is not ApprovalKind.COMMAND_EXECUTION:
+            flags.add("KIND")
+        if request.thread_id != self._thread_id:
+            flags.add("THREAD")
+        turn_id: str | None = None
+        if not self._expected_turn_id.done():
+            try:
+                turn_id = await asyncio.wait_for(asyncio.shield(self._expected_turn_id), timeout=30)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                flags.add("TURN_ID_UNAVAILABLE")
+                turn_id = None
+        else:
+            try:
+                turn_id = self._expected_turn_id.result()
+            except (asyncio.CancelledError, Exception):
+                turn_id = None
+        if turn_id is None or request.turn_id != turn_id:
+            flags.add("TURN")
+        cwd = self._context_value(request.context_lines, "cwd: ")
+        command = self._context_value(request.context_lines, "command: ")
+        if cwd != self._recovery_cwd:
+            flags.add("CWD")
+        command_context = command or ""
+        if self._marker not in command_context:
+            flags.add("COMMAND_MARKER")
+        if self._sentinel not in command_context:
+            flags.add("SENTINEL")
+        if "sleep 120" not in command_context:
+            flags.add("DELAY")
+        if not self._safe_command_relation(command):
+            flags.add("COMMAND_GRAMMAR")
+        self.mismatch_flags = tuple(sorted(flags))
+        allowed = not flags
         if allowed:
             self.allow_count += 1
             return ApprovalDecision.ALLOW
@@ -939,6 +1216,398 @@ class P7RealCodexT3Acceptance(unittest.IsolatedAsyncioTestCase):
             result["recovery_record_removed"] = recovery_path is not None and not recovery_path.exists()
             result["recovery_record_present"] = recovery_path is not None and recovery_path.exists()
             result["cleanup_pass"] = cleanup_pass
+            try:
+                _write_result(result_path, result)
+            except _P7Stop:
+                result["status"] = "FAIL"
+                result["stage"] = "P7_RESULT_WRITE_FAILED"
+
+        if result["status"] != "PASS":
+            self.fail(str(result["stage"]))
+
+    async def test_authorized_recovery_turn_and_delete(self) -> None:
+        if os.environ.get("CODEXCONTROL_P7_RECOVERY_T3") != RECOVERY_GATE:
+            raise unittest.SkipTest("P7 same-thread recovery gate is not authorized")
+
+        expected_head = os.environ.get("CODEXCONTROL_P7_EXPECTED_HEAD", "")
+        expected_thread_sha = os.environ.get("CODEXCONTROL_P7_RECOVERY_THREAD_SHA256", "")
+        result_value = os.environ.get("CODEXCONTROL_P7_RECOVERY_RESULT_PATH", "")
+        result_path = Path(result_value)
+        _require(
+            len(expected_head) == 40
+            and all(character in "0123456789abcdef" for character in expected_head)
+            and expected_thread_sha == RECOVERY_THREAD_SHA256
+            and result_path.is_absolute()
+            and result_path.parent == Path("/var/tmp")
+            and len(result_path.name) <= 128
+            and not result_path.exists()
+            and not result_path.is_symlink(),
+            "P7_GATE_INVALID",
+        )
+
+        result: dict[str, Any] = {
+            "status": "FAIL",
+            "stage": "P7_RECOVERY_NOT_STARTED",
+            "commit_e_sha": expected_head,
+            "profile_alias": "codex3",
+            "thread_id_sha256": RECOVERY_THREAD_SHA256,
+            "executable_path_kind": None,
+            "executable_resolved_target_safe": None,
+            "model_id": None,
+            "reasoning_effort": None,
+            "resume_status": "NOT_RUN",
+            "turn4_start_status": "NOT_RUN",
+            "approval_request_observed": "NO",
+            "approval_request_count": 0,
+            "approval_kind": "NONE",
+            "approval_mismatch_flags": [],
+            "approval_allow_count": 0,
+            "approval_result": "NOT_RUN",
+            "approval_wire_response_count": 0,
+            "interrupt_status": "NOT_RUN",
+            "interrupt_terminal_status": "NOT_RUN",
+            "interrupt_runtime_reacquire": "NOT_RUN",
+            "recovery_sentinel_after_interrupt": "NOT_RUN",
+            "baseline_scan_errors": None,
+            "predelete_scan_errors": None,
+            "predelete_recovery_content_markers": 0,
+            "predelete_scan_categories": {},
+            "predelete_physical_proof": "NOT_RUN",
+            "thread_delete_calls": 0,
+            "delete_status": "NOT_RUN",
+            "delete_retry": False,
+            "postdelete_scan_errors": None,
+            "postdelete_recovery_content_markers": None,
+            "postdelete_active_thread_id_matches": None,
+            "postdelete_log_thread_id_residuals": None,
+            "postdelete_unclassified_thread_id_residuals": None,
+            "original_baseline_reconciliation_before_turn": False,
+            "original_baseline_reconciliation_after_delete": False,
+            "preexisting_session_artifacts_removed": None,
+            "recovery_record_removed": False,
+            "runtime_cleanup_pass": False,
+            "recovery_temp_workdir_removed": False,
+            "recovery_sentinel_removed_or_absent": False,
+            "recovery_delayed_process_live": "UNKNOWN",
+            "real_thread_count": 1,
+            "real_turn_count": 3,
+        }
+
+        manager: CodexRuntimeManager | None = None
+        counting: Any | None = None
+        recovery_path: Path | None = None
+        recovery_record: dict[str, Any] | None = None
+        sentinel_path: Path | None = None
+        temp_workdir: Path | None = None
+        approval_task: asyncio.Task[Any] | None = None
+        delete_confirmed = False
+        postdelete_gate_pass = False
+        approval_pass = False
+        interrupt_pass = False
+        sentinel_cleanup_safe = True
+        delayed_process_live = 0
+        shutdown_ok = True
+        try:
+            _git_facts(expected_head)
+            path_kind, resolved_target_safe = _verify_installed_authority()
+            result["executable_path_kind"] = path_kind
+            result["executable_resolved_target_safe"] = "PASS" if resolved_target_safe else "FAIL"
+
+            recovery_path, recovery_record = _recovery_record_identity()
+            original = _original_result_identity()
+            _require(_eligible_profile_alias() == "codex3", "P7_RECOVERY_PROFILE_BUSY_STOP", blocked=True)
+            home = _safe_profile_path("codex3")
+            baseline = _home_baseline(home)
+            owned_before, owned_before_errors = _session_identities_with_thread(home, recovery_record["thread_id"])
+            result["baseline_scan_errors"] = baseline["scan_errors"] + owned_before_errors
+            _require(result["baseline_scan_errors"] == 0, "P7_ORIGINAL_BASELINE_RECONCILIATION_STOP")
+            unrelated_before = baseline["session_identities"] - owned_before
+            unrelated_before_bytes = "\n".join(
+                f"{path}\0{category}" for path, category in sorted(unrelated_before)
+            ).encode("utf-8")
+            before_reconciled = (
+                len(unrelated_before) == original["preexisting_session_count"]
+                and _sha256(unrelated_before_bytes) == original["preexisting_session_identity_sha256"]
+            )
+            result["original_baseline_reconciliation_before_turn"] = before_reconciled
+            _require(before_reconciled, "P7_ORIGINAL_BASELINE_RECONCILIATION_STOP")
+
+            new_nonce = secrets.token_hex(24)
+            markers = tuple(secrets.token_hex(24) for _ in range(4))
+            command_marker, prompt_marker, _, _ = markers
+            temp_workdir = Path(tempfile.mkdtemp(prefix="codex-control-p7-recovery-", dir="/tmp"))
+            cwd = TrustedWorkingDirectory(str(temp_workdir))
+            sentinel_path = Path(f"/var/tmp/codex-control-p7-recovery-sentinel-{new_nonce}.txt")
+            try:
+                sentinel_path.lstat()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                raise _P7Stop("P7_RECOVERY_SENTINEL_SAFETY_STOP") from None
+            else:
+                raise _P7Stop("P7_RECOVERY_SENTINEL_SAFETY_STOP")
+
+            inner_command = f"sleep 120; printf {command_marker} > {sentinel_path}"
+            command = f"sh -lc '{inner_command}'"
+            retained_binding = ThreadBinding("codex3", recovery_record["thread_id"])
+            profile = CodexProfile("codex3", str(home), "P7 codex3 recovery")
+            parent_environment = dict(os.environ)
+            parent_environment["CODEX_HOME"] = str(home)
+            parent_environment["HOME"] = str(home)
+            manager = CodexRuntimeManager(
+                [profile],
+                client_version=VERSION,
+                executable=CODEX,
+                parent_environment=parent_environment,
+            )
+            counting = _counting_manager(manager)
+            catalog_adapter = CodexModelCatalogAdapter(counting)
+            thread_adapter = CodexThreadLifecycleAdapter(counting, catalog_adapter)
+            turn_adapter = CodexTurnLifecycleAdapter(counting, catalog_adapter)
+
+            runtime = await counting.acquire("codex3")
+            catalog = await catalog_adapter.get_catalog("codex3", refresh=True)
+            visible_defaults = tuple(model for model in catalog.models if not model.hidden and model.is_default)
+            _require(len(catalog.models) > 0 and len(visible_defaults) == 1, "P7_AUTHENTICATED_CATALOG_INVALID")
+            model = visible_defaults[0]
+            effort = model.default_reasoning_effort
+            _require(effort in model.supported_reasoning_efforts, "P7_AUTHENTICATED_CATALOG_INVALID")
+            result["model_id"] = model.model_id
+            result["reasoning_effort"] = effort
+
+            resumed = await thread_adapter.resume(binding=retained_binding, working_directory=cwd)
+            _require(
+                resumed.status is ThreadOperationStatus.RESUME_CONFIRMED
+                and resumed.binding is retained_binding,
+                "P7_RECOVERY_RESUME_FAILED",
+            )
+            result["resume_status"] = resumed.status.name
+
+            expected_turn_id = asyncio.get_running_loop().create_future()
+            operator = _RecoveryApprovalOperator(
+                thread_id=retained_binding.thread_id,
+                recovery_cwd=str(temp_workdir),
+                command=command,
+                marker=command_marker,
+                sentinel=str(sentinel_path),
+                expected_turn_id=expected_turn_id,
+            )
+            live_runtime = counting.last_runtime
+            _require(live_runtime is not None and live_runtime.generation == runtime.generation, "P7_RUNTIME_OWNERSHIP_FAILED")
+            bridge = CodexApprovalBridge(profile_id="codex3", client=live_runtime.client, operator=operator)
+            approval_task = asyncio.create_task(bridge.handle_next())
+            for _ in range(2):
+                await asyncio.sleep(0)
+            _require(not approval_task.done(), "P7_RECOVERY_APPROVAL_ARM_STOP")
+
+            turn4_start = await turn_adapter.start_turn(
+                thread_binding=retained_binding,
+                model_id=model.model_id,
+                reasoning_effort=effort,
+                user_text=(
+                    f"Use the command-execution tool and execute exactly this supplied command once: {command}. "
+                    f"The recovery marker is {prompt_marker}. Do not simulate, explain, substitute, or execute any "
+                    "other action. Because this requires permission outside the workspace, request operator "
+                    "approval rather than choosing an alternative."
+                ),
+                working_directory=cwd,
+            )
+            result["turn4_start_status"] = turn4_start.status.name
+            _require(
+                turn4_start.status is TurnStartStatus.CONFIRMED
+                and turn4_start.binding is not None,
+                "P7_RECOVERY_TURN4_START_FAILED",
+            )
+            turn4_binding = turn4_start.binding
+            result["real_turn_count"] = 4
+            _require(not expected_turn_id.done(), "P7_RECOVERY_TURN4_ID_PUBLICATION_STOP")
+            expected_turn_id.set_result(turn4_binding.turn_id)
+
+            approval: Any | None = None
+            approval_timed_out = False
+            try:
+                approval = await asyncio.wait_for(asyncio.shield(approval_task), timeout=90)
+            except asyncio.TimeoutError:
+                approval_timed_out = True
+                if not approval_task.done():
+                    approval_task.cancel()
+                    await asyncio.gather(approval_task, return_exceptions=True)
+            except asyncio.CancelledError:
+                if not approval_task.done():
+                    approval_task.cancel()
+                    await asyncio.gather(approval_task, return_exceptions=True)
+                raise _P7Stop("P7_RECOVERY_APPROVAL_TIMEOUT") from None
+
+            result["approval_request_observed"] = "YES" if operator.request_observed else "NO"
+            result["approval_request_count"] = operator.request_count
+            result["approval_kind"] = operator.first_request_kind.name if operator.first_request_kind is not None else "NONE"
+            result["approval_mismatch_flags"] = list(operator.mismatch_flags)
+            result["approval_allow_count"] = operator.allow_count
+            if approval is None:
+                result["approval_result"] = "TIMEOUT"
+                result["approval_wire_response_count"] = 0
+            else:
+                result["approval_result"] = approval.status.name
+                result["approval_wire_response_count"] = int(
+                    approval.status in {ApprovalHandlingStatus.ALLOWED, ApprovalHandlingStatus.DENIED}
+                )
+
+            if approval_timed_out:
+                approval_stage = (
+                    "P7_RECOVERY_APPROVAL_STRICT_MISMATCH"
+                    if operator.request_observed
+                    else "P7_RECOVERY_APPROVAL_TIMEOUT"
+                )
+                raise _P7Stop(approval_stage)
+            if approval is None or approval.status is ApprovalHandlingStatus.RESPONSE_UNKNOWN:
+                if approval is not None:
+                    result["approval_result"] = "RESPONSE_UNKNOWN"
+                raise _P7Stop("P7_RECOVERY_APPROVAL_RESPONSE_UNKNOWN")
+            if operator.request_observed and operator.mismatch_flags:
+                raise _P7Stop("P7_RECOVERY_APPROVAL_STRICT_MISMATCH")
+            if approval.status is ApprovalHandlingStatus.DENIED:
+                raise _P7Stop("P7_RECOVERY_APPROVAL_DENIED")
+            approval_pass = (
+                approval.status is ApprovalHandlingStatus.ALLOWED
+                and approval.kind is ApprovalKind.COMMAND_EXECUTION
+                and operator.request_count == 1
+                and operator.allow_count == 1
+                and not operator.mismatch_flags
+                and result["approval_wire_response_count"] == 1
+            )
+            if not approval_pass:
+                raise _P7Stop("P7_RECOVERY_APPROVAL_STRICT_MISMATCH")
+
+            acquire_before_interrupt = counting.acquire_count
+            interrupt = await turn_adapter.interrupt_turn(turn4_binding)
+            result["interrupt_status"] = interrupt.status.name
+            result["interrupt_terminal_status"] = (
+                interrupt.terminal_result.status.name if interrupt.terminal_result is not None else "NOT_RUN"
+            )
+            result["interrupt_runtime_reacquire"] = "YES" if counting.acquire_count != acquire_before_interrupt else "NO"
+            if (
+                interrupt.status not in {TurnInterruptStatus.CONFIRMED, TurnInterruptStatus.RECONCILED}
+                or interrupt.terminal_result is None
+                or interrupt.terminal_result.status is not TurnTerminalStatus.FAILED
+            ):
+                raise _P7Stop("P7_RECOVERY_INTERRUPT_AMBIGUOUS")
+            if counting.acquire_count != acquire_before_interrupt:
+                raise _P7Stop("P7_RECOVERY_INTERRUPT_RUNTIME_REACQUIRE")
+            if sentinel_path.exists() or sentinel_path.is_symlink():
+                result["recovery_sentinel_after_interrupt"] = "PRESENT"
+                raise _P7Stop("P7_SENTINEL_AFTER_INTERRUPT")
+            result["recovery_sentinel_after_interrupt"] = "ABSENT"
+            interrupt_pass = True
+
+            try:
+                await manager.shutdown_profile("codex3")
+            except Exception:
+                raise _P7Stop("P7_RECOVERY_RUNTIME_CLEANUP_STOP") from None
+            process_count, live_count, removed, safe = _safe_sentinel_cleanup(sentinel_path)
+            delayed_process_live = live_count
+            sentinel_cleanup_safe = safe
+            result["recovery_delayed_process_count"] = process_count
+            _require(safe and live_count == 0, "P7_RECOVERY_SENTINEL_SAFETY_STOP")
+
+            predelete = _scan_home(home, thread_id=retained_binding.thread_id, markers=markers)
+            result["predelete_scan_errors"] = predelete["scan_errors"]
+            result["predelete_recovery_content_markers"] = predelete["content_marker_matches"]
+            result["predelete_scan_categories"] = predelete["content_marker_matches_by_category"]
+            _require(predelete["scan_errors"] == 0, "P7_RECOVERY_PREDELETE_SCAN_STOP")
+            _require(predelete["content_marker_matches"] > 0, "P7_RECOVERY_PREDELETE_PROOF_INCONCLUSIVE")
+            result["predelete_physical_proof"] = "PASS"
+
+            result["thread_delete_calls"] = 1
+            try:
+                delete = await thread_adapter.delete(binding=retained_binding)
+            except Exception:
+                raise _P7Stop("P7_RECOVERY_DELETE_UNKNOWN_STOP") from None
+            result["delete_status"] = delete.status.name
+            _require(delete.status is ThreadOperationStatus.DELETE_CONFIRMED, "P7_RECOVERY_DELETE_UNKNOWN_STOP")
+            delete_confirmed = True
+            try:
+                await manager.shutdown_profile("codex3")
+            except Exception:
+                raise _P7Stop("P7_RECOVERY_RUNTIME_CLEANUP_STOP") from None
+
+            postdelete = _scan_home(home, thread_id=retained_binding.thread_id, markers=markers)
+            result["postdelete_scan_errors"] = postdelete["scan_errors"]
+            result["postdelete_recovery_content_markers"] = postdelete["content_marker_matches"]
+            result["postdelete_active_thread_id_matches"] = sum(
+                postdelete["thread_id_matches_by_category"][name] for name in ("SESSION_HISTORY", "STATE_DB")
+            )
+            result["postdelete_log_thread_id_residuals"] = postdelete["log_only_identifier_matches"]
+            result["postdelete_unclassified_thread_id_residuals"] = sum(
+                postdelete["thread_id_matches_by_category"][name] for name in ("CACHE", "OTHER")
+            )
+            _require(postdelete["scan_errors"] == 0, "P7_RECOVERY_POSTDELETE_SCAN_STOP")
+            _require(postdelete["content_marker_matches"] == 0, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+            _require(result["postdelete_active_thread_id_matches"] == 0, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+            _require(result["postdelete_unclassified_thread_id_residuals"] == 0, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+
+            final_baseline = _home_baseline(home)
+            final_owned, final_owned_errors = _session_identities_with_thread(home, retained_binding.thread_id)
+            _require(final_baseline["scan_errors"] + final_owned_errors == 0, "P7_RECOVERY_POSTDELETE_SCAN_STOP")
+            _require(not final_owned, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+            unrelated_after = final_baseline["session_identities"] - final_owned
+            unrelated_after_bytes = "\n".join(
+                f"{path}\0{category}" for path, category in sorted(unrelated_after)
+            ).encode("utf-8")
+            after_reconciled = (
+                len(unrelated_after) == original["preexisting_session_count"]
+                and _sha256(unrelated_after_bytes) == original["preexisting_session_identity_sha256"]
+            )
+            result["original_baseline_reconciliation_after_delete"] = after_reconciled
+            result["preexisting_session_artifacts_removed"] = 0
+            _require(after_reconciled, "P7_UNRELATED_STORAGE_MUTATION_BLOCKER")
+            postdelete_gate_pass = True
+            result["status"] = "PASS"
+            result["stage"] = "COMPLETE"
+        except _P7Stop as stop:
+            result["status"] = "BLOCKED" if stop.blocked else "FAIL"
+            result["stage"] = stop.stage
+        except Exception:
+            result["status"] = "FAIL"
+            result["stage"] = "P7_UNEXPECTED_RECOVERY_FAILURE"
+        finally:
+            if approval_task is not None and not approval_task.done():
+                approval_task.cancel()
+                await asyncio.gather(approval_task, return_exceptions=True)
+            if manager is not None:
+                shutdown_ok = await _shutdown_manager(manager)
+            if sentinel_path is not None:
+                _process_count, delayed_process_live, removed, safe = _safe_sentinel_cleanup(sentinel_path)
+                sentinel_cleanup_safe = sentinel_cleanup_safe and safe
+                result["recovery_sentinel_removed_or_absent"] = removed
+                result["recovery_delayed_process_live"] = "NO" if delayed_process_live == 0 else "YES"
+            if temp_workdir is not None:
+                try:
+                    shutil.rmtree(temp_workdir)
+                except OSError:
+                    pass
+                result["recovery_temp_workdir_removed"] = not temp_workdir.exists()
+            cleanup_pass = shutdown_ok and sentinel_cleanup_safe and delayed_process_live == 0 and bool(
+                result["recovery_temp_workdir_removed"]
+            )
+            result["runtime_cleanup_pass"] = cleanup_pass
+            if result["status"] == "PASS" and not cleanup_pass:
+                result["status"] = "FAIL"
+                result["stage"] = "P7_RECOVERY_CLEANUP_FAILED"
+            if (
+                result["status"] == "PASS"
+                and approval_pass
+                and interrupt_pass
+                and delete_confirmed
+                and postdelete_gate_pass
+                and cleanup_pass
+                and recovery_path is not None
+            ):
+                try:
+                    recovery_path.unlink()
+                    result["recovery_record_removed"] = True
+                except OSError:
+                    result["status"] = "FAIL"
+                    result["stage"] = "P7_RECOVERY_RECORD_CLEANUP_FAILED"
             try:
                 _write_result(result_path, result)
             except _P7Stop:
