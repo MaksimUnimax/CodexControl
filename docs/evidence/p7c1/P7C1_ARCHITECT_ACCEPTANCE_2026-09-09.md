@@ -10,22 +10,21 @@ production architecture in ADR-0043.
 
 ## Reviewed lineage
 
-- Frozen architect/main base: `66f094f3592467d16382482f133b288d521c4873`.
+- Frozen architect/main base before P7.C1: `66f094f3592467d16382482f133b288d521c4873`.
 - Architecture branch: `arch-p7-c1-storage-isolation-2026-09-09`.
 - Binding execution authority: Issue #39 comment `5597864058`.
-- Executor discovery commit:
-  `a9900471d0599be21b1a1834301c4421d95acb29`.
-- Discovery file:
-  `docs/evidence/p7c1/P7C1_STORAGE_ISOLATION_DISCOVERY_2026-09-09.md`.
-- ADR-0043 freeze commit:
-  `9a4ea6e6417e63c88f495c7382535822ec19ebe6`.
-- Rejected predecessor P7 forensic commit:
-  `5aac49bd1b8a349343db52071520beed7f95592d`.
+- Executor discovery commit: `a9900471d0599be21b1a1834301c4421d95acb29`.
+- Discovery file: `docs/evidence/p7c1/P7C1_STORAGE_ISOLATION_DISCOVERY_2026-09-09.md`.
+- ADR-0043 initial freeze commit: `9a4ea6e6417e63c88f495c7382535822ec19ebe6`.
+- Rejected predecessor P7 forensic commit: `5aac49bd1b8a349343db52071520beed7f95592d`.
 - Rejected P7 architect comment: `5597602905`.
+- Architect-frozen main head after P7.C1/ADR-0043 authority updates: `4be62421e482f610e04b09f583844d7164006178`.
 
 Independent GitHub readback proved the discovery commit was exactly one commit
 above the frozen base and added only the required P7.C1 evidence file before
-architect-owned freeze changes began.
+architect-owned freeze changes began. The complete accepted P7.C1/ADR-0043
+range from the prior frozen main changes only documentation/evidence authority;
+no `src/**` or `tests/**` path changed.
 
 ## Accepted discovery facts
 
@@ -111,8 +110,7 @@ ADR-0043 freezes the following order:
 
 1. **P7.C2** — schema-v3 confirmed-delete storage barrier.
 2. **P7.C3** — dedicated profile + isolated state-root runtime authority.
-3. **P7.C4** — confirmed cleanup + `DELETE_UNKNOWN` local-containment
-   orchestration.
+3. **P7.C4** — confirmed cleanup + `DELETE_UNKNOWN` local-containment orchestration.
 4. **P7.C5** — corrected fake hard-delete acceptance.
 5. **P7.C6** — renewed isolated real Codex T3 + hard-delete acceptance.
 
@@ -129,6 +127,7 @@ document changes are the only effects.
 - P7.C1: **ACCEPTED**.
 - Original P7 / Issue #38: **REJECTED / architecture blocker evidence**.
 - ADR-0043: **ACCEPTED**.
+- Accepted main authority after freeze: `4be62421e482f610e04b09f583844d7164006178`.
 - Next slice: **P7.C2 only**.
 - P8: **BLOCKED**.
 - P9: **BLOCKED**.
