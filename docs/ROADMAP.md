@@ -40,7 +40,7 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P3.4 durable interrupt orchestration over P1.8 + exact active-binding registry. Accepted `6460a449f861b7b86ab664e5ff877c108715082d`; full 633.
 - [DONE] P3.5 hard-delete orchestration over P1.9/P2.5 + quiescence + startup recovery + final fake P3 acceptance. Accepted `6145d262787465ac6b4a17327114211cd86e8104`; full 671.
 
-P3 is complete at the fake/application boundary.
+P3 is complete at the fake/application boundary. ADR-0043 later partially supersedes only confirmed-delete finalization/recovery ordering; P1.9 and DELETE_UNKNOWN no-retry semantics remain frozen.
 
 ## P4 — Telegram private management
 - [DONE] P4.1 private Telegram auth/normalization + durable private-menu dedupe + opaque callbacks + settings panel under ADR-0032. Accepted `5a7db46c6e06662c379149c454c06003d48feb30`; full 694.
@@ -58,19 +58,32 @@ P5 is complete at the fake/application group-routing boundary.
 
 ## P6 — Response delivery/full local orchestration
 - [DONE] **P6.1** deterministic successful-response segmentation + transient DISPLAY materialization + accepted P2.4b durable one-attempt delivery under ADR-0039 and architect bounded-segmentation addendum. Accepted `51902dcbd743cd91ad209cd96879b4ad45a26a9e`; full 900.
-- [DONE] **P6.2** durable live approval operator + owned exact P1.7 response under ADR-0040. Accepted `51a681b09cf2eb2e75fbd2663f88b7a96077a39d`; full 922.
+- [DONE] **P6.2** durable live approval operator + owned P1.7 response under ADR-0040. Accepted `51a681b09cf2eb2e75fbd2663f88b7a96077a39d`; full 922.
 - [DONE] **P6.3** final local orchestration under ADR-0041. Accepted `0409ad4a0744159aad875a5ddea4deaf1181699e`; final P6 full 954. Acceptance: `docs/evidence/p6/P6_3_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
 
 P6 is COMPLETE at the fake/application boundary.
 
-## P7 — Real Codex isolated acceptance / hard-delete proof
-- [NEXT / AUTHORITY FROZEN] **P7** proof-only isolated T3 under ADR-0042: exact installed version/schema gate, read-only isolation of intended `codex3` then `codex2`, authenticated model/list, one disposable real thread, persisted multi-turn across runtime restart, one bounded real approval + safe interrupt, one official P1.9 `thread/delete`, and before/after content-safe storage measurement. No credential copying, no manual Codex-store cleanup, no live Telegram, no deployment. Residual material dialogue content or active-store thread identity blocks P8/P9 for architecture review.
+## P7 — Real Codex acceptance and hard-delete correction lane
+
+- [REJECTED / ARCHITECTURE BLOCKED] **Original P7 under ADR-0042.** Real authenticated multi-turn, approval and interrupt paths worked, but the single official P1.9 `thread/delete` returned terminal `DELETE_UNKNOWN`. Read-only forensic evidence at `5aac49bd1b8a349343db52071520beed7f95592d` proved `DELETE_UNKNOWN_WITH_MATERIAL_RESIDUAL`: five synthetic material-marker matches remained. No retry/read/list/manual store repair occurred. P8/P9 remain blocked.
+
+- [DONE] **P7.C1 — hard-delete storage isolation discovery.** Accepted discovery commit `a9900471d0599be21b1a1834301c4421d95acb29`. It proved historical `OTHER` is SQLite WAL sidecar storage; marker residue occupies SQLite unallocated/WAL bytes; thread-ID residue includes live B-tree rows; exact installed 0.144.6 supports isolated SQLite/log roots and history disable without requiring upgrade. Architect acceptance: `docs/evidence/p7c1/P7C1_ARCHITECT_ACCEPTANCE_2026-09-09.md`. ADR-0043 freezes the selected dedicated-profile + isolated-state-root correction.
+
+- [NEXT / AUTHORITY FROZEN] **P7.C2 — schema-v3 confirmed-delete storage barrier.** Add immutable schema-v3 migration authority and `DELETE_CONFIRMED_PENDING_STORAGE` state/repository/application primitives. Exact P1.9 confirmation must become durable with full binding retained before any local purge/tombstone. Pre-existing `DELETING` remains ambiguity -> `DELETE_UNKNOWN`; pre-existing confirmed-pending resumes local cleanup only and never redispatches delete. No real Codex effect. Full migration/restart/race/regression evidence required.
+
+- [PLANNED] **P7.C3 — dedicated profile + isolated state-root runtime authority.** Add explicit dedicated-profile state-root configuration, exact-version capability gate, safe child routing of SQLite/logs, history policy, ownership/non-overlap checks, profile reservation and secure whole-root lifecycle. No credential copying; no real Codex business effect.
+
+- [PLANNED] **P7.C4 — confirmed cleanup + DELETE_UNKNOWN containment orchestration.** Compose accepted P1.9/P3.5 with the confirmed-pending barrier and isolated-root lifecycle. Local final purge/tombstone only after storage proof; UNKNOWN remains official UNKNOWN even if isolated local containment completes. No external delete replay.
+
+- [PLANNED] **P7.C5 — corrected fake hard-delete acceptance.** Proof-only fake matrix over schema/runtime/storage/application boundaries, WAL/SHM/log/session residuals, crash points, unrelated baselines, ownership failures and duplicate-effect prohibition.
+
+- [PLANNED] **P7.C6 — renewed isolated real T3 + hard-delete acceptance.** Separately authorized one-thread/one-delete real proof on the corrected topology. PASS requires `DELETE_CONFIRMED`, complete confirmed-pending cleanup, zero synthetic material residual, zero active thread-ID residual, preserved unrelated baseline and green ordinary regressions. P8/P9 remain blocked until architect acceptance.
 
 ## P8 — Deployment packaging/rollback
-Root-owned config/secrets, systemd, install/upgrade/rollback runbooks, resource/retention guards; production fleet manifest/TOML materialization is wired here from accepted P5 domain/application contracts.
+[BLOCKED BY P7] Root-owned config/secrets, systemd, install/upgrade/rollback runbooks, resource/retention guards; production fleet manifest/TOML materialization is wired here from accepted P5 domain/application contracts.
 
 ## P9 — server-80 live Telegram acceptance
-Dedicated token/private test group; T4/T5 UX/auth/restart/delete/rollback; promote exact accepted SHA.
+[BLOCKED BY P7] Dedicated token/private test group; T4/T5 UX/auth/restart/delete/rollback; promote exact accepted SHA.
 
 ## P10 — server-78 discovery/deployment
 Repeat discovery/profile/storage/capability; dedicated deploy key/token/config; same source architecture, no fork.
