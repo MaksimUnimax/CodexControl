@@ -2701,6 +2701,358 @@ class P7RealCodexT3Acceptance(unittest.IsolatedAsyncioTestCase):
         if result["status"] != "PASS":
             self.fail(str(result["stage"]))
 
+    async def test_authorized_delete_only_retention_gate(self) -> None:
+        if os.environ.get("CODEXCONTROL_P7_DELETE_ONLY") != "AUTHORIZED_DELETE_ONLY_2026_09_09":
+            raise unittest.SkipTest("P7 delete-only gate is not authorized")
+
+        expected_head = os.environ.get("CODEXCONTROL_P7_EXPECTED_HEAD", "")
+        expected_thread_sha = os.environ.get("CODEXCONTROL_P7_RECOVERY_THREAD_SHA256", "")
+        result_value = os.environ.get("CODEXCONTROL_P7_DELETE_RESULT_PATH", "")
+        result_path = Path(result_value)
+        _require(
+            len(expected_head) == 40
+            and all(character in "0123456789abcdef" for character in expected_head)
+            and expected_thread_sha == RECOVERY_THREAD_SHA256
+            and result_path.is_absolute()
+            and result_path.parent == Path("/var/tmp")
+            and len(result_path.name) <= 128
+            and result_path.name.startswith("codex-control-p7-delete-")
+            and result_path.name.endswith(".json")
+            and all(character in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for character in result_path.name)
+            and not result_path.is_symlink()
+            and not result_path.exists(),
+            "P7_DELETE_GATE_INVALID",
+        )
+
+        def _delete_k_result() -> list[str]:
+            matches: list[list[str]] = []
+            try:
+                candidates = tuple(Path("/var/tmp").iterdir())
+            except OSError:
+                raise _P7Stop("P7_DELETE_K_RESULT_IDENTITY_STOP") from None
+            for candidate in candidates:
+                value = _safe_json_file(candidate, 256 * 1024)
+                if value is None:
+                    continue
+                marker_hashes = value.get("marker_sha256")
+                if not (
+                    value.get("commit_k_sha") == "53e56840da7751149aef8d3bd430e11e953c4366"
+                    and value.get("thread_id_sha256") == RECOVERY_THREAD_SHA256
+                    and value.get("turn7_id_sha256") == "2971376917b2296715f7b865bc1c549c4b09a97b72162c123b4c7072ad48e994"
+                    and value.get("stage") == "P7_SYNC_CHILD_NATURAL_EXIT_FAILED"
+                    and value.get("turn7_activity_barrier") == "PASS"
+                    and value.get("turn7_interrupt_status") == "CONFIRMED"
+                    and value.get("turn7_interrupt_terminal") == "FAILED"
+                    and value.get("turn7_interrupt_runtime_reacquire") == "NO"
+                    and value.get("turn7_child_cleanup_signal_used") == "NO"
+                    and value.get("turn7_child_final_live_count") == 0
+                    and isinstance(marker_hashes, list)
+                    and len(marker_hashes) == 2
+                    and len(set(marker_hashes)) == 2
+                    and all(
+                        isinstance(marker_hash, str)
+                        and len(marker_hash) == 64
+                        and all(character in "0123456789abcdef" for character in marker_hash)
+                        for marker_hash in marker_hashes
+                    )
+                ):
+                    continue
+                matches.append(list(marker_hashes))
+            _require(len(matches) == 1, "P7_DELETE_K_RESULT_IDENTITY_STOP")
+            return matches[0]
+
+        def _recover_markers(home: Path, thread_id: str, expected_hashes: set[str]) -> tuple[set[bytes], set[str], int, int]:
+            import re
+
+            candidate_pattern = re.compile(rb"(?<![0-9a-f])([0-9a-f]{48})(?![0-9a-f])")
+            recovered: set[bytes] = set()
+            session_files: set[str] = set()
+            scan_errors = [0]
+            session_file_count = 0
+            thread_needle = ((THREAD_ID, thread_id.encode("utf-8")),)
+
+            def onerror(_error: OSError) -> None:
+                scan_errors[0] += 1
+
+            for root, directories, files in os.walk(home, followlinks=False, onerror=onerror):
+                _walk_directories(Path(root), directories, scan_errors)
+                for name in files:
+                    path = Path(root) / name
+                    info, lstat_failed = _lstat_regular(path)
+                    if lstat_failed:
+                        scan_errors[0] += 1
+                        continue
+                    if info is None or _category(path.relative_to(home)) != "SESSION_HISTORY":
+                        continue
+                    counts, _matched_bytes, _total_bytes, file_errors = _scan_file(path, thread_needle)
+                    scan_errors[0] += file_errors
+                    if file_errors or not counts[THREAD_ID]:
+                        continue
+                    session_file_count += 1
+                    session_files.add(path.relative_to(home).as_posix())
+                    if info.st_size > 128 * 1024 * 1024:
+                        scan_errors[0] += 1
+                        continue
+                    descriptor = None
+                    try:
+                        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+                            descriptor = None
+                            overlap = b""
+                            offset = 0
+                            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                                chunk_start = offset
+                                offset += len(chunk)
+                                combined = overlap + chunk
+                                combined_base = chunk_start - len(overlap)
+                                for match in candidate_pattern.finditer(combined):
+                                    if match.end() == len(combined):
+                                        continue
+                                    candidate = match.group(1)
+                                    if _sha256(candidate) in expected_hashes:
+                                        recovered.add(candidate)
+                                overlap = combined[-49:]
+                            for match in candidate_pattern.finditer(overlap):
+                                candidate = match.group(1)
+                                if _sha256(candidate) in expected_hashes:
+                                    recovered.add(candidate)
+                    except (OSError, UnicodeError):
+                        scan_errors[0] += 1
+                    finally:
+                        if descriptor is not None:
+                            try:
+                                os.close(descriptor)
+                            except OSError:
+                                scan_errors[0] += 1
+            return recovered, session_files, session_file_count, scan_errors[0]
+
+        def _marker_scan(home: Path, thread_id: str, marker: bytes) -> dict[str, Any]:
+            return _scan_home(home, thread_id=thread_id, markers=(marker.decode("ascii"),))
+
+        manager: CodexRuntimeManager | None = None
+        recovery_path: Path | None = None
+        recovery_record: dict[str, Any] | None = None
+        retained_binding: ThreadBinding | None = None
+        delete_confirmed = False
+        runtime_shutdown_pass = False
+        postdelete_gate_pass = False
+        full_cleanup_pass = False
+        result: dict[str, Any] = {
+            "status": "FAIL",
+            "stage": "P7_DELETE_NOT_STARTED",
+            "commit_m_sha": expected_head,
+            "thread_sha256": RECOVERY_THREAD_SHA256,
+            "turn7_id_sha256": "2971376917b2296715f7b865bc1c549c4b09a97b72162c123b4c7072ad48e994",
+            "expected_marker_sha256": [],
+            "recovered_marker_sha256": [],
+            "session_scan_errors": None,
+            "original_baseline_before_delete": False,
+            "predelete_scan_errors": None,
+            "predelete_marker_matches": [],
+            "predelete_marker_categories": [],
+            "predelete_content_marker_matches": None,
+            "predelete_physical_proof": "FAIL",
+            "isolation_profile": None,
+            "executable_authority": "FAIL",
+            "model_list_called": "NO",
+            "thread_resume_called": "NO",
+            "turn_start_called": "NO",
+            "approval_called": "NO",
+            "interrupt_called": "NO",
+            "thread_delete_calls": 0,
+            "delete_status": "NOT_RUN",
+            "delete_runtime_shutdown": "NOT_RUN",
+            "postdelete_scan_errors": "NOT_RUN",
+            "postdelete_marker_matches": ["NOT_RUN", "NOT_RUN"],
+            "postdelete_content_marker_matches": "NOT_RUN",
+            "postdelete_thread_id_matches_by_category": {name: "NOT_RUN" for name in CATEGORIES},
+            "postdelete_log_thread_id_residuals": "NOT_RUN",
+            "postdelete_active_thread_id_matches": "NOT_RUN",
+            "postdelete_unclassified_thread_id_matches": "NOT_RUN",
+            "original_baseline_after_delete": "NOT_RUN",
+            "preexisting_session_artifacts_removed": "NOT_RUN",
+            "recovery_record_removed": "NO",
+        }
+
+        try:
+            _git_facts(expected_head)
+            recovery_path, recovery_record = _recovery_record_identity()
+            result["recovery_record_matches"] = 1
+            k_marker_hashes = _delete_k_result()
+            result["expected_marker_sha256"] = k_marker_hashes
+            original = _original_result_identity()
+            _require(
+                isinstance(original["preexisting_session_count"], int)
+                and original["preexisting_session_count"] >= 0
+                and isinstance(original["preexisting_session_identity_sha256"], str)
+                and len(original["preexisting_session_identity_sha256"]) == 64
+                and all(character in "0123456789abcdef" for character in original["preexisting_session_identity_sha256"]),
+                "P7_DELETE_BASELINE_RECONCILIATION_STOP",
+            )
+            home = _safe_profile_path("codex3")
+            thread_id = recovery_record["thread_id"]
+            retained_binding = ThreadBinding("codex3", thread_id)
+            recovered, session_files, session_file_count, recovery_scan_errors = _recover_markers(
+                home, thread_id, set(k_marker_hashes)
+            )
+            result["session_scan_errors"] = recovery_scan_errors
+            result["p7_session_files"] = session_file_count
+            _require(recovery_scan_errors == 0, "P7_DELETE_MARKER_RECOVERY_STOP")
+            _require(session_file_count >= 1, "P7_DELETE_MARKER_RECOVERY_STOP")
+            recovered_hashes = {_sha256(marker) for marker in recovered}
+            result["recovered_marker_sha256"] = sorted(recovered_hashes)
+            _require(recovered_hashes == set(k_marker_hashes), "P7_DELETE_MARKER_RECOVERY_STOP")
+            _require(len(recovered) == 2, "P7_DELETE_MARKER_RECOVERY_STOP")
+            result["recovered_marker_count"] = len(recovered)
+
+            baseline = _home_baseline(home)
+            owned_before, owned_before_errors = _session_identities_with_thread(home, thread_id)
+            result["session_scan_errors"] = baseline["scan_errors"] + owned_before_errors
+            _require(result["session_scan_errors"] == 0, "P7_DELETE_BASELINE_RECONCILIATION_STOP")
+            unrelated_before = baseline["session_identities"] - owned_before
+            unrelated_before_bytes = "\n".join(
+                f"{path}\0{category}" for path, category in sorted(unrelated_before)
+            ).encode("utf-8")
+            original_before = (
+                len(unrelated_before) == original["preexisting_session_count"]
+                and _sha256(unrelated_before_bytes) == original["preexisting_session_identity_sha256"]
+            )
+            result["original_baseline_before_delete"] = original_before
+            _require(original_before, "P7_DELETE_BASELINE_RECONCILIATION_STOP")
+
+            recovered_by_hash = {_sha256(marker): marker for marker in recovered}
+            markers = tuple(recovered_by_hash[marker_hash] for marker_hash in k_marker_hashes)
+            predelete = _scan_home(home, thread_id=thread_id, markers=markers[0:2])
+            per_marker_predelete = [_marker_scan(home, thread_id, marker) for marker in markers]
+            predelete_errors = predelete["scan_errors"] + sum(scan["scan_errors"] for scan in per_marker_predelete)
+            result["predelete_scan_errors"] = predelete_errors
+            result["predelete_marker_matches"] = [scan["content_marker_matches"] for scan in per_marker_predelete]
+            result["predelete_marker_categories"] = [scan["content_marker_matches_by_category"] for scan in per_marker_predelete]
+            result["predelete_content_marker_matches"] = predelete["content_marker_matches"]
+            _require(predelete_errors == 0, "P7_DELETE_PREDELETE_SCAN_STOP")
+            _require(all(scan["content_marker_matches"] > 0 for scan in per_marker_predelete), "P7_DELETE_PREDELETE_SCAN_STOP")
+            _require(predelete["content_marker_matches"] > 0, "P7_DELETE_PREDELETE_SCAN_STOP")
+            result["predelete_physical_proof"] = "PASS"
+
+            _require(_eligible_profile_alias() == "codex3", "P7_DELETE_PROFILE_BUSY_STOP", blocked=True)
+            result["isolation_profile"] = "codex3"
+            path_kind, resolved_target_safe = _verify_installed_authority()
+            result["executable_authority"] = "PASS"
+            result["executable_path_kind"] = path_kind
+            result["executable_resolved_target_safe"] = "PASS" if resolved_target_safe else "FAIL"
+
+            class _NoCatalog:
+                async def get_catalog(self, *_args: Any, **_kwargs: Any) -> Any:
+                    raise AssertionError("delete-only catalog access")
+
+            profile = CodexProfile("codex3", str(home), "P7 codex3 delete-only retention")
+            manager = CodexRuntimeManager(
+                [profile],
+                client_version=VERSION,
+                executable=CODEX,
+                parent_environment=_isolated_environment(home),
+            )
+            thread_adapter = CodexThreadLifecycleAdapter(manager, _NoCatalog())
+            runtime = await manager.acquire("codex3")
+            _require(runtime.profile_id == "codex3", "P7_DELETE_PROFILE_BUSY_STOP")
+
+            result["thread_delete_calls"] = 1
+            try:
+                delete = await thread_adapter.delete(binding=retained_binding)
+            except Exception:
+                result["delete_status"] = "DELETE_UNKNOWN"
+                raise _P7Stop("P7_DELETE_UNKNOWN_STOP") from None
+            result["delete_status"] = delete.status.name
+            _require(delete.status is ThreadOperationStatus.DELETE_CONFIRMED, "P7_DELETE_UNKNOWN_STOP")
+            _require(delete.binding == retained_binding, "P7_DELETE_UNKNOWN_STOP")
+            delete_confirmed = True
+
+            runtime_shutdown_pass = await _shutdown_manager(manager)
+            result["delete_runtime_shutdown"] = "PASS" if runtime_shutdown_pass else "FAIL"
+            _require(runtime_shutdown_pass, "P7_DELETE_RUNTIME_SHUTDOWN_STOP")
+
+            postdelete = _scan_home(home, thread_id=thread_id, markers=markers[0:2])
+            per_marker_postdelete = [_marker_scan(home, thread_id, marker) for marker in markers]
+            postdelete_errors = postdelete["scan_errors"] + sum(scan["scan_errors"] for scan in per_marker_postdelete)
+            result["postdelete_scan_errors"] = postdelete_errors
+            result["postdelete_marker_matches"] = [scan["content_marker_matches"] for scan in per_marker_postdelete]
+            result["postdelete_content_marker_matches"] = postdelete["content_marker_matches"]
+            result["postdelete_thread_id_matches_by_category"] = postdelete["thread_id_matches_by_category"]
+            result["postdelete_log_thread_id_residuals"] = postdelete["log_only_identifier_matches"]
+            result["postdelete_active_thread_id_matches"] = sum(
+                postdelete["thread_id_matches_by_category"][name] for name in ("SESSION_HISTORY", "STATE_DB")
+            )
+            result["postdelete_unclassified_thread_id_matches"] = sum(
+                postdelete["thread_id_matches_by_category"][name] for name in ("CACHE", "OTHER")
+            )
+            _require(postdelete_errors == 0, "P7_DELETE_POSTDELETE_SCAN_STOP")
+            _require(all(scan["content_marker_matches"] == 0 for scan in per_marker_postdelete), "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+            _require(postdelete["content_marker_matches"] == 0, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+            _require(result["postdelete_active_thread_id_matches"] == 0, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+            _require(result["postdelete_unclassified_thread_id_matches"] == 0, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+
+            final_baseline = _home_baseline(home)
+            final_owned, final_owned_errors = _session_identities_with_thread(home, thread_id)
+            _require(final_baseline["scan_errors"] + final_owned_errors == 0, "P7_DELETE_BASELINE_RECONCILIATION_STOP")
+            _require(not final_owned, "P7_HARD_DELETE_RESIDUAL_BLOCKER")
+            final_identity_bytes = "\n".join(
+                f"{path}\0{category}" for path, category in sorted(final_baseline["session_identities"])
+            ).encode("utf-8")
+            original_after = (
+                len(final_baseline["session_identities"]) == original["preexisting_session_count"]
+                and _sha256(final_identity_bytes) == original["preexisting_session_identity_sha256"]
+            )
+            result["original_baseline_after_delete"] = original_after
+            result["preexisting_session_artifacts_removed"] = 0
+            _require(original_after, "P7_UNRELATED_STORAGE_MUTATION_BLOCKER")
+            postdelete_gate_pass = True
+            full_cleanup_pass = True
+            result["status"] = "PASS"
+            result["stage"] = "COMPLETE"
+        except _P7Stop as stop:
+            result["status"] = "BLOCKED" if stop.blocked else "FAIL"
+            result["stage"] = stop.stage
+        except Exception:
+            result["status"] = "FAIL"
+            result["stage"] = "P7_DELETE_UNEXPECTED_FAILURE"
+        finally:
+            shutdown_ok = True
+            if manager is not None:
+                shutdown_ok = await _shutdown_manager(manager)
+            if delete_confirmed and runtime_shutdown_pass and not shutdown_ok:
+                result["delete_runtime_shutdown"] = "FAIL"
+                result["status"] = "FAIL"
+                result["stage"] = "P7_DELETE_RUNTIME_SHUTDOWN_STOP"
+            if (
+                result["status"] == "PASS"
+                and full_cleanup_pass
+                and postdelete_gate_pass
+                and shutdown_ok
+                and recovery_path is not None
+            ):
+                try:
+                    recovery_info = recovery_path.lstat()
+                    _require(
+                        stat.S_ISREG(recovery_info.st_mode)
+                        and not stat.S_ISLNK(recovery_info.st_mode)
+                        and recovery_info.st_uid == 0
+                        and stat.S_IMODE(recovery_info.st_mode) == 0o600,
+                        "P7_DELETE_RECOVERY_CLEANUP_FAILED",
+                    )
+                    recovery_path.unlink()
+                    result["recovery_record_removed"] = "YES"
+                except (_P7Stop, OSError):
+                    result["status"] = "FAIL"
+                    result["stage"] = "P7_DELETE_RECOVERY_CLEANUP_FAILED"
+            try:
+                _write_result(result_path, result)
+            except _P7Stop:
+                result["status"] = "FAIL"
+                result["stage"] = "P7_DELETE_RESULT_WRITE_FAILED"
+
+        if result["status"] != "PASS":
+            self.fail(str(result["stage"]))
+
 
 if __name__ == "__main__" and "--isolation-preflight" in sys.argv:
     print(f"ELIGIBLE_PROFILE={_eligible_profile_alias() or 'P7_ISOLATION_GATE_BLOCKED'}")
