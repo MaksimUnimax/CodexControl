@@ -154,3 +154,27 @@ Reference architect comment: `5594389257`.
 This continuation does not establish approval support, interrupt support, or
 hard-delete behavior. P7 remains **NOT ACCEPTED**; Issue #38 remains open and
 P8 was not started.
+
+## Architect approval grammar forensic
+
+Reference architect comment: `5594652685`.
+
+- Parent F SHA: `a4ee439b0f061356ee5657c3d5fd13028e007433`.
+- Retained thread SHA-256: `8faed122df2a4b7d331eb20493bde272160b5f1ef2cf856c758090cd6369a266`.
+- Recovery record matches: `1`.
+- P7-owned SESSION_HISTORY files: `1`.
+- Session scan errors: `0`.
+- Matching session-file identity: `20a766bdbc950ab0881f6214231f24ef22fbcabb8d720e59472c60b198938b19`; type `SESSION_HISTORY`.
+- Sentinel-prefix record count: `4`.
+- Structural command candidate count: `1`.
+- Candidate SHA-256: `ee625ab717387df2bc7485aed68198fbf891ebe4316d0131b72212bcb192aad4`.
+- Field class: `OTHER_COMMAND_FIELD`.
+- Normalized redacted template: `OTHER:2dc53683a873d6392fd3782496f5ce2ecc6851755d99a9cf59d2001bfc7a7072 sh -lc 'sleep 120 ; printf <HEX48> > <P7_SENTINEL>' OTHER:ff7282bbf2b030f43ddbcba54939c5824e84caf52e412ec84c13faaca08f8184`.
+- Shell-operation classification: `OUTER_WRAPPER=OTHER`; `OUTER_WRAPPER_PATH_VARIANT=NO`; `OPTIONAL_CD_PREFIX=NO`; `CD_TARGET_CLASS=NONE`; `NESTED_WRAPPER_DEPTH=1`; `HAS_SLEEP_120=YES`; `HAS_PRINTF=YES`; `REDIRECT_TARGET=P7_SENTINEL`; `CONTROL_OPERATORS=;,>`; `EXTRA_EXECUTABLE_COUNT=1`; `EXTRA_OPERATION_PRESENT=YES`; `UNPARSEABLE=NO`.
+- Finite grammar mismatch classes: `EXTRA_OPERATION`, `NESTED_WRAPPER`, `OTHER:7094233d2e27190bc4e47110b87ecf5bcd843b591d559338296c91c609df7ceb`.
+- Final forensic conclusion: `EXTRA_OPERATION_PRESENT`.
+- This pass performed zero Codex business effect: no model/list, thread, turn, approval, interrupt, delete, Telegram, production state, or process mutation.
+
+This is sanitized forensic evidence only. It does not authorize ALLOW, does not
+alter `_safe_command_relation()`, does not establish P7 acceptance, and does
+not start P8. Issue #38 remains open.
