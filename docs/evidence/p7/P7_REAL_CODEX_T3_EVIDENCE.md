@@ -355,3 +355,37 @@ Delete and storage gates:
 This final synchronized continuation does not establish official delete
 behavior or hard-delete erasure. P7 remains **NOT ACCEPTED**; Issue #38 remains
 open and P8 was not started.
+
+## Architect final delete-only retention gate
+
+Reference architect addendum: `5595924909`.
+
+The delete-only harness was added in Commit M
+`8c15d75be18446ce4c84497ca75946523a270166`. Commit M changed only the gated
+P7 acceptance harness; no production source changed. It was pushed to the
+named branch and read back from the remote.
+
+The mandatory gate-disabled pre-run command was dispatched once with all five
+P7 real-effect gates unset. The execution channel did not return the required
+unittest final summary (`959` tests, `5` skipped, `0` failures, `0` errors,
+`OK`). Under the binding stop rule this is recorded as
+`P7_DELETE_PRE_RUN_REGRESSION_STOP`; the delete-only test was not dispatched.
+
+Consequently, the final delete-only retention gate did not perform recovery
+identity lookup, K-result lookup, marker recovery, pre-delete physical
+scanning, fresh isolation/authority, runtime initialization, or any Codex
+business RPC. Official `thread/delete` calls remain `0`; no model/list,
+thread/resume, turn/start, approval, interrupt, Telegram, or manual Codex
+storage cleanup occurred in this continuation. The retained recovery record
+was not removed.
+
+The architect classification of the historical synchronized Turn-7 proof is
+preserved above: activity barrier `PASS`, interrupt `CONFIRMED`, terminal
+`FAILED`, runtime reacquire `NO`, and final child count `0` with cleanup signal
+`NO`. The historical `P7_SYNC_CHILD_NATURAL_EXIT_FAILED` result remains
+recorded as observed; architect review classified its five-second
+pre-shutdown child gate as non-authoritative for ADR-0042.
+
+No final post-delete content, thread-ID residual, baseline-after-delete,
+recovery-cleanup, or final ordinary-suite result is claimed. P7 remains
+**NOT ACCEPTED**; Issue #38 remains open and P8 was not started.
