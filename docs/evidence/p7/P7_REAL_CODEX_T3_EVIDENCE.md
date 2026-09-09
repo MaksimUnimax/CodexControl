@@ -515,3 +515,72 @@ invocation and passed: `959` tests, `5` skipped, `0` failures, `0` errors,
 turns, one approval allow response, two interrupts, and one official delete
 dispatch. P7 remains **NOT ACCEPTED**; Issue #38 remains open and P8 was not
 started.
+
+## Architect post-DELETE_UNKNOWN physical forensic
+
+Reference architect blocker comment: `5596886309`.
+
+Parent Q SHA: `6a8d5ceffe2771ddaabca055df19b05af33d7cd7`.
+
+The official P1.9 delete authority is unchanged: exactly one dispatched
+`thread/delete` returned `DELETE_UNKNOWN`. Under ADR-0016 and ADR-0042 this
+forensic does not reconcile that result, does not establish
+`DELETE_CONFIRMED`, and does not establish P7 PASS.
+
+The retained root-only recovery identity matched exactly once. The selected
+profile alias was `codex3`; no recovery filename, nonce, raw thread ID, or
+recovery JSON is recorded here.
+
+The selected-home scanner used the frozen P7 category semantics
+`SESSION_HISTORY`, `STATE_DB`, `LOG`, `CACHE`, and `OTHER`, regular files only,
+`os.walk(..., followlinks=False)`, `O_NOFOLLOW`/`O_CLOEXEC`, chunked reads, and
+overlap-safe matching. It completed with `SCAN_ERRORS=0`. The finite marker
+candidate ceiling was `10000000`; `2183695` lowercase-hex 48-byte candidates
+were examined, so the resource ceiling was not reached.
+
+Thread-ID physical observations:
+
+- `THREAD_ID_MATCHES_TOTAL=2695`
+- `THREAD_ID_MATCHES_SESSION_HISTORY=0`
+- `THREAD_ID_MATCHES_STATE_DB=767`
+- `THREAD_ID_MATCHES_LOG=0`
+- `THREAD_ID_MATCHES_CACHE=0`
+- `THREAD_ID_MATCHES_OTHER=1928`
+- `THREAD_ID_MATCHED_FILE_COUNT=4`
+
+Hash-only synthetic content observations used the two frozen expected marker
+hashes:
+
+- `MARKER1_SHA256=3dfc371b18783c1bd53f140ea7c07b203a809dc19a45983410491afe024b395e`
+  - total `3`; `SESSION_HISTORY=0`, `STATE_DB=1`, `LOG=0`, `CACHE=0`, `OTHER=2`
+- `MARKER2_SHA256=4b81a69358ebb2ae8d1bc6c5bff68d2fa80910819526461254a7a0357eee12bc`
+  - total `2`; `SESSION_HISTORY=0`, `STATE_DB=1`, `LOG=0`, `CACHE=0`, `OTHER=1`
+- `CONTENT_MARKER_MATCHES_TOTAL=5`
+- `CONTENT_MARKER_MATCHED_FILE_COUNT=2`
+
+No marker plaintext, matched content, raw path, or matched line was exposed.
+
+`P7_SESSION_ARTIFACT_COUNT=0` and
+`P7_SESSION_ARTIFACT_STATE=ABSENT`. The unrelated-session comparison against
+the retained original root-only baseline passed:
+`ORIGINAL_UNRELATED_BASELINE_NOW=PASS` and
+`PREEXISTING_SESSION_ARTIFACTS_REMOVED=0`.
+
+The repaired root-only delete result contained no safe numeric remote code.
+No structurally matching P7-owned `thread/delete` log record supplied a
+numeric code or error message. The diagnostic values are therefore
+`DELETE_REMOTE_CODE=NOT_FOUND`,
+`DELETE_ERROR_MESSAGE_SHA256=NOT_FOUND`, and
+`DELETE_ERROR_STRUCTURAL_CLASS=NOT_FOUND`.
+
+Read-only process observation found `CODEX3_LIVE_OWNER_COUNT=0` and
+`CODEX3_CURRENTLY_IDLE=YES`. No process was signalled, killed, restarted, or
+quiesced. The recovery record remains retained:
+`RECOVERY_RECORD_REMOVED=NO`.
+
+The physical classification is
+`DELETE_UNKNOWN_WITH_MATERIAL_RESIDUAL`, because the hash-only synthetic
+content count is nonzero. The official status remains
+`OFFICIAL_DELETE_STATUS=DELETE_UNKNOWN`; this forensic does not reconcile
+`DELETE_UNKNOWN` and does not establish P7 PASS. Issue #38 remains open and P8
+was not started.
