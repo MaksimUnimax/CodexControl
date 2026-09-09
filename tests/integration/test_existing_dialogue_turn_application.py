@@ -202,7 +202,7 @@ class ExistingDialogueApplicationIntegrationTests(unittest.IsolatedAsyncioTestCa
             await self.assert_no_admission(index, turns)
 
     async def test_full_non_idle_and_preflight_block_matrix(self):
-        states = (DialogueState.CREATING, DialogueState.CREATE_UNKNOWN, DialogueState.ERROR, DialogueState.INTERRUPTING, DialogueState.TURN_UNKNOWN, DialogueState.DELETE_PENDING, DialogueState.DELETING, DialogueState.DELETE_UNKNOWN)
+        states = (DialogueState.CREATING, DialogueState.CREATE_UNKNOWN, DialogueState.ERROR, DialogueState.INTERRUPTING, DialogueState.TURN_UNKNOWN, DialogueState.DELETE_PENDING, DialogueState.DELETING, DialogueState.DELETE_CONFIRMED_PENDING_STORAGE, DialogueState.DELETE_UNKNOWN)
         for index, state in enumerate(states, 30):
             await self._reset()
             await self._set_dialogue_state(state)

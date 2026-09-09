@@ -195,8 +195,9 @@ class MetadataRetentionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             deletion = DeletionRepository(storage, now_ms=lambda: 2)
             await deletion.claim_delete_intent(dialogue_id="d", expected_version=1)
             await deletion.claim_deleting(dialogue_id="d", expected_version=2)
+            await deletion.mark_delete_confirmed_pending_storage(dialogue_id="d", expected_version=3)
             await deletion.finalize_confirmed(
-                dialogue_id="d", expected_version=3, tombstone_expires_at_ms=OLD_NOW + 1,
+                dialogue_id="d", expected_version=4, tombstone_expires_at_ms=OLD_NOW + 1,
             )
             self.assertIsNone(await DialogueRepository(storage).get_live())
             self.assertIsNotNone(await IngressUpdateRepository(storage).get(8))

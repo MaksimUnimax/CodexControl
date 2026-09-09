@@ -52,6 +52,7 @@ P3_DELETE_TOMBSTONE_RETENTION_MS = 604800000
 
 class DialogueDeleteStatus(StrEnum):
     DELETED = "DELETED"
+    CONFIRMED_PENDING_STORAGE = "CONFIRMED_PENDING_STORAGE"
     FAILED = "FAILED"
     UNKNOWN = "UNKNOWN"
     BLOCKED = "BLOCKED"
@@ -342,6 +343,10 @@ class DialogueDeleteService:
         # new request against an older optimistic version.
         if dialogue.state is DialogueState.DELETE_UNKNOWN:
             return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, dialogue, None, None)
+        if dialogue.state is DialogueState.DELETE_CONFIRMED_PENDING_STORAGE:
+            return DialogueDeleteResult(
+                DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE, dialogue, None, None
+            )
         if dialogue.state is DialogueState.DELETING:
             return DialogueDeleteResult(
                 DialogueDeleteStatus.BLOCKED, dialogue, None, DialogueDeleteReason.DELETE_IN_PROGRESS
@@ -508,25 +513,26 @@ class DialogueDeleteService:
                 unknown = await self._mark_unknown(deleting)
                 return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
             if result.status is ThreadOperationStatus.DELETE_CONFIRMED:
-                now = self._clock_value()
-                if now > MAX_SQLITE_INT - P3_DELETE_TOMBSTONE_RETENTION_MS:
-                    raise _invariant()
-                expiry = now + P3_DELETE_TOMBSTONE_RETENTION_MS
                 try:
-                    finalized = await DeletionRepository(self._storage, now_ms=self._clock).finalize_confirmed(
+                    pending = await DeletionRepository(self._storage, now_ms=self._clock).mark_delete_confirmed_pending_storage(
                         dialogue_id=deleting.dialogue_id,
                         expected_version=deleting.version,
-                        tombstone_expires_at_ms=expiry
                     )
                 except (StorageError, RepositoryError) as error:
                     raise _post_confirmed_repository_error(error) from None
                 if (
-                    finalized.tombstone.dialogue_id != deleting.dialogue_id
-                    or finalized.tombstone.stale_generation != deleting.version
-                    or finalized.tombstone.expires_at_ms != expiry
+                    type(pending) is not DialogueRecord
+                    or pending.dialogue_id != deleting.dialogue_id
+                    or pending.profile_id != deleting.profile_id
+                    or pending.thread_id != deleting.thread_id
+                    or pending.state is not DialogueState.DELETE_CONFIRMED_PENDING_STORAGE
+                    or pending.version != deleting.version + 1
+                    or pending.last_error_class is not None
                 ):
                     raise _invariant()
-                return DialogueDeleteResult(DialogueDeleteStatus.DELETED, None, finalized.tombstone, None)
+                return DialogueDeleteResult(
+                    DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE, pending, None, None
+                )
             unknown = await self._mark_unknown(deleting)
             return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
         finally:

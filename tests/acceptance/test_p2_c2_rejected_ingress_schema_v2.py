@@ -14,6 +14,8 @@ from codex_control.storage import (
     SCHEMA_V1_DDL_SHA256,
     SCHEMA_V2_MIGRATION_ID,
     SCHEMA_V2_MIGRATION_SHA256,
+    SCHEMA_V3_MIGRATION_ID,
+    SCHEMA_V3_MIGRATION_SHA256,
     SqliteStorage,
 )
 from codex_control.storage.schema import SCHEMA_V1_STATEMENTS
@@ -53,11 +55,13 @@ class P2C2RejectedIngressSchemaV2AcceptanceTests(unittest.IsolatedAsyncioTestCas
                     c.execute("PRAGMA user_version").fetchone()[0],
                     [tuple(row) for row in c.execute("SELECT version, migration_id, ddl_sha256 FROM schema_migrations ORDER BY version")],
                 ))
-                self.assertEqual(2, ledger[0])
-                self.assertEqual(2, len(ledger[1]))
+                self.assertEqual(3, ledger[0])
+                self.assertEqual(3, len(ledger[1]))
                 self.assertEqual(SCHEMA_V2_MIGRATION_ID, ledger[1][1][1])
                 self.assertEqual(SCHEMA_V2_MIGRATION_SHA256, ledger[1][1][2])
-                self.assertEqual(1, len(migration_calls))
+                self.assertEqual(SCHEMA_V3_MIGRATION_ID, ledger[1][2][1])
+                self.assertEqual(SCHEMA_V3_MIGRATION_SHA256, ledger[1][2][2])
+                self.assertEqual(2, len(migration_calls))
                 self.assertEqual(
                     [(1, "CONTROL"), (2, "IGNORED_SLEEP"),
                      (3, "IGNORED_UNAUTHORIZED"), (4, "JOB:job-1")],
@@ -79,7 +83,7 @@ class P2C2RejectedIngressSchemaV2AcceptanceTests(unittest.IsolatedAsyncioTestCas
                 await storage.close()
 
             def migration_trap():
-                raise AssertionError("v2 reopen attempted migration")
+                raise AssertionError("v3 reopen attempted migration")
 
             storage = await SqliteStorage.open(path, now_ms=migration_trap)
             try:

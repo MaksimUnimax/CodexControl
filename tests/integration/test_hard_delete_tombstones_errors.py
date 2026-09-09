@@ -116,7 +116,7 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
     async def test_public_surfaces_and_input_validation(self):
         self.assertEqual(
             {"get_tombstone", "claim_delete_intent", "claim_deleting", "mark_delete_unknown",
-             "mark_delete_error", "finalize_confirmed"},
+             "mark_delete_error", "mark_delete_confirmed_pending_storage", "finalize_confirmed"},
             {name for name, value in vars(DeletionRepository).items() if not name.startswith("_") and callable(value)},
         )
         self.assertEqual(
@@ -245,7 +245,7 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
                         await gated_repo.finalize_confirmed(
                             dialogue_id="d", expected_version=expected_version, tombstone_expires_at_ms=100
                         )
-                    self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+                    self.assertIs(RepositoryErrorCategory.STATE_CONFLICT, raised.exception.category)
                     self.assertEqual(DialogueState.DELETING, (await DialogueRepository(storage).get_live()).state)
                     self.assertIsNone(await gated_repo.get_tombstone("d"))
                 self.assertEqual([], clock_calls)
@@ -384,7 +384,10 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
                 connection.execute("INSERT INTO ingress_updates VALUES (7, 1, 1, 'JOB:job')")
                 connection.execute("INSERT INTO callback_actions VALUES (?, 'action', 'subject', 'job', 1, 'STATE', 1, -100, 1, 100, NULL)", ('c' * 64,))
             await storage.write(write_children)
-            result = await repo.finalize_confirmed(dialogue_id="d", expected_version=deleting.version, tombstone_expires_at_ms=100)
+            pending_storage = await repo.mark_delete_confirmed_pending_storage(
+                dialogue_id="d", expected_version=deleting.version
+            )
+            result = await repo.finalize_confirmed(dialogue_id="d", expected_version=pending_storage.version, tombstone_expires_at_ms=100)
             self.assertEqual(1, result.purged_jobs)
             self.assertEqual(3, result.purged_payloads)
             self.assertEqual(1, result.purged_delivery_segments)
@@ -410,6 +413,9 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
             storage = await self.fresh_storage()
             try:
                 repo, deleting = await self.delete_claimed(storage)
+                pending_storage = await repo.mark_delete_confirmed_pending_storage(
+                    dialogue_id="d", expected_version=deleting.version
+                )
                 if mode == "clock":
                     repo = DeletionRepository(storage, now_ms=lambda: (_ for _ in ()).throw(RuntimeError("PRIVATE_ERROR_BODY_MUST_NOT_LEAK")))
                     expiry = 100
@@ -417,10 +423,10 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
                     repo = DeletionRepository(storage, now_ms=lambda: 20)
                     expiry = 20
                 with self.assertRaises(RepositoryError) as raised:
-                    await repo.finalize_confirmed(dialogue_id="d", expected_version=deleting.version, tombstone_expires_at_ms=expiry)
+                    await repo.finalize_confirmed(dialogue_id="d", expected_version=pending_storage.version, tombstone_expires_at_ms=expiry)
                 expected = RepositoryErrorCategory.CLOCK_INVALID if mode == "clock" else RepositoryErrorCategory.INVALID_ARGUMENT
                 self.assertIs(expected, raised.exception.category)
-                self.assertEqual(deleting, await DialogueRepository(storage).get_live())
+                self.assertEqual(pending_storage, await DialogueRepository(storage).get_live())
                 self.assertIsNone(await repo.get_tombstone("d"))
             finally:
                 await storage.close()
@@ -433,7 +439,7 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
             )
             with self.assertRaises(RepositoryError) as raised:
                 await repo.finalize_confirmed(dialogue_id="d", expected_version=deleting.version, tombstone_expires_at_ms=100)
-            self.assertIs(RepositoryErrorCategory.INVARIANT_VIOLATION, raised.exception.category)
+            self.assertIs(RepositoryErrorCategory.STATE_CONFLICT, raised.exception.category)
             self.assertEqual(deleting, await DialogueRepository(storage).get_live())
         finally:
             await storage.close()
@@ -451,9 +457,12 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
         try:
             repo, deleting = await self.delete_claimed(storage)
             await self.insert_terminal_job_with_segments(storage, "DELIVERED", ("CONFIRMED",))
+            pending_storage = await repo.mark_delete_confirmed_pending_storage(
+                dialogue_id="d", expected_version=deleting.version
+            )
             repo = DeletionRepository(storage, now_ms=blocked_clock)
             task = asyncio.create_task(repo.finalize_confirmed(
-                dialogue_id="d", expected_version=deleting.version, tombstone_expires_at_ms=100
+                dialogue_id="d", expected_version=pending_storage.version, tombstone_expires_at_ms=100
             ))
             await asyncio.to_thread(started.wait, 2)
             self.assertTrue(started.is_set())
@@ -472,12 +481,15 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
         storage = await self.open()
         try:
             repo, deleting = await self.delete_claimed(storage)
-            result = await repo.finalize_confirmed(
-                dialogue_id="d", expected_version=deleting.version, tombstone_expires_at_ms=100
+            pending_storage = await repo.mark_delete_confirmed_pending_storage(
+                dialogue_id="d", expected_version=deleting.version
             )
-            self.assertEqual(deleting.version, result.tombstone.stale_generation)
+            result = await repo.finalize_confirmed(
+                dialogue_id="d", expected_version=pending_storage.version, tombstone_expires_at_ms=100
+            )
+            self.assertEqual(pending_storage.version, result.tombstone.stale_generation)
             persisted = await repo.get_tombstone("d")
-            self.assertEqual(deleting.version, persisted.stale_generation)
+            self.assertEqual(pending_storage.version, persisted.stale_generation)
         finally:
             await storage.close()
 
@@ -486,7 +498,7 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
             await self.dialogue(storage)
             await self.write_sql(
                 storage,
-                "UPDATE dialogues SET state = 'DELETING', version = ?, last_error_class = NULL WHERE dialogue_id = 'd'",
+                "UPDATE dialogues SET state = 'DELETE_CONFIRMED_PENDING_STORAGE', version = ?, last_error_class = NULL WHERE dialogue_id = 'd'",
                 (MAX_SQLITE_INT,),
             )
             repo = DeletionRepository(storage, now_ms=lambda: 20)
@@ -623,9 +635,12 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
             storage = await self.fresh_storage()
             try:
                 _, deleting = await self.delete_claimed(storage)
+                pending_storage = await DeletionRepository(storage, now_ms=lambda: 20).mark_delete_confirmed_pending_storage(
+                    dialogue_id="d", expected_version=deleting.version
+                )
                 with self.assertRaises(RepositoryError) as raised:
                     await DeletionRepository(storage, now_ms=lambda: 20).finalize_confirmed(
-                        dialogue_id="d", expected_version=deleting.version,
+                        dialogue_id="d", expected_version=pending_storage.version,
                         tombstone_expires_at_ms=value,
                     )
                 self.assertIs(RepositoryErrorCategory.INVALID_ARGUMENT, raised.exception.category)
@@ -636,11 +651,14 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
             storage = await self.fresh_storage()
             try:
                 _, deleting = await self.delete_claimed(storage)
+                pending_storage = await DeletionRepository(storage, now_ms=lambda: 20).mark_delete_confirmed_pending_storage(
+                    dialogue_id="d", expected_version=deleting.version
+                )
                 with self.assertRaises(RepositoryError) as raised:
                     await DeletionRepository(
                         storage, now_ms=lambda: (_ for _ in ()).throw(RuntimeError("CLOCK"))
                     ).finalize_confirmed(
-                        dialogue_id="d", expected_version=deleting.version,
+                        dialogue_id="d", expected_version=pending_storage.version,
                         tombstone_expires_at_ms=value,
                     )
                 self.assertIs(RepositoryErrorCategory.CLOCK_INVALID, raised.exception.category)
@@ -760,7 +778,10 @@ class HardDeleteTombstonesErrorsTests(unittest.IsolatedAsyncioTestCase):
                 dialogue_id="d", expected_version=(await DialogueRepository(storage).get_live()).version
             )
             deleting = await deletion.claim_deleting(dialogue_id="d", expected_version=deleting.version)
-            await deletion.finalize_confirmed(dialogue_id="d", expected_version=deleting.version, tombstone_expires_at_ms=100)
+            pending_storage = await deletion.mark_delete_confirmed_pending_storage(
+                dialogue_id="d", expected_version=deleting.version
+            )
+            await deletion.finalize_confirmed(dialogue_id="d", expected_version=pending_storage.version, tombstone_expires_at_ms=100)
             record = await repo.get("a" * 64)
             self.assertEqual((None, None, 1, "E"), (record.dialogue_id, record.job_id, record.count, record.error_class))
         finally:

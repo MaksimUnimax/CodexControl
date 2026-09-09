@@ -39,6 +39,7 @@ from codex_control.application import (
 from codex_control.domain import CodexProfile
 from codex_control.storage import (
     DialogueRepository,
+    DeletionRepository,
     DialogueState,
     SettingsRepository,
     SqliteStorage,
@@ -250,13 +251,21 @@ class FinalP3FakeApplicationAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ExistingDialogueTurnStatus.BLOCKED, blocked_delete_prompt.status)
         fake_delete.release.set()
         deleted = await delete_task
-        self.assertEqual(DialogueDeleteStatus.DELETED, deleted.status)
+        self.assertEqual(DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE, deleted.status)
+        self.assertEqual(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE, deleted.dialogue.state)
+        self.assertIsNone(deleted.tombstone)
         counts = await self.storage.read(lambda c: tuple(
             c.execute("SELECT COUNT(*) FROM " + table).fetchone()[0]
             for table in ("dialogues", "turn_jobs", "transient_payloads", "delivery_segments", "approvals", "deletion_tombstones")
         ))
-        self.assertEqual((0, 0, 0, 0, 0, 1), counts)
-        self.assertNotIn("thread-one", repr(deleted.tombstone))
+        self.assertEqual((1, 2, 5, 2, 1, 0), counts)
+        finalized = await DeletionRepository(self.storage, now_ms=lambda: 41).finalize_confirmed(
+            dialogue_id=running.dialogue_id,
+            expected_version=deleted.dialogue.version,
+            tombstone_expires_at_ms=604800041,
+        )
+        self.assertEqual(2, finalized.purged_jobs)
+        self.assertNotIn("thread-one", repr(finalized.tombstone))
         self.assertGreaterEqual(
             await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM ingress_updates").fetchone()[0]),
             2,

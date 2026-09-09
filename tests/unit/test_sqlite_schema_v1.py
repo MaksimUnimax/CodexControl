@@ -16,7 +16,12 @@ from codex_control.storage import (
     StorageErrorCategory,
 )
 from codex_control.storage.schema import INDEX_NAMES, TABLE_NAMES, canonicalize_sql
-from codex_control.storage.schema import SCHEMA_V2_MIGRATION_STATEMENTS
+from codex_control.storage.schema import (
+    SCHEMA_V2_MIGRATION_STATEMENTS,
+    SCHEMA_V3_DIALOGUES_STATEMENT,
+    SCHEMA_V3_MIGRATION_ID,
+    SCHEMA_V3_MIGRATION_SHA256,
+)
 
 
 class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
@@ -54,8 +59,9 @@ class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
                 (1, MIGRATION_ID, SCHEMA_V1_DDL_SHA256, 1234567890),
                 (2, "0002_ingress_rejected_disposition",
                  "a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85", 1234567890),
+                (3, SCHEMA_V3_MIGRATION_ID, SCHEMA_V3_MIGRATION_SHA256, 1234567890),
             ], rows)
-            self.assertEqual(2, await storage.read(lambda c: c.execute("PRAGMA user_version").fetchone()[0]))
+            self.assertEqual(3, await storage.read(lambda c: c.execute("PRAGMA user_version").fetchone()[0]))
             objects = await self._objects(storage)
             self.assertEqual(TABLE_NAMES, {name for kind, name, _ in objects if kind == "table"})
             self.assertEqual(INDEX_NAMES, {name for kind, name, _ in objects if kind == "index"})
@@ -98,7 +104,7 @@ class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_future_version_rejected(self):
         with sqlite3.connect(self.path) as connection:
-            connection.execute("PRAGMA user_version = 3")
+            connection.execute("PRAGMA user_version = 4")
         with self.assertRaises(StorageError) as raised:
             await self._open()
         self.assertEqual(StorageErrorCategory.SCHEMA_UNSUPPORTED, raised.exception.category)
@@ -140,6 +146,7 @@ class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
         try:
             expected = {s.split()[2]: canonicalize_sql(s) for s in SCHEMA_V1_STATEMENTS}
             expected["ingress_updates"] = canonicalize_sql(SCHEMA_V2_MIGRATION_STATEMENTS[1])
+            expected["dialogues"] = canonicalize_sql(SCHEMA_V3_DIALOGUES_STATEMENT)
             actual = await self._objects(storage)
             actual_by_name = {name: canonicalize_sql(sql) for _, name, sql in actual}
             self.assertEqual(expected, actual_by_name)

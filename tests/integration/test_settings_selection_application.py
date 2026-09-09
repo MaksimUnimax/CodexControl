@@ -237,7 +237,7 @@ class SettingsSelectionApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         states = (
             DialogueState.CREATING, DialogueState.IDLE, DialogueState.CREATE_UNKNOWN, DialogueState.ERROR,
             DialogueState.TURN_RUNNING, DialogueState.INTERRUPTING, DialogueState.TURN_UNKNOWN,
-            DialogueState.DELETE_PENDING, DialogueState.DELETING, DialogueState.DELETE_UNKNOWN,
+            DialogueState.DELETE_PENDING, DialogueState.DELETING, DialogueState.DELETE_CONFIRMED_PENDING_STORAGE, DialogueState.DELETE_UNKNOWN,
         )
         for state in states:
             await self.clear()
@@ -265,7 +265,7 @@ class SettingsSelectionApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         for state in (
             DialogueState.CREATING, DialogueState.CREATE_UNKNOWN, DialogueState.ERROR,
             DialogueState.TURN_RUNNING, DialogueState.INTERRUPTING, DialogueState.TURN_UNKNOWN,
-            DialogueState.DELETE_PENDING, DialogueState.DELETING, DialogueState.DELETE_UNKNOWN,
+            DialogueState.DELETE_PENDING, DialogueState.DELETING, DialogueState.DELETE_CONFIRMED_PENDING_STORAGE, DialogueState.DELETE_UNKNOWN,
         ):
             await self.clear()
             await self.put_dialogue_state(state)
@@ -282,7 +282,7 @@ class SettingsSelectionApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         states = (
             DialogueState.CREATING, DialogueState.CREATE_UNKNOWN, DialogueState.ERROR,
             DialogueState.TURN_RUNNING, DialogueState.INTERRUPTING, DialogueState.TURN_UNKNOWN,
-            DialogueState.DELETE_PENDING, DialogueState.DELETING, DialogueState.DELETE_UNKNOWN,
+            DialogueState.DELETE_PENDING, DialogueState.DELETING, DialogueState.DELETE_CONFIRMED_PENDING_STORAGE, DialogueState.DELETE_UNKNOWN,
         )
         for state in states:
             await self.clear(model="model-a", effort="high")

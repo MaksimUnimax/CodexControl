@@ -88,6 +88,7 @@ class PrivateControlStatus(StrEnum):
     CONFIRM_REQUIRED = "CONFIRM_REQUIRED"
     INTERRUPTED = "INTERRUPTED"
     DELETED = "DELETED"
+    CONFIRMED_PENDING_STORAGE = "CONFIRMED_PENDING_STORAGE"
     APPROVED = "APPROVED"
     DENIED = "DENIED"
     BLOCKED = "BLOCKED"
@@ -868,6 +869,7 @@ class PrivateControlService:
             PrivateDialogueStatus.CONFIRM_REQUIRED: PrivateControlStatus.CONFIRM_REQUIRED,
             PrivateDialogueStatus.INTERRUPTED: PrivateControlStatus.INTERRUPTED,
             PrivateDialogueStatus.DELETED: PrivateControlStatus.DELETED,
+            PrivateDialogueStatus.CONFIRMED_PENDING_STORAGE: PrivateControlStatus.CONFIRMED_PENDING_STORAGE,
             PrivateDialogueStatus.BLOCKED: PrivateControlStatus.BLOCKED,
             PrivateDialogueStatus.STALE: PrivateControlStatus.STALE,
             PrivateDialogueStatus.UNKNOWN: PrivateControlStatus.UNKNOWN,
@@ -886,6 +888,7 @@ class PrivateControlService:
             PrivateDialogueStatus.RENDERED: {None, PrivateDialogueReason.NO_DIALOGUE},
             PrivateDialogueStatus.CONFIRM_REQUIRED: {None}, PrivateDialogueStatus.INTERRUPTED: {None},
             PrivateDialogueStatus.DELETED: {None}, PrivateDialogueStatus.FAILED: {None},
+            PrivateDialogueStatus.CONFIRMED_PENDING_STORAGE: {None},
             PrivateDialogueStatus.UNKNOWN: {PrivateDialogueReason.INTERRUPT_UNRESOLVED, PrivateDialogueReason.DELETE_UNKNOWN},
             PrivateDialogueStatus.STALE: {PrivateDialogueReason.CALLBACK_NOT_FOUND, PrivateDialogueReason.STALE_ACTION},
             PrivateDialogueStatus.BLOCKED: {PrivateDialogueReason.NO_DIALOGUE, PrivateDialogueReason.DIALOGUE_NOT_RUNNING, PrivateDialogueReason.JOB_NOT_RUNNING, PrivateDialogueReason.ACTIVE_BINDING_UNAVAILABLE, PrivateDialogueReason.INTERRUPT_IN_PROGRESS, PrivateDialogueReason.DIALOGUE_NOT_READY, PrivateDialogueReason.DELETE_NOT_READY, PrivateDialogueReason.DELETE_IN_PROGRESS, PrivateDialogueReason.DELETE_UNKNOWN, PrivateDialogueReason.ACTION_UNAVAILABLE},

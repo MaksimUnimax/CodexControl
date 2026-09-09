@@ -26,7 +26,7 @@ from codex_control.application.private_settings import (
 class PrivateDialogueControlUnitTests(unittest.TestCase):
     def test_exact_enums_and_frozen_public_records(self):
         self.assertEqual(
-            ["RENDERED", "CONFIRM_REQUIRED", "INTERRUPTED", "DELETED", "BLOCKED", "STALE", "UNKNOWN", "FAILED", "EXPIRED", "ALREADY_USED", "UNAUTHORIZED"],
+            ["RENDERED", "CONFIRM_REQUIRED", "INTERRUPTED", "DELETED", "CONFIRMED_PENDING_STORAGE", "BLOCKED", "STALE", "UNKNOWN", "FAILED", "EXPIRED", "ALREADY_USED", "UNAUTHORIZED"],
             [item.value for item in PrivateDialogueStatus],
         )
         self.assertEqual(

@@ -165,7 +165,11 @@ def _materialize_dialogue(row: Any) -> DialogueRecord:
     last_error_class = _validate_stored_string(row[9], _ERROR_CLASS_LENGTH, nullable=True)
     if last_error_class is not None and _ERROR_CLASS_RE.fullmatch(last_error_class) is None:
         raise _invariant()
-    if state in (DialogueState.DELETE_PENDING, DialogueState.DELETING):
+    if state in (
+        DialogueState.DELETE_PENDING,
+        DialogueState.DELETING,
+        DialogueState.DELETE_CONFIRMED_PENDING_STORAGE,
+    ):
         if thread_id is None or last_error_class is not None:
             raise _invariant()
     elif state is DialogueState.DELETE_UNKNOWN:

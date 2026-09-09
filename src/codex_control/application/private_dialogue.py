@@ -18,6 +18,7 @@ from codex_control.storage import (
     CallbackClaimStatus,
     DeleteConfirmationRevocationResult,
     DeleteConfirmationRevocationStatus,
+    DialogueRecord,
     DialogueState,
     PrivateCallbackActionSpec,
     PrivateManagementRepository,
@@ -88,6 +89,7 @@ class PrivateDialogueStatus(StrEnum):
     CONFIRM_REQUIRED = "CONFIRM_REQUIRED"
     INTERRUPTED = "INTERRUPTED"
     DELETED = "DELETED"
+    CONFIRMED_PENDING_STORAGE = "CONFIRMED_PENDING_STORAGE"
     BLOCKED = "BLOCKED"
     STALE = "STALE"
     UNKNOWN = "UNKNOWN"
@@ -732,6 +734,15 @@ class PrivateDialogueManagementService:
                 raise _invariant()
             status = PrivateDialogueStatus.DELETED if result.status is DialogueDeleteStatus.DELETED else PrivateDialogueStatus.FAILED
             return PrivateDialogueResult(status, None, None)
+        if result.status is DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE:
+            if (
+                result.reason is not None
+                or type(result.dialogue) is not DialogueRecord
+                or result.dialogue.state is not DialogueState.DELETE_CONFIRMED_PENDING_STORAGE
+                or result.tombstone is not None
+            ):
+                raise _invariant()
+            return PrivateDialogueResult(PrivateDialogueStatus.CONFIRMED_PENDING_STORAGE, None, None)
         if result.status is DialogueDeleteStatus.UNKNOWN:
             if result.reason is not None:
                 raise _invariant()

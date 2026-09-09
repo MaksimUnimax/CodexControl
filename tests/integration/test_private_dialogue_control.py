@@ -372,6 +372,7 @@ class PrivateDialogueControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
             "TURN_UNKNOWN": {"P42_REFRESH"},
             "DELETE_PENDING": {"P42_REFRESH", "P42_BEGIN_DELETE"},
             "DELETING": {"P42_REFRESH"},
+            "DELETE_CONFIRMED_PENDING_STORAGE": {"P42_REFRESH"},
             "DELETE_UNKNOWN": {"P42_REFRESH"},
         }
         for name, wanted in expected.items():
@@ -425,7 +426,7 @@ class PrivateDialogueControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await DeletionRepository(self.storage, now_ms=lambda: 1).claim_delete_intent(
                     dialogue_id=current.dialogue_id, expected_version=current.version
                 )
-            elif name in ("DELETING", "DELETE_UNKNOWN"):
+            elif name in ("DELETING", "DELETE_CONFIRMED_PENDING_STORAGE", "DELETE_UNKNOWN"):
                 current = await self.seed_idle()
                 pending = await DeletionRepository(self.storage, now_ms=lambda: 1).claim_delete_intent(
                     dialogue_id=current.dialogue_id, expected_version=current.version
@@ -433,7 +434,11 @@ class PrivateDialogueControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 deleting = await DeletionRepository(self.storage, now_ms=lambda: 1).claim_deleting(
                     dialogue_id=current.dialogue_id, expected_version=pending.version
                 )
-                if name == "DELETE_UNKNOWN":
+                if name == "DELETE_CONFIRMED_PENDING_STORAGE":
+                    await DeletionRepository(self.storage, now_ms=lambda: 1).mark_delete_confirmed_pending_storage(
+                        dialogue_id=current.dialogue_id, expected_version=deleting.version
+                    )
+                elif name == "DELETE_UNKNOWN":
                     await DeletionRepository(self.storage, now_ms=lambda: 1).mark_delete_unknown(
                         dialogue_id=current.dialogue_id, expected_version=deleting.version,
                         error_class="DELETE_UNKNOWN",
@@ -535,9 +540,9 @@ class PrivateDialogueControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("official Codex thread deletion", confirmation.panel.text)
         confirm = await self.action_token(confirmation.panel, "P42_CONFIRM_DELETE")
         result = await service.handle_callback(PrivateCallbackRequest(4, 7, 7, "query", confirm))
-        self.assertEqual(PrivateDialogueStatus.DELETED, result.status)
+        self.assertEqual(PrivateDialogueStatus.CONFIRMED_PENDING_STORAGE, result.status)
         self.assertEqual(1, len(delete_lifecycle.calls))
-        self.assertIsNotNone(await DeletionRepository(self.storage).get_tombstone("dialogue"))
+        self.assertIsNone(await DeletionRepository(self.storage).get_tombstone("dialogue"))
         replay = await service.handle_callback(PrivateCallbackRequest(5, 7, 7, "query", confirm))
         self.assertEqual(PrivateDialogueStatus.ALREADY_USED, replay.status)
         self.assertEqual(1, len(delete_lifecycle.calls))
@@ -561,9 +566,9 @@ class PrivateDialogueControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
         confirmation = await service.handle_callback(PrivateCallbackRequest(6, 7, 7, "query", begin))
         confirm = await self.action_token(confirmation.panel, "P42_CONFIRM_DELETE")
         result = await service.handle_callback(PrivateCallbackRequest(7, 7, 7, "query", confirm))
-        self.assertEqual(PrivateDialogueStatus.DELETED, result.status)
+        self.assertEqual(PrivateDialogueStatus.CONFIRMED_PENDING_STORAGE, result.status)
         self.assertEqual(1, len(delete_lifecycle.calls))
-        self.assertEqual(0, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM dialogues").fetchone()[0]))
+        self.assertEqual(1, await self.storage.read(lambda c: c.execute("SELECT COUNT(*) FROM dialogues").fetchone()[0]))
 
     async def test_wrong_owner_and_p41_token_are_nonconsuming(self):
         await SettingsRepository(self.storage, now_ms=lambda: 1).initialize_if_absent(

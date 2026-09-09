@@ -513,7 +513,10 @@ class P26bRestartMatrixTests(unittest.IsolatedAsyncioTestCase):
             )
             pending = await DeletionRepository(storage, now_ms=lambda: 10).claim_delete_intent(dialogue_id=dialogue.dialogue_id, expected_version=dialogue.version)
             deleting = await DeletionRepository(storage, now_ms=lambda: 11).claim_deleting(dialogue_id=dialogue.dialogue_id, expected_version=pending.version)
-            final = await DeletionRepository(storage, now_ms=lambda: 12).finalize_confirmed(dialogue_id=dialogue.dialogue_id, expected_version=deleting.version, tombstone_expires_at_ms=100_000)
+            pending_storage = await DeletionRepository(storage, now_ms=lambda: 12).mark_delete_confirmed_pending_storage(
+                dialogue_id=dialogue.dialogue_id, expected_version=deleting.version
+            )
+            final = await DeletionRepository(storage, now_ms=lambda: 13).finalize_confirmed(dialogue_id=dialogue.dialogue_id, expected_version=pending_storage.version, tombstone_expires_at_ms=100_000)
             await storage.close()
             storage = await SqliteStorage.open(db.path, now_ms=lambda: 1)
             self.assertIsNone(await DialogueRepository(storage).get_live())

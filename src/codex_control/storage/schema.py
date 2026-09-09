@@ -2,7 +2,7 @@
 
 from hashlib import sha256
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MIGRATION_ID = "0001_initial_state"
 
 SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
@@ -195,6 +195,96 @@ SCHEMA_V2_MIGRATION_CANONICAL_SQL = "\n".join(
 ) + "\n"
 SCHEMA_V2_MIGRATION_SHA256 = sha256(
     SCHEMA_V2_MIGRATION_CANONICAL_SQL.encode("utf-8")
+).hexdigest()
+
+SCHEMA_V3_MIGRATION_ID = "0003_confirmed_pending_storage"
+
+# The v3 migration rebuilds the dialogue table and every table whose foreign
+# key graph points at it (directly or through turn_jobs/transient_payloads).
+# Renaming all old tables first lets the replacement tables be created with
+# their original names and FK declarations, without writable_schema or a
+# foreign-key-disabled window.  The historical statements above are never
+# modified; this derived statement is the sole v3 DDL change.
+SCHEMA_V3_DIALOGUES_STATEMENT = SCHEMA_V1_STATEMENTS[3].replace(
+    "'DELETE_PENDING','DELETING','DELETE_UNKNOWN'",
+    "'DELETE_PENDING','DELETING','DELETE_UNKNOWN','DELETE_CONFIRMED_PENDING_STORAGE'",
+)
+
+_V3_REBUILT_TABLES = (
+    "dialogues",
+    "turn_jobs",
+    "transient_payloads",
+    "delivery_segments",
+    "approvals",
+    "errors",
+)
+_V3_TABLE_COLUMNS = {
+    "dialogues": (
+        "dialogue_id, live_slot, server_id, profile_id, thread_id, state, version, "
+        "created_at_ms, updated_at_ms, last_error_class"
+    ),
+    "turn_jobs": (
+        "job_id, telegram_update_id, source_chat_id, source_message_id, dialogue_id, "
+        "server_id, profile_id, thread_id, model_id, reasoning_effort, input_sha256, "
+        "codex_turn_id, state, version, created_at_ms, updated_at_ms, error_class"
+    ),
+    "transient_payloads": (
+        "payload_id, dialogue_id, job_id, kind, content, content_sha256, byte_length, "
+        "created_at_ms, expires_at_ms"
+    ),
+    "delivery_segments": (
+        "job_id, sequence, operation, target_message_id, payload_id, payload_sha256, "
+        "state, attempt_count, confirmed_message_id, created_at_ms, updated_at_ms"
+    ),
+    "approvals": (
+        "approval_id, profile_id, wire_request_id_type, wire_request_id_int, "
+        "wire_request_id_text, job_id, kind, display_payload_id, state, created_at_ms, "
+        "updated_at_ms, expires_at_ms"
+    ),
+    "errors": (
+        "fingerprint_sha256, error_class, count, first_seen_at_ms, last_seen_at_ms, "
+        "dialogue_id, job_id"
+    ),
+}
+_V3_TABLE_STATEMENTS = {
+    "dialogues": SCHEMA_V3_DIALOGUES_STATEMENT,
+    "turn_jobs": SCHEMA_V1_STATEMENTS[4],
+    "transient_payloads": SCHEMA_V1_STATEMENTS[5],
+    "delivery_segments": SCHEMA_V1_STATEMENTS[6],
+    "approvals": SCHEMA_V1_STATEMENTS[9],
+    "errors": SCHEMA_V1_STATEMENTS[11],
+}
+_V3_DROP_ORDER = (
+    "approvals",
+    "delivery_segments",
+    "transient_payloads",
+    "errors",
+    "turn_jobs",
+    "dialogues",
+)
+_V3_INDEX_NAMES = tuple(
+    statement.split()[2]
+    for statement in SCHEMA_V1_STATEMENTS
+    if statement.lstrip().upper().startswith("CREATE INDEX ")
+)
+
+SCHEMA_V3_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    *(f"ALTER TABLE {name} RENAME TO {name}_v2" for name in _V3_REBUILT_TABLES),
+    *(f"DROP INDEX {name}" for name in _V3_INDEX_NAMES),
+    *(_V3_TABLE_STATEMENTS[name] for name in _V3_REBUILT_TABLES),
+    *(
+        f"INSERT INTO {name} ({_V3_TABLE_COLUMNS[name]}) "
+        f"SELECT {_V3_TABLE_COLUMNS[name]} FROM {name}_v2"
+        for name in _V3_REBUILT_TABLES
+    ),
+    *(f"DROP TABLE {name}_v2" for name in _V3_DROP_ORDER),
+    *(statement for statement in SCHEMA_V1_STATEMENTS if statement.lstrip().upper().startswith("CREATE INDEX ")),
+)
+SCHEMA_V3_MIGRATION_CANONICAL_SQL = "\n".join(
+    canonicalize_sql(statement) for statement in SCHEMA_V3_MIGRATION_STATEMENTS
+) + "\n"
+SCHEMA_V3_MIGRATION_SHA256 = sha256(
+    SCHEMA_V3_MIGRATION_CANONICAL_SQL.encode("utf-8")
 ).hexdigest()
 
 TABLE_NAMES = frozenset(

@@ -229,14 +229,17 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
         life.before_call = proof
         service = self.delete_service(life)
         result = await service.delete(DialogueDeleteRequest("dialogue", current.version))
-        self.assertEqual(DialogueDeleteStatus.DELETED, result.status)
-        self.assertIsNone(result.dialogue)
+        self.assertEqual(DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE, result.status)
+        self.assertIsNotNone(result.dialogue)
+        self.assertEqual(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE, result.dialogue.state)
+        self.assertIsNone(result.tombstone)
         self.assertEqual(1, len(life.calls))
         self.assertEqual(1, len(observed))
-        self.assertEqual(604800000, result.tombstone.expires_at_ms - result.tombstone.deleted_at_ms)
-        replay = await service.delete(DialogueDeleteRequest("dialogue", current.version))
-        self.assertEqual(DialogueDeleteStatus.DELETED, replay.status)
-        self.assertEqual(result.tombstone, replay.tombstone)
+        self.assertEqual("thread", result.dialogue.thread_id)
+        replay = await service.delete(DialogueDeleteRequest("dialogue", result.dialogue.version))
+        self.assertEqual(DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE, replay.status)
+        self.assertEqual(result.dialogue, replay.dialogue)
+        self.assertIsNone(replay.tombstone)
         self.assertEqual(1, len(life.calls))
 
     async def test_local_preeffect_failure_is_failed_and_unknown_is_never_retried(self):
@@ -342,7 +345,7 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
         self.assertEqual([], second_life.calls)
         gate.set()
         first_result = await first_task
-        self.assertEqual(DialogueDeleteStatus.DELETED, first_result.status)
+        self.assertEqual(DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE, first_result.status)
         self.assertEqual(1, len(first_life.calls))
 
     async def test_delete_pending_fresh_request_continues_after_restart_old_request_is_stale(self):
@@ -361,7 +364,7 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
         fresh = await self.delete_service(life).delete(
             DialogueDeleteRequest("dialogue", pending.version)
         )
-        self.assertEqual(DialogueDeleteStatus.DELETED, fresh.status)
+        self.assertEqual(DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE, fresh.status)
         self.assertEqual(1, len(life.calls))
 
     async def test_deleting_startup_recovery_marks_unknown_without_p1(self):
@@ -688,13 +691,18 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
         )
         recovered = await DialogueRecoveryService(self.storage, now_ms=lambda: 2).recover_startup()
         self.assertEqual(DialogueRecoveryStatus.PRE_EFFECT_FAILED, recovered.status)
-        clock_values = iter((10, 20, 30, 604800030))
+        clock_values = iter((10, 20))
+        def failing_clock():
+            try:
+                return next(clock_values)
+            except StopIteration:
+                raise RuntimeError("PRIVATE_POST_CONFIRMED_STORAGE_FAILURE")
         lifecycle = FakeDeleteLifecycle()
         with self.assertRaises(DialogueDeleteError) as raised:
             await self.delete_service(
-                lifecycle, clock=lambda: next(clock_values)
+                lifecycle, clock=failing_clock
             ).delete(DialogueDeleteRequest("dialogue", current.version))
-        self.assertEqual("INVARIANT", str(raised.exception))
+        self.assertEqual("STORAGE", str(raised.exception))
         self.assertEqual(1, len(lifecycle.calls))
         deleting = await DialogueRepository(self.storage).get_live()
         self.assertEqual(DialogueState.DELETING, deleting.state)

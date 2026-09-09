@@ -13,6 +13,7 @@ from codex_control.application import (
     PrivateControlPanelSection,
     PrivateControlReason,
     PrivateControlResult,
+    PrivateControlService,
     PrivateControlStatus,
     PrivateDiagnosticState,
     PrivateDiagnosticsSnapshot,
@@ -27,13 +28,17 @@ from codex_control.application.private_settings import (
     PrivateAdminStatus,
     PrivatePanelSection,
 )
-from codex_control.application.private_dialogue import PrivateDialogueReason, PrivateDialogueStatus
+from codex_control.application.private_dialogue import (
+    PrivateDialogueReason,
+    PrivateDialogueResult,
+    PrivateDialogueStatus,
+)
 
 
 class PrivateControlContractTests(unittest.TestCase):
     def test_exact_final_enums(self):
         self.assertEqual(
-            "RENDERED UPDATED NO_CHANGE CONFIRM_REQUIRED INTERRUPTED DELETED APPROVED DENIED BLOCKED STALE UNKNOWN FAILED EXPIRED ALREADY_USED DUPLICATE UNAUTHORIZED UNSUPPORTED".split(),
+            "RENDERED UPDATED NO_CHANGE CONFIRM_REQUIRED INTERRUPTED DELETED CONFIRMED_PENDING_STORAGE APPROVED DENIED BLOCKED STALE UNKNOWN FAILED EXPIRED ALREADY_USED DUPLICATE UNAUTHORIZED UNSUPPORTED".split(),
             [item.value for item in PrivateControlStatus],
         )
         self.assertEqual(
@@ -54,7 +59,7 @@ class PrivateControlContractTests(unittest.TestCase):
         )
         self.assertEqual(["ROOT", "PROFILES", "MODELS", "REASONING"], [item.value for item in PrivatePanelSection])
         self.assertEqual(
-            "RENDERED CONFIRM_REQUIRED INTERRUPTED DELETED BLOCKED STALE UNKNOWN FAILED EXPIRED ALREADY_USED UNAUTHORIZED".split(),
+            "RENDERED CONFIRM_REQUIRED INTERRUPTED DELETED CONFIRMED_PENDING_STORAGE BLOCKED STALE UNKNOWN FAILED EXPIRED ALREADY_USED UNAUTHORIZED".split(),
             [item.value for item in PrivateDialogueStatus],
         )
         self.assertEqual(
@@ -63,6 +68,13 @@ class PrivateControlContractTests(unittest.TestCase):
         )
         from codex_control.application.private_dialogue import PrivateDialoguePanelSection
         self.assertEqual(["STATUS", "DELETE_CONFIRM"], [item.value for item in PrivateDialoguePanelSection])
+
+    def test_pending_storage_projection_is_truthful_and_not_deleted(self):
+        result = PrivateControlService._map_dialogue(
+            PrivateDialogueResult(PrivateDialogueStatus.CONFIRMED_PENDING_STORAGE, None, None)
+        )
+        self.assertEqual(PrivateControlStatus.CONFIRMED_PENDING_STORAGE, result.status)
+        self.assertNotEqual(PrivateControlStatus.DELETED, result.status)
 
     def test_public_records_are_frozen_and_redacted(self):
         request = PrivateApprovalProjectionRequest("approval-secret")

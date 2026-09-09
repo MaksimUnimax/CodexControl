@@ -71,7 +71,8 @@ class CoreRepositoryRecordTests(unittest.TestCase):
         self.assertEqual(
             {
                 "CREATING", "IDLE", "CREATE_UNKNOWN", "ERROR", "TURN_RUNNING",
-                "INTERRUPTING", "TURN_UNKNOWN", "DELETE_PENDING", "DELETING", "DELETE_UNKNOWN",
+                "INTERRUPTING", "TURN_UNKNOWN", "DELETE_PENDING", "DELETING",
+                "DELETE_CONFIRMED_PENDING_STORAGE", "DELETE_UNKNOWN",
             },
             {state.value for state in DialogueState},
         )

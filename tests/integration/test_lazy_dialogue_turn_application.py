@@ -289,7 +289,7 @@ class LazyDialogueTurnIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await self.storage.write(lambda c: (c.execute("DELETE FROM turn_jobs"), c.execute("DELETE FROM ingress_updates"), c.execute("DELETE FROM transient_payloads"), c.execute("DELETE FROM dialogues"), None)[4])
 
     async def test_create_race_loss_state_matrix_is_read_only(self):
-        for index, state in enumerate(("IDLE", "TURN_RUNNING", "CREATING", "CREATE_UNKNOWN", "ERROR", "NONE"), 90):
+        for index, state in enumerate(("IDLE", "TURN_RUNNING", "CREATING", "CREATE_UNKNOWN", "ERROR", "DELETE_CONFIRMED_PENDING_STORAGE", "NONE"), 90):
             await self.storage.write(lambda c: (c.execute("DELETE FROM turn_jobs"), c.execute("DELETE FROM ingress_updates"), c.execute("DELETE FROM transient_payloads"), c.execute("DELETE FROM dialogues"), None)[4])
             dialogue = None
             if state != "NONE":
@@ -324,6 +324,20 @@ class LazyDialogueTurnIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 elif state == "ERROR":
                     dialogue = await DialogueRepository(self.storage, now_ms=lambda: 10).mark_create_error(
                         dialogue_id=dialogue.dialogue_id, expected_version=0, error_class="CODEX_PROCESS"
+                    )
+                elif state == "DELETE_CONFIRMED_PENDING_STORAGE":
+                    dialogue = await DialogueRepository(self.storage, now_ms=lambda: 10).confirm_created(
+                        dialogue_id=dialogue.dialogue_id, expected_version=0, thread_id="matrix-thread"
+                    )
+                    deletion = DeletionRepository(self.storage, now_ms=lambda: 10)
+                    pending = await deletion.claim_delete_intent(
+                        dialogue_id=dialogue.dialogue_id, expected_version=dialogue.version
+                    )
+                    deleting = await deletion.claim_deleting(
+                        dialogue_id=dialogue.dialogue_id, expected_version=pending.version
+                    )
+                    dialogue = await deletion.mark_delete_confirmed_pending_storage(
+                        dialogue_id=dialogue.dialogue_id, expected_version=deleting.version
                     )
 
             service = self.service(thread=Thread(self.storage), turns=Turns(), ids=lambda kind: f"matrix-new-{kind}")

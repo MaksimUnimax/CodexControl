@@ -291,6 +291,40 @@ class DeletionRepository(_RepositoryBase):
             error_class=error_class, state=DialogueState.ERROR,
         )
 
+    async def mark_delete_confirmed_pending_storage(
+        self, *, dialogue_id: str, expected_version: int
+    ) -> DialogueRecord:
+        dialogue_id = _validate_id(dialogue_id)
+        expected_version = _validate_nonnegative(expected_version)
+
+        def write(connection: Any) -> DialogueRecord:
+            current = _dialogue_for_update(connection, dialogue_id)
+            _ensure_no_tombstone(connection, dialogue_id)
+            if current.version != expected_version:
+                raise _error(RepositoryErrorCategory.VERSION_CONFLICT)
+            if current.state is not DialogueState.DELETING or current.thread_id is None:
+                raise _state_conflict()
+            _check_delete_readiness(connection, current)
+            version = _next_version(current.version)
+            now = _validate_clock(self._clock)
+            updated = max(now, current.updated_at_ms)
+            changed = connection.execute(
+                "UPDATE dialogues SET state = ?, version = ?, updated_at_ms = ?, "
+                "last_error_class = NULL WHERE dialogue_id = ? AND version = ? AND state = ?",
+                (
+                    DialogueState.DELETE_CONFIRMED_PENDING_STORAGE.value, version, updated,
+                    dialogue_id, expected_version, DialogueState.DELETING.value,
+                ),
+            ).rowcount
+            if changed != 1:
+                raise _invariant()
+            return _record_dialogue(
+                current, state=DialogueState.DELETE_CONFIRMED_PENDING_STORAGE,
+                version=version, updated_at_ms=updated, last_error_class=None,
+            )
+
+        return await self._storage.write(write)
+
     async def _mark_delete_outcome(
         self, *, dialogue_id: str, expected_version: int,
         error_class: str, state: DialogueState,
@@ -337,7 +371,7 @@ class DeletionRepository(_RepositoryBase):
             current = _dialogue_for_update(connection, dialogue_id)
             if current.version != expected_version:
                 raise _error(RepositoryErrorCategory.VERSION_CONFLICT)
-            if current.state is not DialogueState.DELETING:
+            if current.state is not DialogueState.DELETE_CONFIRMED_PENDING_STORAGE:
                 raise _state_conflict()
             if current.thread_id is None:
                 raise _invariant()
@@ -386,7 +420,10 @@ class DeletionRepository(_RepositoryBase):
             )
             changed = connection.execute(
                 "DELETE FROM dialogues WHERE dialogue_id = ? AND version = ? AND state = ?",
-                (dialogue_id, expected_version, DialogueState.DELETING.value),
+                (
+                    dialogue_id, expected_version,
+                    DialogueState.DELETE_CONFIRMED_PENDING_STORAGE.value,
+                ),
             ).rowcount
             if changed != 1:
                 raise _invariant()

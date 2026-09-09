@@ -12,6 +12,8 @@ from codex_control.storage import (
     SCHEMA_V1_STATEMENTS,
     SCHEMA_V2_MIGRATION_ID,
     SCHEMA_V2_MIGRATION_SHA256,
+    SCHEMA_V3_MIGRATION_ID,
+    SCHEMA_V3_MIGRATION_SHA256,
 )
 from codex_control.storage.schema import (
     SCHEMA_V2_MIGRATION_STATEMENTS,
@@ -21,7 +23,7 @@ from codex_control.storage.schema import (
 
 class RejectedIngressSchemaV2UnitTests(unittest.TestCase):
     def test_current_and_historical_schema_authority(self):
-        self.assertEqual(2, SCHEMA_VERSION)
+        self.assertEqual(3, SCHEMA_VERSION)
         self.assertEqual("0001_initial_state", MIGRATION_ID)
         self.assertEqual(
             "b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c",
@@ -60,6 +62,7 @@ class RejectedIngressSchemaV2UnitTests(unittest.TestCase):
         for name in (
             "MIGRATION_ID", "SCHEMA_VERSION", "SCHEMA_V1_DDL_SHA256",
             "SCHEMA_V2_MIGRATION_ID", "SCHEMA_V2_MIGRATION_SHA256",
+            "SCHEMA_V3_MIGRATION_ID", "SCHEMA_V3_MIGRATION_SHA256",
         ):
             self.assertIn(name, storage.__all__)
             self.assertTrue(hasattr(storage, name))

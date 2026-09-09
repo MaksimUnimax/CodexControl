@@ -47,7 +47,7 @@ class DialogueDeleteRecoveryApplicationUnitTests(unittest.IsolatedAsyncioTestCas
 
     def test_exact_public_contracts(self):
         self.assertEqual(
-            ["DELETED", "FAILED", "UNKNOWN", "BLOCKED", "CONFLICT"],
+            ["DELETED", "CONFIRMED_PENDING_STORAGE", "FAILED", "UNKNOWN", "BLOCKED", "CONFLICT"],
             [item.value for item in DialogueDeleteStatus],
         )
         self.assertEqual(
@@ -58,7 +58,8 @@ class DialogueDeleteRecoveryApplicationUnitTests(unittest.IsolatedAsyncioTestCas
         self.assertEqual(["INVALID_ARGUMENT", "STORAGE", "INVARIANT"],
                          [item.value for item in DialogueDeleteErrorCategory])
         self.assertEqual(["NO_ACTION", "CREATE_MARKED_UNKNOWN", "PRE_EFFECT_FAILED",
-                          "TURN_MARKED_UNKNOWN", "INTERRUPT_MARKED_UNKNOWN", "DELETE_MARKED_UNKNOWN"],
+                          "TURN_MARKED_UNKNOWN", "INTERRUPT_MARKED_UNKNOWN", "DELETE_MARKED_UNKNOWN",
+                          "DELETE_CONFIRMED_STORAGE_PENDING"],
                          [item.value for item in DialogueRecoveryStatus])
         self.assertEqual(["STORAGE", "INVARIANT"],
                          [item.value for item in DialogueRecoveryErrorCategory])

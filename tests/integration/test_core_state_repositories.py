@@ -317,7 +317,7 @@ class CoreStateRepositoryTests(unittest.IsolatedAsyncioTestCase):
         storage = await self.open()
         states = (
             "CREATING", "IDLE", "CREATE_UNKNOWN", "ERROR", "TURN_RUNNING",
-            "INTERRUPTING", "TURN_UNKNOWN", "DELETE_PENDING", "DELETING", "DELETE_UNKNOWN",
+            "INTERRUPTING", "TURN_UNKNOWN", "DELETE_PENDING", "DELETING", "DELETE_CONFIRMED_PENDING_STORAGE", "DELETE_UNKNOWN",
         )
         try:
             for index, state in enumerate(states):
@@ -330,7 +330,7 @@ class CoreStateRepositoryTests(unittest.IsolatedAsyncioTestCase):
                     dialogue_id = f"dialogue-{index}"
                     thread_id = None if state == "CREATING" else f"thread-{index}"
                     last_error = None if state in (
-                        "CREATING", "DELETE_PENDING", "DELETING"
+                        "CREATING", "DELETE_PENDING", "DELETING", "DELETE_CONFIRMED_PENDING_STORAGE"
                     ) else f"ERR:{index}"
                     await storage.write(lambda c, values=(
                         dialogue_id, "server-materialized", "profile-materialized", thread_id,

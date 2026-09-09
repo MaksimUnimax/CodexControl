@@ -195,7 +195,11 @@ def _validate_canonical_dialogue(
             raise _invariant()
         return
 
-    if state in (DialogueState.DELETE_PENDING, DialogueState.DELETING):
+    if state in (
+        DialogueState.DELETE_PENDING,
+        DialogueState.DELETING,
+        DialogueState.DELETE_CONFIRMED_PENDING_STORAGE,
+    ):
         if dialogue.thread_id is None or dialogue.last_error_class is not None or jobs:
             raise _invariant()
         return

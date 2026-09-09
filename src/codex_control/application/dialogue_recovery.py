@@ -28,6 +28,7 @@ class DialogueRecoveryStatus(StrEnum):
     TURN_MARKED_UNKNOWN = "TURN_MARKED_UNKNOWN"
     INTERRUPT_MARKED_UNKNOWN = "INTERRUPT_MARKED_UNKNOWN"
     DELETE_MARKED_UNKNOWN = "DELETE_MARKED_UNKNOWN"
+    DELETE_CONFIRMED_STORAGE_PENDING = "DELETE_CONFIRMED_STORAGE_PENDING"
 
 
 class DialogueRecoveryErrorCategory(StrEnum):
@@ -154,6 +155,13 @@ class DialogueRecoveryService:
             if snapshot.active_jobs:
                 raise _invariant()
             return DialogueRecoveryResult(DialogueRecoveryStatus.NO_ACTION, None, current)
+
+        if current.state is DialogueState.DELETE_CONFIRMED_PENDING_STORAGE:
+            if snapshot.active_jobs:
+                raise _invariant()
+            return DialogueRecoveryResult(
+                DialogueRecoveryStatus.DELETE_CONFIRMED_STORAGE_PENDING, None, current
+            )
 
         if current.state in (DialogueState.CREATE_UNKNOWN, DialogueState.ERROR):
             if len(snapshot.active_jobs) > 1:

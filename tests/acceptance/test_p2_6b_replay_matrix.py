@@ -192,7 +192,7 @@ class P26bReplayMatrixTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_delete_unknown_has_no_retry_surface_or_return_to_deleting(self):
         from tests.acceptance.test_p2_6b_support import make_deleteable
-        self.assertEqual({"get_tombstone", "claim_delete_intent", "claim_deleting", "mark_delete_unknown", "mark_delete_error", "finalize_confirmed"}, {
+        self.assertEqual({"get_tombstone", "claim_delete_intent", "claim_deleting", "mark_delete_unknown", "mark_delete_error", "mark_delete_confirmed_pending_storage", "finalize_confirmed"}, {
             name for name, value in vars(DeletionRepository).items() if not name.startswith("_") and callable(value)
         })
         storage = await self.open()

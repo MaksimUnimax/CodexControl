@@ -14,6 +14,8 @@ from codex_control.storage import (
     SCHEMA_V1_DDL_SHA256,
     SCHEMA_V2_MIGRATION_ID,
     SCHEMA_V2_MIGRATION_SHA256,
+    SCHEMA_V3_MIGRATION_ID,
+    SCHEMA_V3_MIGRATION_SHA256,
     SqliteStorage,
     StorageError,
     StorageErrorCategory,
@@ -104,7 +106,7 @@ class RejectedIngressSchemaV2IntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def _fresh_v2(self, *, now_ms=lambda: 1):
         return await SqliteStorage.open(self.path, now_ms=now_ms)
 
-    async def test_fresh_v0_bootstraps_v2_with_two_clock_calls_and_exact_ledger(self):
+    async def test_fresh_v0_bootstraps_v3_with_three_clock_calls_and_exact_ledger(self):
         calls = []
 
         def clock():
@@ -113,16 +115,17 @@ class RejectedIngressSchemaV2IntegrationTests(unittest.IsolatedAsyncioTestCase):
 
         storage = await self._fresh_v2(now_ms=clock)
         try:
-            self.assertEqual(2, len(calls))
+            self.assertEqual(3, len(calls))
             actual = await storage.read(lambda c: (
                 c.execute("PRAGMA user_version").fetchone()[0],
                 [tuple(row) for row in c.execute("SELECT version, migration_id, ddl_sha256, applied_at_ms FROM schema_migrations ORDER BY version")],
             ))
-            self.assertEqual(2, actual[0])
+            self.assertEqual(3, actual[0])
             self.assertEqual(
                 [
                     (1, "0001_initial_state", SCHEMA_V1_DDL_SHA256, 101),
                     (2, SCHEMA_V2_MIGRATION_ID, SCHEMA_V2_MIGRATION_SHA256, 102),
+                    (3, SCHEMA_V3_MIGRATION_ID, SCHEMA_V3_MIGRATION_SHA256, 103),
                 ],
                 actual[1],
             )
@@ -184,8 +187,8 @@ class RejectedIngressSchemaV2IntegrationTests(unittest.IsolatedAsyncioTestCase):
         calls = []
         storage = await SqliteStorage.open(self.path, now_ms=lambda: calls.append(1) or 456)
         try:
-            self.assertEqual([1], calls)
-            self.assertEqual(2, await storage.read(
+            self.assertEqual([1, 1], calls)
+            self.assertEqual(3, await storage.read(
                 lambda c: c.execute("PRAGMA user_version").fetchone()[0]
             ))
             record = await IngressUpdateRepository(storage).get(104)
@@ -204,8 +207,8 @@ class RejectedIngressSchemaV2IntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "SELECT update_id, received_at_ms, completed_at_ms, disposition FROM ingress_updates ORDER BY update_id"
             )])
             self.assertEqual(before, after)
-            self.assertEqual(1, len(calls))
-            self.assertEqual(2, await storage.read(lambda c: c.execute("PRAGMA user_version").fetchone()[0]))
+            self.assertEqual(2, len(calls))
+            self.assertEqual(3, await storage.read(lambda c: c.execute("PRAGMA user_version").fetchone()[0]))
             self.assertEqual(1, await storage.read(lambda c: c.execute(
                 "SELECT COUNT(*) FROM ingress_updates WHERE disposition = 'JOB:job-1'"
             ).fetchone()[0]))
@@ -298,7 +301,7 @@ class RejectedIngressSchemaV2IntegrationTests(unittest.IsolatedAsyncioTestCase):
         storage = await SqliteStorage.open(self.path, now_ms=lambda: 789)
         await storage.close()
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(2, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(3, connection.execute("PRAGMA user_version").fetchone()[0])
 
     async def test_rejected_claim_materializes_is_content_free_and_duplicate_is_clock_free(self):
         storage = await self._fresh_v2(now_ms=lambda: 1)
