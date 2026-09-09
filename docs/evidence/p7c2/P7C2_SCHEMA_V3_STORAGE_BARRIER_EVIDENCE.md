@@ -69,6 +69,30 @@ stale/duplicate version safety.
   turns, lazy creation, model/reasoning/profile changes, deletion, interrupt,
   ordinary prompt admission, and dialogue replacement are blocked.
 
+## Architect repair — v2 migration exception ownership
+
+- Initial candidate: `fbe1ea7d2f55f8f4a24d1c86e6effbbcd04e87bc`
+- Initial architect verdict: `REWORK_REQUIRED`
+- The architect detected that the candidate accidentally inserted `_migrate_v3()`
+  after `_migrate_v2()`'s `StorageError` handler, causing the accepted v2
+  `sqlite3.Error` and `BaseException` handlers to be lost from v2.
+- The accepted base behavior is: `StorageError` rolls back and re-raises;
+  `sqlite3.Error` rolls back and maps to `SCHEMA_INVALID`; and `BaseException`
+  rolls back and re-raises the original exception.
+- The repair restores those two missing handlers to `_migrate_v2()` verbatim in
+  the historical position. `_migrate_v3()` retains its complete independent
+  three-handler structure.
+- Focused regression tests use a deterministic fake connection and prove v2
+  SQLite-error rollback plus `SCHEMA_INVALID` mapping, and v2
+  `BaseException` rollback plus original-exception re-raise.
+- Full regression: `967` tests, `0` skipped, `0` failures, `0` errors.
+- `SCHEMA_V1_DDL_SHA256` unchanged:
+  `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`
+- `SCHEMA_V2_MIGRATION_SHA256` unchanged:
+  `a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85`
+- `SCHEMA_V3_MIGRATION_SHA256` unchanged:
+  `cc4fe584962da3bdc13023d6361517cb858b64e16c2d0d38c3459741843b5eb4`
+
 ## Test evidence
 
 Migration coverage includes fresh v0→v3, v1→v3, populated v2→v3, every legal
@@ -82,7 +106,7 @@ Required gates:
 
 - `PYTHONPATH=src python3 -m compileall -q src tests`: pass
 - `git diff --check`: pass
-- Ordinary full suite: `965` tests, `0` skipped, `0` failures, `0` errors
+- Ordinary full suite: `967` tests, `0` skipped, `0` failures, `0` errors
 
 ## Historical hashes and effects
 

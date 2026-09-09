@@ -435,6 +435,18 @@ class SqliteStorage:
             except sqlite3.Error:
                 pass
             raise
+        except sqlite3.Error:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise _failure(StorageErrorCategory.SCHEMA_INVALID) from None
+        except BaseException:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
 
     @staticmethod
     def _migrate_v3(connection: sqlite3.Connection, now_ms: Callable[[], int] | None) -> None:

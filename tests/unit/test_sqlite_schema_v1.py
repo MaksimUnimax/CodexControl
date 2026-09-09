@@ -24,6 +24,24 @@ from codex_control.storage.schema import (
 )
 
 
+class _SyntheticBaseException(BaseException):
+    pass
+
+
+class _V2MigrationConnection:
+    def __init__(self, failure):
+        self.calls = []
+        self.failure = failure
+
+    def execute(self, statement, *parameters):
+        self.calls.append((statement, parameters))
+        if statement == "BEGIN IMMEDIATE":
+            return self
+        if statement != "ROLLBACK":
+            raise self.failure
+        return self
+
+
 class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -45,6 +63,31 @@ class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
 
     def _direct(self):
         return sqlite3.connect(self.path)
+
+    async def test_migrate_v2_sqlite_error_rolls_back_and_maps_schema_invalid(self):
+        connection = _V2MigrationConnection(sqlite3.OperationalError("synthetic v2 failure"))
+
+        with self.assertRaises(StorageError) as raised:
+            SqliteStorage._migrate_v2(connection, now_ms=lambda: 1)
+
+        self.assertEqual(StorageErrorCategory.SCHEMA_INVALID, raised.exception.category)
+        self.assertEqual(
+            ["BEGIN IMMEDIATE", SCHEMA_V2_MIGRATION_STATEMENTS[0], "ROLLBACK"],
+            [call[0] for call in connection.calls],
+        )
+
+    async def test_migrate_v2_baseexception_rolls_back_and_reraises(self):
+        failure = _SyntheticBaseException("synthetic v2 base exception")
+        connection = _V2MigrationConnection(failure)
+
+        with self.assertRaises(_SyntheticBaseException) as raised:
+            SqliteStorage._migrate_v2(connection, now_ms=lambda: 1)
+
+        self.assertIs(failure, raised.exception)
+        self.assertEqual(
+            ["BEGIN IMMEDIATE", SCHEMA_V2_MIGRATION_STATEMENTS[0], "ROLLBACK"],
+            [call[0] for call in connection.calls],
+        )
 
     async def test_fresh_bootstrap_exact_objects_hash_and_no_seed_rows(self):
         storage = await self._open(now_ms=lambda: 1234567890)
