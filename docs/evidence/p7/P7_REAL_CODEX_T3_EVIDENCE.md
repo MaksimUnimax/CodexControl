@@ -235,3 +235,72 @@ Delete and storage gates:
 The final split continuation does not establish definitive interrupt support,
 official delete behavior, or hard-delete erasure. P7 remains **NOT ACCEPTED**;
 Issue #38 remains open and P8 was not started.
+
+## Architect Turn-6 interrupt forensic
+
+Reference architect comment: `5595226398`.
+
+- Parent I SHA: `f3a912175c13c8a0455c03a11dd2beb3b8f75070`.
+- Retained thread SHA-256: `8faed122df2a4b7d331eb20493bde272160b5f1ef2cf856c758090cd6369a266`.
+- Recovery identity matched exactly once: `RECOVERY_RECORD_MATCHES=1`.
+- P7-owned SESSION_HISTORY files: `1`; session scan errors: `0`.
+- Matching session-file identity SHA-256: `20a766bdbc950ab0881f6214231f24ef22fbcabb8d720e59472c60b198938b19`.
+- Structural parsing completed without a relevant parse failure.
+
+The latest unique started turn was identified structurally as Turn 6. Its ID
+is represented only by SHA-256:
+`8c4e11a2f7dfd9ebc00b35d8f5bc30b4325501a7044a8cf96d5b3b9d794af755`.
+The four-record ordered ledger is:
+
+| Ordinal | Record class | Item class | Item state | Approval-related | Terminal-related | Timestamp |
+| ---: | --- | --- | --- | --- | --- | --- |
+| 72 | `TURN_STARTED` | `NONE` | `NONE` | `NO` | `NO` | present |
+| 73 | `OTHER` (type SHA-256 `6dbc18ceb8ffa1c881bb6730ec02bd76e85a1a37acc4b0063cd4cdfdc76fd0fd`) | `NONE` | `NONE` | `NO` | `NO` | present |
+| 74 | `ITEM_CREATED` | `OTHER` | `CREATED` | `NO` | `NO` | present |
+| 75 | `TURN_INTERRUPTED` | `NONE` | `NONE` | `NO` | `YES` | present |
+
+No command-execution or tool item was structurally persisted:
+
+- `TURN6_COMMAND_ITEM_COUNT=0`
+- `TURN6_TOOL_ITEM_COUNT=0`
+- `COMMAND_ITEM_CREATED=NO`
+- `COMMAND_ITEM_STARTED=NO`
+- `COMMAND_ITEM_RUNNING=NO`
+- `COMMAND_ITEM_PENDING_APPROVAL=NO`
+- `COMMAND_ITEM_COMPLETED=NO`
+
+No approval request, pending approval, decision, or response record was
+persisted for Turn 6:
+
+- `TURN6_APPROVAL_REQUEST_PERSISTED=NO`
+- `TURN6_APPROVAL_DECISION_PERSISTED=NONE`
+- `TURN6_APPROVAL_EVENT_ORDINAL=NONE`
+
+A later terminal record was persisted at ordinal `75`. The unnormalized
+upstream status string is represented only by SHA-256
+`3261c3d4e6473f65f4cc2e40dc23cbf638d1ec5ff3f2c3172fb29e5c14146481`.
+Because accepted P1.6 defines the `interrupted` mapping but does not define a
+direct mapping for this persisted status string, the normalized
+forensic terminal fact is `UNKNOWN`; terminal timestamp: `YES`.
+
+The existing H result records the rejected interrupt outcome, but no matching
+structural `turn/interrupt` record was found in the P7-owned session/log
+scope. Therefore:
+
+- `TURN6_INTERRUPT_RECORD_FOUND=NO`
+- `TURN6_INTERRUPT_REMOTE_CODE=NOT_FOUND`
+- `TURN6_INTERRUPT_MESSAGE_SHA256=NOT_FOUND`
+- `TURN6_INTERRUPT_ERROR_CLASS=UNKNOWN`
+
+Relative relations are `INTERRUPT_VS_ITEM_CREATION=UNKNOWN`,
+`INTERRUPT_VS_ITEM_ACTIVE=BEFORE`,
+`INTERRUPT_VS_APPROVAL=UNKNOWN`, and
+`INTERRUPT_VS_TERMINAL=BEFORE`. The persisted ledger contains no command/tool
+active state before the rejected interrupt, and later contains turn activity
+and a terminal progression. The strict forensic classification is therefore
+`INTERRUPT_PRE_ACTIVITY_RACE_SUPPORTED`.
+
+This was a zero Codex-effect read-only forensic pass: no model/list,
+thread/resume, turn/start, approval, approval response, interrupt,
+thread/delete, Telegram, process mutation, or Turn 7 occurred. P7 remains
+**NOT ACCEPTED**; Issue #38 remains open and P8 was not started.
