@@ -304,3 +304,54 @@ This was a zero Codex-effect read-only forensic pass: no model/list,
 thread/resume, turn/start, approval, approval response, interrupt,
 thread/delete, Telegram, process mutation, or Turn 7 occurred. P7 remains
 **NOT ACCEPTED**; Issue #38 remains open and P8 was not started.
+
+## Architect synchronized Turn-7 interrupt and delete
+
+Reference architect addendum: `5595432858`.
+
+- Harness Commit K: `53e56840da7751149aef8d3bd430e11e953c4366`; the harness-only
+  change added exactly one gated synchronized continuation method. No
+  production source changed.
+- The required pre-run ordinary suite on clean Commit K completed exactly once:
+  `958` tests, `4` skipped, `0` failures, `0` errors, and `OK`, with all four
+  real P7 gates unset.
+- Fresh authority passed for the exact `/usr/local/bin/codex` path: path kind
+  `SYMLINK`, resolved target safety `PASS`, version `codex-cli 0.144.6`, and
+  generated schema SHA-256
+  `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`.
+- Fresh read-only isolation selected `codex3`; baseline scanning and original
+  unrelated-session reconciliation passed with zero scan errors. Exactly one
+  matching retained recovery record was used. The record was retained after
+  the synchronized continuation stopped before delete.
+- Same-thread resume: `RESUME_CONFIRMED`; authenticated catalog selection
+  produced one visible default with its advertised default reasoning effort.
+
+Turn-7 synchronized interrupt proof:
+
+- Turn-7 start: `TURN_START_CONFIRMED`; Turn-7 ID is represented only by
+  SHA-256 `2971376917b2296715f7b865bc1c549c4b09a97b72162c123b4c7072ad48e994`.
+- Activity barrier: exact P7-owned barrier-file proof `PASS`; qualifying live
+  `sleep 120` process count `1`; simultaneous activity barrier `PASS`.
+- The single synchronized interrupt result was `CONFIRMED`; terminal result
+  was definitive `FAILED`; runtime-manager reacquire was `NO`.
+- The exact P7-owned sleep child did not naturally reach zero during the
+  five-second acceptance observation window. Acceptance therefore failed at
+  `P7_SYNC_CHILD_NATURAL_EXIT_FAILED`. Final P7 child count was `0`; no TERM or
+  KILL signal was used, and the temporary workdir and barrier file were
+  removed. Runtime cleanup passed.
+
+Delete and storage gates:
+
+- Pre-delete scan: `NOT_RUN`; new-content marker proof: `NOT_RUN`.
+- Official delete call count: `0`; delete status: `NOT_RUN`; delete retry:
+  `NO`.
+- Post-delete residual scan and original after-delete baseline reconciliation:
+  `NOT_RUN`.
+- Recovery-record cleanup: `NO` (retained). No manual Codex-store cleanup was
+  performed.
+- The root-only result artifact was mode `0600` and sanitized; it contains no
+  raw thread/command/prompt/marker/path/PID/environment/exception data.
+
+This final synchronized continuation does not establish official delete
+behavior or hard-delete erasure. P7 remains **NOT ACCEPTED**; Issue #38 remains
+open and P8 was not started.
