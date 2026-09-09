@@ -462,3 +462,56 @@ gates unset and passed exactly: `959` tests, `5` skipped, `0` failures,
 accounting remains one real thread, seven real turns, one approval allow
 response, two interrupts, and zero thread deletes. P7 remains **NOT ACCEPTED**;
 Issue #38 remains open and P8 was not started.
+
+## Architect delete marker-type repair and final retention execution
+
+Reference architect comment: `5596571930`.
+
+The preceding delete-only harness was added in Commit M
+`8c15d75be18446ce4c84497ca75946523a270166`. Its aggregate delete scans passed
+recovered marker bytes to `_scan_home()`, whose contract requires string
+markers. The resulting type mismatch raised before the pre-delete scan was
+assigned. The preceding evidence parent O
+`0264f97713500301ff28e87d3150e30105fa41cc` recorded this as
+`P7_DELETE_UNEXPECTED_FAILURE`. The official destructive RPC count remained
+`0` before this repair.
+
+The architect diagnosis was applied as one harness-only repair in Commit P
+`eff7262cf0c7078369ce5bb788f7a644ba2c145c`. Recovered marker bytes remain the
+hash and per-marker scan authority. A separately validated ASCII string tuple
+is used only by the aggregate pre-delete and post-delete scans. No production
+source, scanner signature, evidence file, or ADR was changed in Commit P.
+
+The required gate-disabled pre-run was executed once from clean Commit P and
+passed: `959` tests, `5` skipped, `0` failures, `0` errors, `OK`.
+
+The one authorized repaired delete-only invocation then established:
+
+- recovery record identity: `1`; retained thread SHA-256 matched the
+  authorized value;
+- K-result identity: `1`; expected marker hash count: `2`; recovered marker
+  count: `2`; recovered hash set: `PASS`; raw marker plaintext exposed: `NO`;
+- session scan errors: `0`; original unrelated-session baseline before
+  delete: `PASS`;
+- pre-delete scan errors: `0`; per-marker content matches: `5` and `3`;
+  aggregate content-marker matches: `8`; pre-delete physical proof: `PASS`;
+- fresh isolation profile: `codex3`; executable authority: `PASS`;
+  resolved executable target safety: `PASS`;
+- model/list, thread/resume, turn/start, approval, and interrupt calls:
+  `NO`;
+- official delete dispatches: `1`; delete status: `DELETE_UNKNOWN`;
+  delete retry: `NO`.
+
+The official delete request was dispatched exactly once and returned an
+ambiguous/non-success outcome. Under ADR-0016 this is terminal. No second
+delete, read/list reconciliation, or manual Codex storage remediation was
+performed. Post-delete scans, residual gates, after-delete baseline
+reconciliation, and recovery-record removal were not run; the recovery record
+remains retained. No hard-delete or physical-erasure conclusion is claimed.
+
+The required final gate-disabled ordinary suite ran once after the repaired
+invocation and passed: `959` tests, `5` skipped, `0` failures, `0` errors,
+`OK`. Cumulative P7 effect accounting remains one real thread, seven real
+turns, one approval allow response, two interrupts, and one official delete
+dispatch. P7 remains **NOT ACCEPTED**; Issue #38 remains open and P8 was not
+started.
