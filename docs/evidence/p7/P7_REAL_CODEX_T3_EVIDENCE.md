@@ -389,3 +389,76 @@ pre-shutdown child gate as non-authoritative for ADR-0042.
 No final post-delete content, thread-ID residual, baseline-after-delete,
 recovery-cleanup, or final ordinary-suite result is claimed. P7 remains
 **NOT ACCEPTED**; Issue #38 remains open and P8 was not started.
+
+## Architect-authorized replacement pre-run and delete-only completion
+
+Reference architect comment: `5596107732`.
+
+The first Commit M pre-run produced no required final unittest summary. Commit N
+recorded that `P7_DELETE_PRE_RUN_REGRESSION_STOP`, and the delete-only method
+was not invoked. The architect independently verified zero delete/business
+effect. Comment `5596107732` authorized exactly one replacement pre-run, with
+the still-unspent delete-only invocation permitted only if that replacement
+passed. Immutable Commit M `8c15d75be18446ce4c84497ca75946523a270166` was used
+for both the replacement pre-run and the delete-only execution.
+
+No source or test file was changed in this pass. The replacement pre-run ran
+once from clean Commit M with all five real P7 gates unset, after the read-only
+stale-process check found no matching prior unittest process. Its durable
+root-only capture recorded:
+
+- log SHA-256: `8f2ab8095ad01a32cdb584fb1c8f4395b2045d8b2e1990a2efe698bbc0a0f3c7`;
+- exit code: `0`;
+- exactly one final summary: `Ran 959 tests`, `OK (skipped=5)`;
+- failures: `0`; errors: `0`.
+
+The replacement pre-run therefore passed and authorized the one delete-only
+method invocation. The method executed once from Commit M and returned the
+sanitized result `status=FAIL`, `stage=P7_DELETE_UNEXPECTED_FAILURE`. It
+completed the retained recovery/K/marker and original-baseline-before gates:
+
+- recovery record matches: `1`;
+- retained recovery thread SHA-256:
+  `8faed122df2a4b7d331eb20493bde272160b5f1ef2cf856c758090cd6369a266`;
+- K result matches: `1`;
+- expected marker hash count: `2`;
+- expected marker hashes:
+  `3dfc371b18783c1bd53f140ea7c07b203a809dc19a45983410491afe024b395e`,
+  `4b81a69358ebb2ae8d1bc6c5bff68d2fa80910819526461254a7a0357eee12bc`;
+- recovered marker count: `2`;
+- recovered marker hash set match: `PASS`;
+- raw marker plaintext exposed: `NO`;
+- session scan errors: `0`; P7-owned session files: `1`;
+- original unrelated-session baseline before delete: `PASS`.
+
+The method stopped before pre-delete physical scanning and before fresh
+runtime acquisition or official deletion. Sanitized pre-delete facts are:
+
+- pre-delete scan errors: `NOT_RUN`;
+- marker #1 present: `NOT_RUN`;
+- marker #2 present: `NOT_RUN`;
+- aggregate content-marker matches: `NOT_RUN`;
+- pre-delete physical proof: `NOT_RUN`;
+- isolation profile: `NOT_RUN`;
+- executable authority: `FAIL` (path-kind fact: `MISSING`).
+
+All forbidden-operation facts were `NO`: model/list, thread/resume, turn/start,
+approval, and interrupt. The official delete was not dispatched: delete call
+count `0`, delete status `NOT_RUN`, retry `NO`, and runtime shutdown
+`NOT_RUN`. All post-delete marker, thread-ID category, residual, and
+after-delete baseline facts are `NOT_RUN`; the recovery record was not removed
+(`NO`). No manual Codex-store cleanup was performed.
+
+Explicit post-delete result fields were all `NOT_RUN`: scan errors, marker #1
+matches, marker #2 matches, aggregate content-marker matches,
+`SESSION_HISTORY` thread-ID matches, `STATE_DB` thread-ID matches, `CACHE`
+thread-ID matches, `LOG` residuals, `OTHER` thread-ID matches, active
+thread-ID matches, unclassified thread-ID matches, original baseline after
+delete, and pre-existing session artifacts removed.
+
+The required final ordinary suite ran once from branch-head N with all P7
+gates unset and passed exactly: `959` tests, `5` skipped, `0` failures,
+`0` errors, `OK`. This pass made no new real Codex effect; cumulative P7
+accounting remains one real thread, seven real turns, one approval allow
+response, two interrupts, and zero thread deletes. P7 remains **NOT ACCEPTED**;
+Issue #38 remains open and P8 was not started.
