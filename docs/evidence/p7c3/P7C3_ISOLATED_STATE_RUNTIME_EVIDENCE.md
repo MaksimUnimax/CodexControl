@@ -17,6 +17,43 @@ Branch: `impl-p7-c3-isolated-state-runtime-2026-09-09`
 ADR-0043 and all architect-owned authority files were left unchanged. This
 slice does not implement P7.C4 cleanup or finalization composition.
 
+## Architect repair
+
+`INITIAL_CANDIDATE=0654ee1cbd70d4d6a6d5a317e948d2f08b2c081f`.
+`INITIAL_ARCHITECT_VERDICT=REWORK_REQUIRED`.
+
+`ARCHITECT_DEFECT_A=CLIENT_VERSION_CONFLATED_WITH_INSTALLED_CODEX_VERSION`.
+`ARCHITECT_DEFECT_B=RECREATE_NOT_BOUND_TO_CONFIGURED_PROFILE_ROOT_AND_EXACT_MANAGER`.
+`ARCHITECT_DEFECT_C=NESTED_PERMISSION_POLICY_REJECTED_ACCEPTED_EXACT_0_144_6_0644_STATE_FILES`.
+
+The repair restores `client_version` as the independent CodexControl protocol
+client identity. Runtime startup now validates the exact selected executable
+through the injected testable version/installed-authority seam (the production
+default is `CodexVersionProbe` bound to that executable), then binds the
+accepted version-labelled manifest/schema to the static storage capability
+authority. Startup fails before the app-server process factory for unavailable,
+wrong-version, wrong-schema, or missing storage controls. Regression launch
+tests use `client_version="0.1.0-test"` and prove that value is sent unchanged
+in `initialize.params.clientInfo.version`; no real version process is used.
+
+All state-root operations bind supplied profiles to the configured canonical
+home/root pair. Destructive recreation is manager-owned: the exact manager
+reservation token is checked under that manager's lock, quiescence is proven
+for that manager, and only its configured root is passed to the descriptor-
+relative filesystem primitive. Same-ID forged profiles, foreign managers,
+released reservations, and active/starting/unresolved runtimes are rejected
+without outside-root mutation.
+
+Permission validation now distinguishes layers. Persistent homes reject only
+group/world write (so root-owned `0755` is accepted and `0775`/`0777` are
+rejected); the isolated root, `sqlite/`, `logs/`, and marker retain exact
+`0700`/`0600` modes. Nested root-owned regular files and directories reject
+group/world write but permit read bits. This explicitly preserves the accepted
+P7.C1 physical evidence for exact installed `0.144.6`: `STATE_MAIN_SQLITE`,
+`LOG_MAIN_SQLITE`, `LOG_SQLITE_WAL`, and `STATE_SQLITE_WAL` were each observed
+as uid `0`, mode `0644`. Permanent regressions cover nested `0600`/`0644`,
+rejection of `0664`/`0666`, and the top-level gates.
+
 ## Profile/configuration authority
 
 `CodexProfile` now carries an explicit `isolated_state_root` in addition to
@@ -165,9 +202,13 @@ call any delete or finalization path.
 
 ## Tests
 
-Focused C3/runtime: `48 tests, 0 skipped, 0 failures, 0 errors`.
+Focused C3/runtime: `59 tests, 0 skipped, 0 failures, 0 errors`.
 
 Focused P7.C2 compatibility: `20 tests, 0 skipped, 0 failures, 0 errors`.
+
+Repair-specific capability, version-probe, foundation, and permission/root
+matrices also pass with zero failures or errors. The full repair regression is
+`999 tests, 0 skipped, 0 failures, 0 errors`.
 
 Required checks:
 
@@ -180,7 +221,7 @@ Final ordinary full suite:
 
 ```text
 PYTHONPATH=src python3 -m unittest discover -s tests -v
-988 tests, 0 skipped, 0 failures, 0 errors
+    999 tests, 0 skipped, 0 failures, 0 errors
 ```
 
 ## Changed files

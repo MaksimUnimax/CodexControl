@@ -4,8 +4,9 @@ import os
 import stat
 import tempfile
 import unittest
+from dataclasses import replace
 
-from codex_control.adapters.codex.capabilities import SCHEMA_SHA256, SUPPORTED_CODEX_VERSION, StorageRuntimeCapabilities
+from codex_control.adapters.codex.capabilities import SCHEMA_SHA256, SUPPORTED_CODEX_VERSION, StorageRuntimeCapabilities, load_manifest
 from codex_control.adapters.codex.isolation import (
     IsolationError,
     IsolationPathAuthority,
@@ -34,6 +35,16 @@ def _configuration(profiles, **extra):
     }
     value.update(extra)
     return value
+
+
+async def fake_installed_authority():
+    return load_manifest()
+
+
+def fake_authority(version=SUPPORTED_CODEX_VERSION, schema=SCHEMA_SHA256):
+    async def probe():
+        return replace(load_manifest(), codex_cli_version=version, schema_sha256=schema)
+    return probe
 
 
 class ConfigurationAuthorityTests(unittest.TestCase):
@@ -118,6 +129,48 @@ class StateRootAuthorityTests(unittest.TestCase):
         with self.assertRaises(IsolationError): self.authority.validate_profile_paths(self.profile)
         os.chmod(self.home, 0o700)
 
+    def test_persistent_home_readable_modes_are_allowed_but_writable_modes_are_not(self):
+        os.chmod(self.home, 0o755)
+        self.authority.validate_profile_paths(self.profile)
+        for mode in (0o775, 0o777):
+            os.chmod(self.home, mode)
+            with self.subTest(mode=oct(mode)), self.assertRaises(IsolationError):
+                self.authority.validate_profile_paths(self.profile)
+        os.chmod(self.home, 0o700)
+
+    def test_nested_codex_files_allow_read_bits_but_not_write_bits(self):
+        sqlite_file = os.path.join(self.root, "sqlite", "state.sqlite")
+        for mode in (0o600, 0o644):
+            with open(sqlite_file, "wb") as handle: handle.write(b"synthetic")
+            os.chmod(sqlite_file, mode)
+            with self.subTest(mode=oct(mode)): self.roots.validate(self.profile)
+            os.unlink(sqlite_file)
+        for mode in (0o664, 0o666):
+            with open(sqlite_file, "wb") as handle: handle.write(b"synthetic")
+            os.chmod(sqlite_file, mode)
+            with self.subTest(mode=oct(mode)), self.assertRaises(IsolationError): self.roots.validate(self.profile)
+            os.unlink(sqlite_file)
+
+    def test_nested_directories_may_be_readable_but_not_group_writable(self):
+        nested = os.path.join(self.root, "logs", "nested")
+        os.mkdir(nested, 0o755)
+        self.roots.validate(self.profile)
+        os.chmod(nested, 0o775)
+        with self.assertRaises(IsolationError): self.roots.validate(self.profile)
+
+    def test_top_level_modes_remain_exact(self):
+        for path in (self.root,):
+            os.chmod(path, 0o755)
+            with self.subTest(path=path), self.assertRaises(IsolationError): self.roots.validate(self.profile)
+            os.chmod(path, 0o700)
+        sqlite = os.path.join(self.root, "sqlite")
+        logs = os.path.join(self.root, "logs")
+        marker = os.path.join(self.root, STATE_ROOT_MARKER)
+        for path, mode, expected in ((sqlite, 0o755, "state_directory_invalid"), (logs, 0o755, "state_directory_invalid"), (marker, 0o640, "marker_invalid")):
+            os.chmod(path, mode)
+            with self.subTest(path=path), self.assertRaises(IsolationError): self.roots.validate(self.profile)
+            os.chmod(path, 0o700 if path != marker else 0o600)
+
     def test_symlink_marker_and_foreign_entry_gates(self):
         marker = os.path.join(self.root, STATE_ROOT_MARKER)
         os.unlink(marker); os.symlink(os.path.join(self.parent, "outside"), marker)
@@ -171,10 +224,11 @@ class StateRootAuthorityTests(unittest.TestCase):
             manager = CodexRuntimeManager(
                 [self.profile], client_version=SUPPORTED_CODEX_VERSION,
                 schema_sha256=SCHEMA_SHA256, isolation_authority=self.authority,
+                installed_authority_probe=fake_installed_authority,
             )
             reservation = await manager.reserve("profile")
-            self.roots.recreate(self.profile, reservation=reservation)
-            self.roots.recreate(self.profile, reservation=reservation)
+            await manager.recreate_isolated_state_root(reservation)
+            await manager.recreate_isolated_state_root(reservation)
             await reservation.release()
 
         asyncio.run(recreate_twice())
@@ -192,11 +246,12 @@ class StateRootAuthorityTests(unittest.TestCase):
             manager = CodexRuntimeManager(
                 [self.profile], client_version=SUPPORTED_CODEX_VERSION,
                 schema_sha256=SCHEMA_SHA256, isolation_authority=self.authority,
+                installed_authority_probe=fake_installed_authority,
             )
             reservation = await manager.reserve("profile")
             manager._runtimes["profile"] = object()
             with self.assertRaises(IsolationError):
-                self.roots.recreate(self.profile, reservation=reservation)
+                await manager.recreate_isolated_state_root(reservation)
             await reservation.release()
 
         asyncio.run(recreate_with_busy_runtime())
@@ -208,13 +263,43 @@ class StateRootAuthorityTests(unittest.TestCase):
             manager = CodexRuntimeManager(
                 [self.profile], client_version=SUPPORTED_CODEX_VERSION,
                 schema_sha256=SCHEMA_SHA256, isolation_authority=self.authority,
+                installed_authority_probe=fake_installed_authority,
             )
             reservation = await manager.reserve("profile")
             with self.assertRaises(IsolationError):
-                self.roots.recreate(self.profile, reservation=reservation)
+                await manager.recreate_isolated_state_root(reservation)
             await reservation.release()
 
         asyncio.run(recreate_with_substitution())
+
+    def test_same_id_different_root_is_rejected_without_mutation(self):
+        foreign_home = os.path.join(self.parent, "foreign-home")
+        foreign_root = os.path.join(self.parent, "foreign-root")
+        os.mkdir(foreign_home, 0o700)
+        foreign_profile = CodexProfile("profile", foreign_home, "Profile", foreign_root)
+        foreign_authority = IsolationPathAuthority((foreign_profile,), controller_db_path=os.path.join(self.parent, "foreign-controller.sqlite"), repository_root=os.path.join(self.parent, "foreign-repo"))
+        open(os.path.join(self.parent, "foreign-controller.sqlite"), "wb").close()
+        os.mkdir(os.path.join(self.parent, "foreign-repo"), 0o700)
+        foreign_roots = IsolatedStateRoot(foreign_authority)
+        foreign_roots.provision(foreign_profile)
+        content = os.path.join(foreign_root, "sqlite", "keep")
+        with open(content, "wb") as handle: handle.write(b"keep")
+        async def attempt():
+            manager = CodexRuntimeManager([self.profile], isolation_authority=self.authority, installed_authority_probe=fake_installed_authority, client_version="0.1.0-test")
+            reservation = await manager.reserve("profile")
+            with self.assertRaises(IsolationError): self.roots.recreate(foreign_profile, reservation=reservation)
+            await reservation.release()
+        asyncio.run(attempt())
+        with open(content, "rb") as handle: self.assertEqual(handle.read(), b"keep")
+        self.roots.validate(self.profile)
+
+    def test_unconfigured_profile_provision_and_validate_are_rejected(self):
+        foreign_home = os.path.join(self.parent, "unconfigured-home")
+        foreign_root = os.path.join(self.parent, "unconfigured-root")
+        os.mkdir(foreign_home, 0o700)
+        foreign = CodexProfile("other", foreign_home, "Other", foreign_root)
+        with self.assertRaises(IsolationError): self.roots.provision(foreign)
+        with self.assertRaises(IsolationError): self.roots.validate(foreign)
 
 
 class _FakeWriter:
@@ -257,6 +342,7 @@ class ReservationRuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self): self.temp.cleanup()
     def manager(self, factory, **kwargs):
         kwargs.setdefault("client_version", SUPPORTED_CODEX_VERSION); kwargs.setdefault("schema_sha256", SCHEMA_SHA256)
+        kwargs.setdefault("installed_authority_probe", fake_installed_authority)
         return CodexRuntimeManager([self.profile], executable=self.executable, process_factory=factory, isolation_authority=self.authority, initialize_timeout=.05, graceful_shutdown_timeout=.01, terminate_timeout=.01, kill_reap_timeout=.01, **kwargs)
 
     async def test_reserve_blocks_acquire_and_valid_release_allows_future_acquire(self):
@@ -299,9 +385,55 @@ class ReservationRuntimeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(capabilities=capabilities), self.assertRaisesRegex(RuntimeErrorSafe, "capability_mismatch"): await manager.acquire("p")
             self.assertEqual(factory.calls, [])
         for version, schema in (("0.144.7", SCHEMA_SHA256), (SUPPORTED_CODEX_VERSION, "0" * 64)):
-            factory = _FakeFactory(); manager = self.manager(factory, client_version=version, schema_sha256=schema)
+            factory = _FakeFactory(); manager = self.manager(factory, installed_authority_probe=fake_authority(version, schema))
             with self.subTest(version=version, schema=schema), self.assertRaisesRegex(RuntimeErrorSafe, "capability_mismatch"): await manager.acquire("p")
             self.assertEqual(factory.calls, [])
+
+    async def test_client_protocol_version_is_independent_of_installed_authority(self):
+        factory = _FakeFactory(); manager = self.manager(factory, client_version="0.1.0-test", installed_authority_probe=fake_authority("0.144.6", SCHEMA_SHA256))
+        runtime = await manager.acquire("p")
+        initialize = json.loads(factory.processes[0].stdin.data[0])
+        self.assertEqual(initialize["params"]["clientInfo"]["version"], "0.1.0-test")
+        self.assertIsNotNone(manager._installed_manifest)
+        self.assertEqual(manager._installed_manifest.codex_cli_version, "0.144.6")
+        await manager.shutdown_all()
+
+    async def test_unavailable_installed_authority_blocks_before_factory(self):
+        async def unavailable(): raise RuntimeError("probe failed")
+        factory = _FakeFactory(); manager = self.manager(factory, installed_authority_probe=unavailable)
+        with self.assertRaisesRegex(RuntimeErrorSafe, "capability_mismatch"): await manager.acquire("p")
+        self.assertEqual(factory.calls, [])
+
+    async def test_storage_capability_matrix_blocks_before_factory(self):
+        for capability in ("sqlite_home_environment", "sqlite_home_config", "log_dir_config", "history_persistence_none"):
+            kwargs = {capability: False}
+            factory = _FakeFactory(); manager = self.manager(factory, storage_capabilities=StorageRuntimeCapabilities(**kwargs))
+            with self.subTest(capability=capability), self.assertRaisesRegex(RuntimeErrorSafe, "capability_mismatch"): await manager.acquire("p")
+            self.assertEqual(factory.calls, [])
+
+    async def test_foreign_and_stale_reservations_cannot_recreate(self):
+        manager_a = self.manager(_FakeFactory()); manager_b = self.manager(_FakeFactory())
+        reservation_a = await manager_a.reserve("p"); reservation_b = await manager_b.reserve("p")
+        with self.assertRaises(IsolationError): await manager_a.recreate_isolated_state_root(reservation_b)
+        await reservation_b.release();
+        with self.assertRaises(IsolationError): await manager_a.recreate_isolated_state_root(reservation_b)
+        await reservation_a.release()
+
+    async def test_active_starting_and_unresolved_runtime_recreation_is_rejected(self):
+        manager = self.manager(_FakeFactory()); reservation = await manager.reserve("p")
+        manager._starting["p"] = asyncio.create_task(asyncio.sleep(1))
+        with self.assertRaises(IsolationError): await manager.recreate_isolated_state_root(reservation)
+        manager._starting["p"].cancel()
+        try: await manager._starting["p"]
+        except asyncio.CancelledError: pass
+        manager._starting.pop("p")
+        manager._unresolved["p"] = object()
+        with self.assertRaises(IsolationError): await manager.recreate_isolated_state_root(reservation)
+        manager._unresolved.pop("p")
+        manager._runtimes["p"] = object()
+        with self.assertRaises(IsolationError): await manager.recreate_isolated_state_root(reservation)
+        manager._runtimes.pop("p")
+        await reservation.release()
 
     async def test_child_routing_is_exact_and_parent_secrets_cannot_override(self):
         env = build_child_environment(self.profile, {"CODEX_HOME": "/bad", "CODEX_SQLITE_HOME": "/bad", "RUST_LOG": "debug", "OPENAI_API_KEY": "test-only-noncredential-sentinel", "PATH": "/bin"})

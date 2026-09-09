@@ -46,8 +46,14 @@ def _is_root_owned(st: os.stat_result) -> bool:
     return st.st_uid == 0
 
 
-def _is_safe_mode(mode: int) -> bool:
-    return not (mode & (stat.S_IRWXG | stat.S_IRWXO))
+def _is_persistent_mode(mode: int) -> bool:
+    """Persistent homes may be readable, but never group/world writable."""
+    return not (mode & (stat.S_IWGRP | stat.S_IWOTH))
+
+
+def _is_nested_mode(mode: int) -> bool:
+    """The exact 0700 containment boundary protects nested Codex entries."""
+    return not (mode & (stat.S_IWGRP | stat.S_IWOTH))
 
 
 def _walk_existing_components(path: str) -> None:
@@ -135,19 +141,33 @@ class IsolationPathAuthority:
                 return profile
         raise IsolationError("unknown_profile")
 
+    def _bound_profile(self, profile: CodexProfile) -> CodexProfile:
+        configured = self.profile(profile.profile_id)
+        try:
+            same_paths = (
+                canonical_path(profile.codex_home) == canonical_path(configured.codex_home)
+                and canonical_path(profile.isolated_state_root) == canonical_path(configured.isolated_state_root)
+            )
+        except IsolationError:
+            raise IsolationError("profile_binding_mismatch") from None
+        if not same_paths:
+            raise IsolationError("profile_binding_mismatch")
+        return configured
+
     def validate_profile_paths(self, profile: CodexProfile, *, state_root_may_be_missing: bool = False) -> tuple[str, str]:
-        home = canonical_path(profile.codex_home)
-        state_root = canonical_path(profile.isolated_state_root or "")
+        configured = self._bound_profile(profile)
+        home = canonical_path(configured.codex_home)
+        state_root = canonical_path(configured.isolated_state_root or "")
         if any(paths_overlap(path, protected) for path in (home, state_root) for protected in self.protected_paths):
             raise IsolationError("protected_path_overlap")
         if paths_overlap(home, state_root):
             raise IsolationError("profile_home_state_overlap")
         home_stat = _metadata_path(home, must_exist=True, directory=True)
         assert home_stat is not None
-        if not _is_root_owned(home_stat) or not _is_safe_mode(home_stat.st_mode):
+        if not _is_root_owned(home_stat) or not _is_persistent_mode(home_stat.st_mode):
             raise IsolationError("persistent_home_ownership")
         state_stat = _metadata_path(state_root, must_exist=not state_root_may_be_missing, directory=True)
-        if state_stat is not None and (not _is_root_owned(state_stat) or not _is_safe_mode(state_stat.st_mode)):
+        if state_stat is not None and (not _is_root_owned(state_stat) or not _is_persistent_mode(state_stat.st_mode)):
             raise IsolationError("state_root_ownership")
         return home, state_root
 
@@ -172,7 +192,7 @@ def _validate_tree(fd: int) -> None:
         st = _safe_entry_stat(name, fd)
         if stat.S_ISLNK(st.st_mode):
             raise IsolationError("state_symlink_entry")
-        if not _is_root_owned(st) or not _is_safe_mode(st.st_mode):
+        if not _is_root_owned(st) or not _is_nested_mode(st.st_mode):
             raise IsolationError("state_entry_ownership")
         if stat.S_ISDIR(st.st_mode):
             try:
@@ -258,7 +278,7 @@ class IsolatedStateRoot:
         parent = os.path.dirname(root)
         parent_stat = _metadata_path(parent, must_exist=True, directory=True)
         assert parent_stat is not None
-        if not _is_root_owned(parent_stat) or not _is_safe_mode(parent_stat.st_mode):
+        if not _is_root_owned(parent_stat) or not _is_persistent_mode(parent_stat.st_mode):
             raise IsolationError("state_parent_ownership")
         try:
             os.mkdir(root, 0o700)
@@ -284,20 +304,13 @@ class IsolatedStateRoot:
             # recursively remove it: leave a failed root for explicit inspection.
             raise
 
-    def recreate(self, profile: CodexProfile, *, reservation: Any) -> None:
-        # Imported lazily to avoid a module cycle: runtime owns the reservation
-        # token, while this filesystem primitive consumes it.
-        from .runtime import ProfileReservation
+    def recreate(self, profile: CodexProfile, *, reservation: Any = None) -> None:
+        """Reject raw reservation tokens; the runtime manager owns recreation."""
+        raise IsolationError("manager_recreation_required")
 
-        if not isinstance(reservation, ProfileReservation) or reservation.profile_id != profile.profile_id:
-            raise IsolationError("reservation_invalid")
-        try:
-            quiescence = reservation.quiescence_proof()
-        except Exception:
-            raise IsolationError("reservation_invalid") from None
-        if not getattr(quiescence, "is_quiescent", False):
-            raise IsolationError("runtime_not_quiescent")
-        fd, _, root = self._open_root(profile)
+    def _recreate_bound(self, profile: CodexProfile) -> None:
+        configured = self.authority._bound_profile(profile)
+        fd, _, root = self._open_root(configured)
         try:
             initial = os.fstat(fd)
             _clear_directory(fd)
@@ -308,7 +321,7 @@ class IsolatedStateRoot:
                 os.mkdir(directory, 0o700, dir_fd=fd)
             marker_fd = os.open(STATE_ROOT_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
             try:
-                os.write(marker_fd, _expected_marker(profile.profile_id))
+                os.write(marker_fd, _expected_marker(configured.profile_id))
             finally:
                 os.close(marker_fd)
         except IsolationError:
@@ -317,7 +330,7 @@ class IsolatedStateRoot:
             raise IsolationError("state_root_recreate_failed") from None
         finally:
             os.close(fd)
-        self.validate(profile)
+        self.validate(configured)
 
 
 def _clear_directory(fd: int) -> None:
@@ -329,7 +342,7 @@ def _clear_directory(fd: int) -> None:
         st = _safe_entry_stat(name, fd)
         if stat.S_ISLNK(st.st_mode):
             raise IsolationError("state_symlink_entry")
-        if not _is_root_owned(st) or not _is_safe_mode(st.st_mode):
+        if not _is_root_owned(st) or not _is_nested_mode(st.st_mode):
             raise IsolationError("state_entry_ownership")
         if stat.S_ISDIR(st.st_mode):
             child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)

@@ -6,13 +6,17 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from codex_control.adapters.codex.protocol import ProtocolState
-from codex_control.adapters.codex.capabilities import SUPPORTED_CODEX_VERSION
+from codex_control.adapters.codex.capabilities import load_manifest
 from codex_control.adapters.codex.isolation import IsolationPathAuthority, IsolatedStateRoot
 from codex_control.adapters.codex.runtime import CodexRuntimeManager, RuntimeErrorSafe, RuntimeState, build_child_environment, create_codex_process
 from codex_control.adapters.codex.subprocess_transport import DEFAULT_STDOUT_LINE_LIMIT_BYTES, SubprocessStdioTransport, SubprocessTransportError
 from codex_control.domain import CodexProfile
 
-TEST_VERSION = SUPPORTED_CODEX_VERSION
+TEST_VERSION = "0.1.0-test"
+
+
+async def fake_installed_authority():
+    return load_manifest()
 
 class Writer:
     def __init__(self, on_write=None, on_close=None): self.data, self.closed, self.on_write, self.on_close = [], False, on_write, on_close
@@ -78,7 +82,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.executable = tempfile.NamedTemporaryFile(delete=False); self.executable.close(); os.chmod(self.executable.name, 0o755)
     def tearDown(self): os.unlink(self.executable.name); self.tempdir.cleanup()
     def manager(self, factory=None, **kwargs):
-        return CodexRuntimeManager([self.profile], client_version=TEST_VERSION, executable=self.executable.name, process_factory=factory or Factory(), isolation_authority=self.authority, initialize_timeout=.05, graceful_shutdown_timeout=.01, terminate_timeout=.01, kill_reap_timeout=.01, **kwargs)
+        return CodexRuntimeManager([self.profile], client_version=TEST_VERSION, executable=self.executable.name, process_factory=factory or Factory(), isolation_authority=self.authority, installed_authority_probe=fake_installed_authority, initialize_timeout=.05, graceful_shutdown_timeout=.01, terminate_timeout=.01, kill_reap_timeout=.01, **kwargs)
 
     def test_environment_filters_secrets_and_binds_profile(self):
         env = build_child_environment(self.profile, {"CODEX_HOME":"/parent", "CODEX_SQLITE_HOME":"/parent/sqlite", "PATH":"/bin", "SECRET_TOKEN":"fake", "OPENAI_API_KEY":"fake"})

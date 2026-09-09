@@ -8,10 +8,17 @@ from enum import Enum
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol
 from codex_control.domain import CodexProfile
-from .capabilities import SCHEMA_SHA256, SUPPORTED_CODEX_VERSION, StorageRuntimeCapabilities
+from .capabilities import (
+    SCHEMA_SHA256,
+    SUPPORTED_CODEX_VERSION,
+    CodexCapabilityManifest,
+    StorageRuntimeCapabilities,
+    validate_manifest_authority,
+)
 from .isolation import IsolationError, IsolationPathAuthority, IsolatedStateRoot, canonical_path
 from .protocol import CodexProtocolClient, ProtocolState
 from .subprocess_transport import DEFAULT_STDOUT_LINE_LIMIT_BYTES, SubprocessStdioTransport
+from .version_probe import CodexVersionProbe, probe_supported_manifest
 
 DEFAULT_INITIALIZE_TIMEOUT_SECONDS = 15.0
 DEFAULT_GRACEFUL_SHUTDOWN_SECONDS = 2.0
@@ -41,6 +48,7 @@ class ProcessLike(Protocol):
 
 ProcessFactory = Callable[[list[str], Mapping[str, str], int], Awaitable[ProcessLike]]
 RuntimeHook = Callable[["CodexRuntime"], Awaitable[None]]
+InstalledAuthorityProbe = Callable[[], Awaitable[CodexCapabilityManifest]]
 
 
 @dataclass(frozen=True, repr=False)
@@ -125,20 +133,28 @@ class CodexRuntimeManager:
                  schema_sha256: str = SCHEMA_SHA256,
                  storage_capabilities: StorageRuntimeCapabilities | None = None,
                  isolation_authority: IsolationPathAuthority | None = None,
+                 version_probe: CodexVersionProbe | None = None,
+                 installed_authority_probe: InstalledAuthorityProbe | None = None,
                  stdout_line_limit: int = DEFAULT_STDOUT_LINE_LIMIT_BYTES, initialize_timeout: float = DEFAULT_INITIALIZE_TIMEOUT_SECONDS,
                  graceful_shutdown_timeout: float = DEFAULT_GRACEFUL_SHUTDOWN_SECONDS, terminate_timeout: float = DEFAULT_TERMINATE_TIMEOUT_SECONDS,
                  kill_reap_timeout: float = DEFAULT_KILL_REAP_TIMEOUT_SECONDS) -> None:
         if not client_version: raise ValueError("client_version_required")
-        self._profiles = {p.profile_id: p for p in profiles}
-        if len(self._profiles) != len(profiles): raise ValueError("duplicate_profile_id")
         self._executable, self._client_version = executable, client_version
-        self._schema_sha256 = schema_sha256
+        authority = isolation_authority or IsolationPathAuthority(tuple(profiles))
+        configured_profiles: dict[str, CodexProfile] = {}
+        for profile in profiles:
+            configured = authority._bound_profile(profile)
+            configured_profiles[configured.profile_id] = configured
+        if len(configured_profiles) != len(profiles): raise ValueError("duplicate_profile_id")
+        self._profiles = configured_profiles
         self._storage_capabilities = storage_capabilities or StorageRuntimeCapabilities()
-        try:
-            self._storage_capabilities.validate(requested_version=client_version, requested_schema=schema_sha256)
-            self._capability_failure: str | None = None
-        except Exception:
-            self._capability_failure = "capability_mismatch"
+        # `client_version` is only CodexControl's protocol identity.  It is
+        # intentionally never used as installed Codex authority.
+        self._capability_failure: str | None = None
+        self._version_probe = version_probe or CodexVersionProbe(executable)
+        self._installed_authority_probe = installed_authority_probe
+        self._installed_manifest: CodexCapabilityManifest | None = None
+        self._authority_lock = asyncio.Lock()
         self._parent_environment = dict(os.environ if parent_environment is None else parent_environment)
         self._factory, self._stdout_line_limit = process_factory, stdout_line_limit
         self._initialize_timeout, self._graceful_timeout = initialize_timeout, graceful_shutdown_timeout
@@ -147,7 +163,7 @@ class CodexRuntimeManager:
         self._unresolved: dict[str, CodexRuntime] = {}; self._stopping: set[str] = set(); self._generations: dict[str, int] = {}
         self._lock = asyncio.Lock(); self._shutting_down = False
         self._reservations: dict[str, ProfileReservation] = {}
-        self._isolation_authority = isolation_authority or IsolationPathAuthority(tuple(profiles))
+        self._isolation_authority = authority
         self._state_root = IsolatedStateRoot(self._isolation_authority)
         self._before_ready_publication: RuntimeHook | None = None
         self._before_watcher_update: RuntimeHook | None = None
@@ -181,6 +197,7 @@ class CodexRuntimeManager:
                 self._state_root.validate(profile)
             except IsolationError as error:
                 raise RuntimeErrorSafe("storage_boundary_invalid", profile.profile_id) from error
+            await self._ensure_installed_authority(profile.profile_id)
             executable = Path(self._executable)
             if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK): raise RuntimeErrorSafe("executable_invalid", profile.profile_id)
             process = await self._factory(build_child_argv(str(executable), profile), build_child_environment(profile, self._parent_environment), self._stdout_line_limit)
@@ -212,6 +229,29 @@ class CodexRuntimeManager:
         elif process is not None: await self._reap_process(process)
         raise failure
 
+    async def _ensure_installed_authority(self, profile_id: str) -> None:
+        if self._capability_failure is not None:
+            raise RuntimeErrorSafe(self._capability_failure, profile_id)
+        if self._installed_manifest is not None:
+            return
+        async with self._authority_lock:
+            if self._installed_manifest is not None:
+                return
+            try:
+                if self._installed_authority_probe is None:
+                    manifest = await probe_supported_manifest(self._version_probe)
+                else:
+                    manifest = await self._installed_authority_probe()
+                manifest = validate_manifest_authority(manifest, SUPPORTED_CODEX_VERSION)
+                self._storage_capabilities.validate(
+                    installed_version=manifest.codex_cli_version,
+                    installed_schema=manifest.schema_sha256,
+                )
+                self._installed_manifest = manifest
+            except Exception as error:
+                self._capability_failure = "capability_mismatch"
+                raise RuntimeErrorSafe("capability_mismatch", profile_id) from error
+
     async def reserve(self, profile_id: str) -> ProfileReservation:
         async with self._lock:
             if self._shutting_down: raise RuntimeErrorSafe("manager_shutting_down", profile_id)
@@ -230,7 +270,28 @@ class CodexRuntimeManager:
                 raise RuntimeErrorSafe("reservation_token_invalid", reservation.profile_id)
             self._reservations.pop(reservation.profile_id, None)
 
-    def quiescence_proof(self, reservation: ProfileReservation) -> RuntimeQuiescenceProof:
+    async def recreate_isolated_state_root(self, reservation: ProfileReservation) -> None:
+        """Recreate only the configured root under this manager's lock."""
+        if not isinstance(reservation, ProfileReservation):
+            raise IsolationError("reservation_invalid")
+        async with self._lock:
+            current = self._reservations.get(reservation.profile_id)
+            if current is not reservation or current._token is not reservation._token or current._manager is not self:
+                raise IsolationError("reservation_invalid")
+            profile = self._profiles.get(reservation.profile_id)
+            if profile is None:
+                raise IsolationError("unknown_profile")
+            proof = self._quiescence_proof_locked(reservation)
+            if not proof.is_quiescent:
+                raise IsolationError("runtime_not_quiescent")
+            try:
+                self._state_root._recreate_bound(profile)
+            except IsolationError:
+                raise
+            except Exception:
+                raise IsolationError("state_root_recreate_failed") from None
+
+    def _quiescence_proof_locked(self, reservation: ProfileReservation) -> RuntimeQuiescenceProof:
         current = self._reservations.get(reservation.profile_id)
         valid = current is reservation and current._token is reservation._token and current._manager is self
         runtime = self._runtimes.get(reservation.profile_id)
@@ -241,6 +302,9 @@ class CodexRuntimeManager:
             runtime is not None,
             reservation.profile_id in self._unresolved,
         )
+
+    def quiescence_proof(self, reservation: ProfileReservation) -> RuntimeQuiescenceProof:
+        return self._quiescence_proof_locked(reservation)
 
     async def _drain_stderr(self, runtime: CodexRuntime) -> None:
         assert runtime.process.stderr is not None

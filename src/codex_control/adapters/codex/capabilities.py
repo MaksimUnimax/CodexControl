@@ -25,10 +25,10 @@ class StorageRuntimeCapabilities:
     log_dir_config: bool = True
     history_persistence_none: bool = True
 
-    def validate(self, *, requested_version: str, requested_schema: str = SCHEMA_SHA256) -> None:
+    def validate(self, *, installed_version: str, installed_schema: str) -> None:
         if (
-            requested_version != SUPPORTED_CODEX_VERSION
-            or requested_schema != SCHEMA_SHA256
+            installed_version != SUPPORTED_CODEX_VERSION
+            or installed_schema != SCHEMA_SHA256
             or self.codex_cli_version != SUPPORTED_CODEX_VERSION
             or self.schema_sha256 != SCHEMA_SHA256
             or not self.sqlite_home_environment
