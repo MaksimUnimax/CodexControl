@@ -65,7 +65,7 @@ class FinalFakeP4AcceptanceTests(unittest.IsolatedAsyncioTestCase):
         from codex_control.domain import CodexProfile
         self.service = PrivateControlService(
             self.storage, server_id="server-80", server_display_name="Server 80", operator_user_id=7,
-            profiles=(CodexProfile("profile-a", "/synthetic/profile-a", "Profile A"),),
+            profiles=(CodexProfile("profile-a", "/synthetic/profile-a", "Profile A", "/synthetic/state-a"),),
             model_catalog=Catalog(), interrupt_service=self.effects, delete_service=self.effects,
             now_ms=self.clock, token_factory=token_factory,
         )

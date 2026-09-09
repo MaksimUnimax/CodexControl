@@ -229,7 +229,7 @@ class P6LocalOrchestrationAcceptance(unittest.IsolatedAsyncioTestCase):
             approval_sleep=self._blocked_sleep,
         )
         p3 = DialogueTurnService(
-            self.storage, server_id="server-80", profiles=(CodexProfile("profile-1", "/synthetic", "Profile"),),
+            self.storage, server_id="server-80", profiles=(CodexProfile("profile-1", "/synthetic", "Profile", "/synthetic-state"),),
             model_catalog=_Catalog(), thread_lifecycle=_Thread(), turn_lifecycle=lifecycle,
             working_directory_resolver=type("W", (), {"resolve": lambda _, profile_id: TrustedWorkingDirectory("/synthetic")})(),
             now_ms=lambda: self.clock, id_factory=p3_id,
@@ -250,7 +250,7 @@ class P6LocalOrchestrationAcceptance(unittest.IsolatedAsyncioTestCase):
         )
         private = PrivateControlService(
             self.storage, server_id="server-80", server_display_name="SERVER-80", operator_user_id=7,
-            profiles=(CodexProfile("profile-1", "/synthetic", "Profile"),), model_catalog=_Catalog(),
+            profiles=(CodexProfile("profile-1", "/synthetic", "Profile", "/synthetic-state"),), model_catalog=_Catalog(),
             interrupt_service=dialogue_interrupt, delete_service=_NoEffect(), mode_provider=lambda: ControllerMode.ACTIVE,
             now_ms=lambda: self.clock, token_factory=self._token_factory,
         )

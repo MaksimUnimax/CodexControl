@@ -95,7 +95,7 @@ class LiveApprovalIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.service = PrivateControlService(
             self.storage,
             server_id="server-80", server_display_name="Server 80", operator_user_id=7,
-            profiles=(CodexProfile("profile-a", "/synthetic/profile-a", "Profile A"),),
+            profiles=(CodexProfile("profile-a", "/synthetic/profile-a", "Profile A", "/synthetic/state-a"),),
             model_catalog=_Catalog(), interrupt_service=_Effects(), delete_service=_Effects(),
             mode_provider=lambda: ControllerMode.SLEEP, now_ms=clock,
             token_factory=token_factory,

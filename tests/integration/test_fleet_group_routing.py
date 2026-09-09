@@ -684,7 +684,7 @@ class RealP3CompositionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.dialogue = DialogueTurnService(
             self.storage,
             server_id="self",
-            profiles=(CodexProfile("profile", "/synthetic/profile", "Profile"),),
+            profiles=(CodexProfile("profile", "/synthetic/profile", "Profile", "/synthetic/state"),),
             model_catalog=RealCatalog(),
             thread_lifecycle=RealThread(),
             turn_lifecycle=self.turns,

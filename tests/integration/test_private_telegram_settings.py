@@ -81,7 +81,7 @@ class PrivateTelegramSettingsIntegrationTests(unittest.IsolatedAsyncioTestCase):
             server_id="server-80",
             server_display_name="SERVER-80",
             operator_user_id=7,
-            profiles=(CodexProfile("profile-a", "/synthetic/profile-a", "Profile A"), CodexProfile("profile-b", "/synthetic/profile-b", "Profile B")),
+            profiles=(CodexProfile("profile-a", "/synthetic/profile-a", "Profile A", "/synthetic/state-a"), CodexProfile("profile-b", "/synthetic/profile-b", "Profile B", "/synthetic/state-b")),
             model_catalog=self.catalog,
             now_ms=self.clock,
             token_factory=self.token_factory,

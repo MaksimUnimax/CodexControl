@@ -108,9 +108,9 @@ class SettingsSelectionApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         self.clock = _Clock()
         self.catalog = _Catalog()
         self.profiles = (
-            CodexProfile("profile-a", "/PRIVATE/CODEX_HOME/A", "Profile A"),
-            CodexProfile("profile-b", "/PRIVATE/CODEX_HOME/B", "Profile B"),
-            CodexProfile("profile-c", "/PRIVATE/CODEX_HOME/C", "Profile C"),
+            CodexProfile("profile-a", "/PRIVATE/CODEX_HOME/A", "Profile A", "/PRIVATE/STATE/A"),
+            CodexProfile("profile-b", "/PRIVATE/CODEX_HOME/B", "Profile B", "/PRIVATE/STATE/B"),
+            CodexProfile("profile-c", "/PRIVATE/CODEX_HOME/C", "Profile C", "/PRIVATE/STATE/C"),
         )
 
     async def asyncTearDown(self):

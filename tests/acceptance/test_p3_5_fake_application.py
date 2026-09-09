@@ -145,8 +145,8 @@ class FinalP3FakeApplicationAcceptance(unittest.IsolatedAsyncioTestCase):
         turns = DialogueTurnService(
             self.storage, server_id="server",
             profiles=(
-                CodexProfile("profile-a", "/fake/a", "A"),
-                CodexProfile("profile-b", "/fake/b", "B"),
+                CodexProfile("profile-a", "/fake/a", "A", "/fake/state-a"),
+                CodexProfile("profile-b", "/fake/b", "B", "/fake/state-b"),
             ),
             model_catalog=catalog, thread_lifecycle=_Thread(), turn_lifecycle=lifecycle,
             working_directory_resolver=_Workdir(), now_ms=lambda: 10,
@@ -218,7 +218,7 @@ class FinalP3FakeApplicationAcceptance(unittest.IsolatedAsyncioTestCase):
 
         settings_service = SettingsSelectionService(
             self.storage, server_id="server",
-            profiles=(CodexProfile("profile-a", "/fake/a", "A"), CodexProfile("profile-b", "/fake/b", "B")),
+            profiles=(CodexProfile("profile-a", "/fake/a", "A", "/fake/state-a"), CodexProfile("profile-b", "/fake/b", "B", "/fake/state-b")),
             model_catalog=catalog, now_ms=lambda: 20,
         )
         blocked_settings = await settings_service.select_reasoning_effort(

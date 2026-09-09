@@ -19,9 +19,14 @@ class CodexProfile:
     profile_id: str
     codex_home: str
     display_name: str
+    isolated_state_root: str
 
     def __repr__(self) -> str:
-        return f"CodexProfile(profile_id={self.profile_id!r}, display_name={self.display_name!r}, codex_home='[REDACTED]')"
+        return (
+            f"CodexProfile(profile_id={self.profile_id!r}, "
+            f"display_name={self.display_name!r}, codex_home='[REDACTED]', "
+            "isolated_state_root='[REDACTED]')"
+        )
 
 
 @dataclass(frozen=True)

@@ -182,7 +182,7 @@ class DialogueDeleteRecoveryApplicationIntegrationTests(unittest.IsolatedAsyncio
         return DialogueTurnService(
             self.storage,
             server_id="server",
-            profiles=(CodexProfile("profile", "/private/CODEX_HOME", "Profile"),),
+            profiles=(CodexProfile("profile", "/private/CODEX_HOME", "Profile", "/private/STATE_ROOT"),),
             model_catalog=CreationCatalog(),
             thread_lifecycle=thread,
             turn_lifecycle=turns,

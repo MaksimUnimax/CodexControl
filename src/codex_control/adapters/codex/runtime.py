@@ -1,12 +1,15 @@
 """Owned Codex app-server children and per-profile single-flight startup."""
 from __future__ import annotations
 import asyncio
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol
 from codex_control.domain import CodexProfile
+from .capabilities import SCHEMA_SHA256, SUPPORTED_CODEX_VERSION, StorageRuntimeCapabilities
+from .isolation import IsolationError, IsolationPathAuthority, IsolatedStateRoot, canonical_path
 from .protocol import CodexProtocolClient, ProtocolState
 from .subprocess_transport import DEFAULT_STDOUT_LINE_LIMIT_BYTES, SubprocessStdioTransport
 
@@ -39,11 +42,70 @@ class ProcessLike(Protocol):
 ProcessFactory = Callable[[list[str], Mapping[str, str], int], Awaitable[ProcessLike]]
 RuntimeHook = Callable[["CodexRuntime"], Awaitable[None]]
 
+
+@dataclass(frozen=True, repr=False)
+class RuntimeQuiescenceProof:
+    profile_id: str
+    reserved: bool
+    starting_child: bool
+    ready_child: bool
+    unresolved_child: bool
+
+    @property
+    def is_quiescent(self) -> bool:
+        return self.reserved and not (self.starting_child or self.ready_child or self.unresolved_child)
+
+    def __repr__(self) -> str:
+        return (
+            "RuntimeQuiescenceProof(profile_id=" + repr(self.profile_id)
+            + f", reserved={self.reserved!r}, starting_child={self.starting_child!r}, "
+            + f"ready_child={self.ready_child!r}, unresolved_child={self.unresolved_child!r})"
+        )
+
+
+@dataclass(frozen=True, repr=False)
+class ProfileReservation:
+    profile_id: str
+    _manager: "CodexRuntimeManager" = field(repr=False, compare=False)
+    _token: object = field(repr=False, compare=False)
+
+    def quiescence_proof(self) -> RuntimeQuiescenceProof:
+        return self._manager.quiescence_proof(self)
+
+    async def release(self) -> None:
+        await self._manager.release(self)
+
+    def __repr__(self) -> str:
+        return f"ProfileReservation(profile_id={self.profile_id!r})"
+
+
 def build_child_environment(profile: CodexProfile, parent: Mapping[str, str]) -> dict[str, str]:
-    environment = {"CODEX_HOME": profile.codex_home}
+    if not isinstance(profile.isolated_state_root, str) or not profile.isolated_state_root:
+        raise RuntimeErrorSafe("isolated_state_root_required", profile.profile_id)
+    environment = {
+        "CODEX_HOME": canonical_path(profile.codex_home),
+        "CODEX_SQLITE_HOME": canonical_path(os.path.join(profile.isolated_state_root, "sqlite")),
+    }
     for key in ("HOME", "PATH", "LANG", "LC_ALL", "SSL_CERT_FILE", "SSL_CERT_DIR"):
         if value := parent.get(key): environment[key] = value
     return environment
+
+
+def build_child_config_overrides(profile: CodexProfile) -> tuple[str, ...]:
+    if not isinstance(profile.isolated_state_root, str) or not profile.isolated_state_root:
+        raise RuntimeErrorSafe("isolated_state_root_required", profile.profile_id)
+    sqlite_home = canonical_path(os.path.join(profile.isolated_state_root, "sqlite"))
+    log_dir = canonical_path(os.path.join(profile.isolated_state_root, "logs"))
+    return (
+        "sqlite_home=" + json.dumps(sqlite_home),
+        "log_dir=" + json.dumps(log_dir),
+        "history.persistence=\"none\"",
+    )
+
+
+def build_child_argv(executable: str, profile: CodexProfile) -> list[str]:
+    overrides = build_child_config_overrides(profile)
+    return [executable, "app-server", "--stdio", "-c", overrides[0], "-c", overrides[1], "-c", overrides[2]]
 
 async def create_codex_process(argv: list[str], environment: Mapping[str, str], stdout_limit: int) -> ProcessLike:
     return await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.PIPE,
@@ -60,6 +122,9 @@ class CodexRuntime:
 class CodexRuntimeManager:
     def __init__(self, profiles: list[CodexProfile], *, client_version: str, executable: str = "/usr/local/bin/codex",
                  parent_environment: Mapping[str, str] | None = None, process_factory: ProcessFactory = create_codex_process,
+                 schema_sha256: str = SCHEMA_SHA256,
+                 storage_capabilities: StorageRuntimeCapabilities | None = None,
+                 isolation_authority: IsolationPathAuthority | None = None,
                  stdout_line_limit: int = DEFAULT_STDOUT_LINE_LIMIT_BYTES, initialize_timeout: float = DEFAULT_INITIALIZE_TIMEOUT_SECONDS,
                  graceful_shutdown_timeout: float = DEFAULT_GRACEFUL_SHUTDOWN_SECONDS, terminate_timeout: float = DEFAULT_TERMINATE_TIMEOUT_SECONDS,
                  kill_reap_timeout: float = DEFAULT_KILL_REAP_TIMEOUT_SECONDS) -> None:
@@ -67,6 +132,13 @@ class CodexRuntimeManager:
         self._profiles = {p.profile_id: p for p in profiles}
         if len(self._profiles) != len(profiles): raise ValueError("duplicate_profile_id")
         self._executable, self._client_version = executable, client_version
+        self._schema_sha256 = schema_sha256
+        self._storage_capabilities = storage_capabilities or StorageRuntimeCapabilities()
+        try:
+            self._storage_capabilities.validate(requested_version=client_version, requested_schema=schema_sha256)
+            self._capability_failure: str | None = None
+        except Exception:
+            self._capability_failure = "capability_mismatch"
         self._parent_environment = dict(os.environ if parent_environment is None else parent_environment)
         self._factory, self._stdout_line_limit = process_factory, stdout_line_limit
         self._initialize_timeout, self._graceful_timeout = initialize_timeout, graceful_shutdown_timeout
@@ -74,14 +146,19 @@ class CodexRuntimeManager:
         self._runtimes: dict[str, CodexRuntime] = {}; self._starting: dict[str, asyncio.Task[CodexRuntime]] = {}
         self._unresolved: dict[str, CodexRuntime] = {}; self._stopping: set[str] = set(); self._generations: dict[str, int] = {}
         self._lock = asyncio.Lock(); self._shutting_down = False
+        self._reservations: dict[str, ProfileReservation] = {}
+        self._isolation_authority = isolation_authority or IsolationPathAuthority(tuple(profiles))
+        self._state_root = IsolatedStateRoot(self._isolation_authority)
         self._before_ready_publication: RuntimeHook | None = None
         self._before_watcher_update: RuntimeHook | None = None
         self._profile_shutdown_reserved: Callable[[str], Awaitable[None]] | None = None
 
     async def acquire(self, profile_id: str) -> CodexRuntime:
         async with self._lock:
+            if self._capability_failure is not None: raise RuntimeErrorSafe(self._capability_failure, profile_id)
             if self._shutting_down: raise RuntimeErrorSafe("manager_shutting_down", profile_id)
             if profile_id not in self._profiles: raise RuntimeErrorSafe("unknown_profile", profile_id)
+            if profile_id in self._reservations: raise RuntimeErrorSafe("profile_reserved", profile_id)
             if profile_id in self._stopping: raise RuntimeErrorSafe("profile_stopping", profile_id)
             if profile_id in self._unresolved: raise RuntimeErrorSafe("unresolved_process", profile_id)
             existing = self._runtimes.get(profile_id)
@@ -99,9 +176,14 @@ class CodexRuntimeManager:
     async def _start(self, profile: CodexProfile, generation: int) -> CodexRuntime:
         process: ProcessLike | None = None; runtime: CodexRuntime | None = None; failure = RuntimeErrorSafe("startup_failed", profile.profile_id)
         try:
+            try:
+                self._isolation_authority.validate_profile_paths(profile)
+                self._state_root.validate(profile)
+            except IsolationError as error:
+                raise RuntimeErrorSafe("storage_boundary_invalid", profile.profile_id) from error
             executable = Path(self._executable)
             if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK): raise RuntimeErrorSafe("executable_invalid", profile.profile_id)
-            process = await self._factory([str(executable), "app-server", "--stdio"], build_child_environment(profile, self._parent_environment), self._stdout_line_limit)
+            process = await self._factory(build_child_argv(str(executable), profile), build_child_environment(profile, self._parent_environment), self._stdout_line_limit)
             if process.stdin is None or process.stdout is None or process.stderr is None: raise RuntimeErrorSafe("process_streams_missing", profile.profile_id)
             transport = SubprocessStdioTransport(process.stdout, process.stdin)
             runtime = CodexRuntime(profile.profile_id, generation, process, transport, CodexProtocolClient(transport, client_version=self._client_version), shutdown_lock=asyncio.Lock())
@@ -113,6 +195,7 @@ class CodexRuntimeManager:
                 # Sole READY-publication linearization point: no state can regress after it.
                 if self._shutting_down: raise RuntimeErrorSafe("manager_shutting_down", profile.profile_id)
                 if profile.profile_id in self._stopping: raise RuntimeErrorSafe("profile_stopping", profile.profile_id)
+                if profile.profile_id in self._reservations: raise RuntimeErrorSafe("profile_reserved", profile.profile_id)
                 if process.returncode is not None or runtime.client.state is not ProtocolState.READY: raise RuntimeErrorSafe("initialize_failed", profile.profile_id)
                 runtime.state = RuntimeState.READY; self._runtimes[profile.profile_id] = runtime
             runtime.protocol_watcher = asyncio.create_task(self._watch_protocol(runtime)); return runtime
@@ -128,6 +211,36 @@ class CodexRuntimeManager:
             except RuntimeErrorSafe as error: failure = error
         elif process is not None: await self._reap_process(process)
         raise failure
+
+    async def reserve(self, profile_id: str) -> ProfileReservation:
+        async with self._lock:
+            if self._shutting_down: raise RuntimeErrorSafe("manager_shutting_down", profile_id)
+            if profile_id not in self._profiles: raise RuntimeErrorSafe("unknown_profile", profile_id)
+            if profile_id in self._reservations: raise RuntimeErrorSafe("profile_reserved", profile_id)
+            reservation = ProfileReservation(profile_id, self, object())
+            self._reservations[profile_id] = reservation
+            return reservation
+
+    async def release(self, reservation: ProfileReservation) -> None:
+        if not isinstance(reservation, ProfileReservation):
+            raise RuntimeErrorSafe("reservation_token_invalid", "unknown")
+        async with self._lock:
+            current = self._reservations.get(reservation.profile_id)
+            if current is not reservation or current._token is not reservation._token or current._manager is not self:
+                raise RuntimeErrorSafe("reservation_token_invalid", reservation.profile_id)
+            self._reservations.pop(reservation.profile_id, None)
+
+    def quiescence_proof(self, reservation: ProfileReservation) -> RuntimeQuiescenceProof:
+        current = self._reservations.get(reservation.profile_id)
+        valid = current is reservation and current._token is reservation._token and current._manager is self
+        runtime = self._runtimes.get(reservation.profile_id)
+        return RuntimeQuiescenceProof(
+            reservation.profile_id,
+            valid,
+            reservation.profile_id in self._starting,
+            runtime is not None,
+            reservation.profile_id in self._unresolved,
+        )
 
     async def _drain_stderr(self, runtime: CodexRuntime) -> None:
         assert runtime.process.stderr is not None
@@ -200,7 +313,7 @@ class CodexRuntimeManager:
 
     async def shutdown_all(self) -> None:
         async with self._lock:
-            self._shutting_down = True; profiles = sorted(set(self._starting) | set(self._runtimes) | set(self._unresolved))
+            self._shutting_down = True; profiles = sorted(set(self._starting) | set(self._runtimes) | set(self._unresolved) | set(self._reservations))
         results = await asyncio.gather(*(self.shutdown_profile(p) for p in profiles), return_exceptions=True)
         failures = {profile: result for profile, result in zip(profiles, results) if isinstance(result, RuntimeErrorSafe)}
         async with self._lock:

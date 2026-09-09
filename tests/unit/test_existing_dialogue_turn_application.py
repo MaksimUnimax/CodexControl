@@ -67,7 +67,7 @@ class ExistingDialogueApplicationUnitTests(unittest.IsolatedAsyncioTestCase):
         return ExistingDialogueTurnService(
             self.storage,
             server_id="server",
-            profiles=(CodexProfile("profile", "/private/CODEX_HOME", "Profile"),),
+        profiles=(CodexProfile("profile", "/private/CODEX_HOME", "Profile", "/private/STATE_ROOT"),),
             model_catalog=kwargs.pop("model_catalog", _Catalog()),
             turn_lifecycle=kwargs.pop("turn_lifecycle", _Turns()),
             working_directory_resolver=kwargs.pop("working_directory_resolver", _Workdir()),
@@ -134,7 +134,7 @@ class ExistingDialogueApplicationUnitTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(DialogueApplicationError):
             ExistingDialogueTurnService(self.storage, server_id="server\x00", profiles=(), model_catalog=_Catalog(), turn_lifecycle=_Turns(), working_directory_resolver=_Workdir())
         with self.assertRaises(DialogueApplicationError):
-            ExistingDialogueTurnService(self.storage, server_id="server", profiles=(CodexProfile("p", "/a", "a"), CodexProfile("p", "/b", "b")), model_catalog=_Catalog(), turn_lifecycle=_Turns(), working_directory_resolver=_Workdir())
+            ExistingDialogueTurnService(self.storage, server_id="server", profiles=(CodexProfile("p", "/a", "a", "/sa"), CodexProfile("p", "/b", "b", "/sb")), model_catalog=_Catalog(), turn_lifecycle=_Turns(), working_directory_resolver=_Workdir())
 
     def test_output_bound_arithmetic(self):
         self.assertEqual(8_000_510, 2_000_000 * 4 + 255 * 2)

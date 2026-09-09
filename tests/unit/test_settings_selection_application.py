@@ -41,7 +41,7 @@ class SettingsSelectionApplicationUnitTests(unittest.IsolatedAsyncioTestCase):
         return SettingsSelectionService(
             self.storage,
             server_id="server",
-            profiles=(CodexProfile("profile", "/PRIVATE/CODEX_HOME/MUST_NOT_LEAK", "Profile"),),
+            profiles=(CodexProfile("profile", "/PRIVATE/CODEX_HOME/MUST_NOT_LEAK", "Profile", "/PRIVATE/STATE_ROOT/MUST_NOT_LEAK"),),
             model_catalog=_Catalog(),
             **kwargs,
         )

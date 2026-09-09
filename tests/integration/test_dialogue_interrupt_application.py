@@ -605,7 +605,7 @@ class DialogueInterruptApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         registry = ActiveTurnRegistry()
         service = ExistingDialogueTurnService(
             self.storage, server_id="server",
-            profiles=(CodexProfile("profile", "/PRIVATE/CODEX_HOME", "Profile"),),
+            profiles=(CodexProfile("profile", "/PRIVATE/CODEX_HOME", "Profile", "/PRIVATE/STATE_ROOT"),),
             model_catalog=_SettingsCatalog(), turn_lifecycle=lifecycle,
             working_directory_resolver=_RunnerWorkdir(), now_ms=lambda: 1000,
             id_factory=lambda kind: f"{kind}-runner", active_turn_registry=registry,
@@ -632,7 +632,7 @@ class DialogueInterruptApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         registry = ActiveTurnRegistry()
         turn_service = ExistingDialogueTurnService(
             self.storage, server_id="server",
-            profiles=(CodexProfile("profile", "/PRIVATE/CODEX_HOME", "Profile"),),
+            profiles=(CodexProfile("profile", "/PRIVATE/CODEX_HOME", "Profile", "/PRIVATE/STATE_ROOT"),),
             model_catalog=_SettingsCatalog(), turn_lifecycle=lifecycle,
             working_directory_resolver=_RunnerWorkdir(), now_ms=lambda: 1000,
             id_factory=lambda kind: f"{kind}-runner", active_turn_registry=registry,
@@ -700,8 +700,8 @@ class DialogueInterruptApplicationIntegrationTests(unittest.IsolatedAsyncioTestC
         selection = SettingsSelectionService(
             self.storage, server_id="server",
             profiles=(
-                CodexProfile("profile", "/PRIVATE/CODEX_HOME", "Profile"),
-                CodexProfile("profile-b", "/PRIVATE/CODEX_HOME/B", "Profile B"),
+                CodexProfile("profile", "/PRIVATE/CODEX_HOME", "Profile", "/PRIVATE/STATE_ROOT"),
+                CodexProfile("profile-b", "/PRIVATE/CODEX_HOME/B", "Profile B", "/PRIVATE/STATE/B"),
             ), model_catalog=_SettingsCatalog(), now_ms=lambda: 1000,
         )
         profile = await selection.select_profile("profile-b", expected_version=settings_before.version)

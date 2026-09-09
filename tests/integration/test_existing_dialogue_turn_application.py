@@ -131,7 +131,7 @@ class ExistingDialogueApplicationIntegrationTests(unittest.IsolatedAsyncioTestCa
         return ExistingDialogueTurnService(
             self.storage,
             server_id="server",
-            profiles=(CodexProfile("profile", "/private/CODEX_HOME", "Profile"),),
+            profiles=(CodexProfile("profile", "/private/CODEX_HOME", "Profile", "/private/STATE_ROOT"),),
             model_catalog=catalog or FakeCatalog(),
             turn_lifecycle=turns or FakeTurns(),
             working_directory_resolver=workdir or FakeWorkdir(),

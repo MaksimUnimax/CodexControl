@@ -583,7 +583,7 @@ class PrivateDialogueControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
             server_id="server-80",
             server_display_name="Server 80",
             operator_user_id=7,
-            profiles=(CodexProfile("profile-a", "/not-displayed", "Profile A"),),
+            profiles=(CodexProfile("profile-a", "/not-displayed", "Profile A", "/not-displayed-state"),),
             model_catalog=Catalog(),
             now_ms=self.clock,
             token_factory=p41_token_factory,

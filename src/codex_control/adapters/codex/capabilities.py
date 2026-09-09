@@ -14,6 +14,34 @@ SUPPORTED_CODEX_VERSION = "0.144.6"
 SCHEMA_SHA256 = "40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466"
 
 
+@dataclass(frozen=True)
+class StorageRuntimeCapabilities:
+    """Finite storage controls proven for the exact installed CLI authority."""
+
+    codex_cli_version: str = SUPPORTED_CODEX_VERSION
+    schema_sha256: str = SCHEMA_SHA256
+    sqlite_home_environment: bool = True
+    sqlite_home_config: bool = True
+    log_dir_config: bool = True
+    history_persistence_none: bool = True
+
+    def validate(self, *, requested_version: str, requested_schema: str = SCHEMA_SHA256) -> None:
+        if (
+            requested_version != SUPPORTED_CODEX_VERSION
+            or requested_schema != SCHEMA_SHA256
+            or self.codex_cli_version != SUPPORTED_CODEX_VERSION
+            or self.schema_sha256 != SCHEMA_SHA256
+            or not self.sqlite_home_environment
+            or not self.sqlite_home_config
+            or not self.log_dir_config
+            or not self.history_persistence_none
+        ):
+            raise CapabilityManifestError("storage_capability_mismatch")
+
+
+CodexStorageCapabilities = StorageRuntimeCapabilities
+
+
 class CapabilityManifestError(Exception):
     """Safe validation failure; malformed source data is never exposed."""
     def __init__(self, category: str) -> None:

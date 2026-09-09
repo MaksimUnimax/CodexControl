@@ -87,7 +87,7 @@ class PrivateControlIntegrationTests(unittest.IsolatedAsyncioTestCase):
             server_id="server-80",
             server_display_name="Server 80",
             operator_user_id=7,
-            profiles=(CodexProfile("profile-a", "/synthetic/profile-a", "Profile A"),),
+            profiles=(CodexProfile("profile-a", "/synthetic/profile-a", "Profile A", "/synthetic/state-a"),),
             model_catalog=Catalog(), interrupt_service=PassiveEffects(), delete_service=PassiveEffects(),
             mode_provider=lambda: ControllerMode.SLEEP,
             now_ms=clock, token_factory=token_factory,

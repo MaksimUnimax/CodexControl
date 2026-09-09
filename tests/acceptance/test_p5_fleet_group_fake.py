@@ -123,7 +123,7 @@ class _Controller:
         p3 = DialogueTurnService(
             self.storage,
             server_id=self.server_id,
-            profiles=(CodexProfile("profile", "/fake/profile", "PROFILE"),),
+            profiles=(CodexProfile("profile", "/fake/profile", "PROFILE", "/fake/state"),),
             model_catalog=_Catalog(),
             thread_lifecycle=_Thread(),
             turn_lifecycle=self.turns,

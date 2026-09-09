@@ -6,11 +6,13 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from codex_control.adapters.codex.protocol import ProtocolState
+from codex_control.adapters.codex.capabilities import SUPPORTED_CODEX_VERSION
+from codex_control.adapters.codex.isolation import IsolationPathAuthority, IsolatedStateRoot
 from codex_control.adapters.codex.runtime import CodexRuntimeManager, RuntimeErrorSafe, RuntimeState, build_child_environment, create_codex_process
 from codex_control.adapters.codex.subprocess_transport import DEFAULT_STDOUT_LINE_LIMIT_BYTES, SubprocessStdioTransport, SubprocessTransportError
 from codex_control.domain import CodexProfile
 
-TEST_VERSION = "0.1.0-test"
+TEST_VERSION = SUPPORTED_CODEX_VERSION
 
 class Writer:
     def __init__(self, on_write=None, on_close=None): self.data, self.closed, self.on_write, self.on_close = [], False, on_write, on_close
@@ -66,17 +68,24 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
 
 class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.home = os.path.join(self.tempdir.name, "home"); self.state = os.path.join(self.tempdir.name, "state")
+        self.repository = os.path.join(self.tempdir.name, "repository"); self.controller = os.path.join(self.tempdir.name, "controller.sqlite")
+        os.mkdir(self.home, 0o700); os.mkdir(self.repository, 0o700); open(self.controller, "wb").close()
+        self.profile = CodexProfile("p", self.home, "P", self.state)
+        self.authority = IsolationPathAuthority((self.profile,), controller_db_path=self.controller, repository_root=self.repository)
+        IsolatedStateRoot(self.authority).provision(self.profile)
         self.executable = tempfile.NamedTemporaryFile(delete=False); self.executable.close(); os.chmod(self.executable.name, 0o755)
-    def tearDown(self): os.unlink(self.executable.name)
+    def tearDown(self): os.unlink(self.executable.name); self.tempdir.cleanup()
     def manager(self, factory=None, **kwargs):
-        return CodexRuntimeManager([CodexProfile("p", "/chosen", "P")], client_version=TEST_VERSION, executable=self.executable.name, process_factory=factory or Factory(), initialize_timeout=.05, graceful_shutdown_timeout=.01, terminate_timeout=.01, kill_reap_timeout=.01, **kwargs)
+        return CodexRuntimeManager([self.profile], client_version=TEST_VERSION, executable=self.executable.name, process_factory=factory or Factory(), isolation_authority=self.authority, initialize_timeout=.05, graceful_shutdown_timeout=.01, terminate_timeout=.01, kill_reap_timeout=.01, **kwargs)
 
     def test_environment_filters_secrets_and_binds_profile(self):
-        env = build_child_environment(CodexProfile("p", "/chosen", "P"), {"CODEX_HOME":"/parent", "PATH":"/bin", "SECRET_TOKEN":"fake", "OPENAI_API_KEY":"fake"})
-        self.assertEqual(env["CODEX_HOME"], "/chosen"); self.assertEqual(env["PATH"], "/bin"); self.assertFalse({"SECRET_TOKEN", "OPENAI_API_KEY"} & env.keys())
+        env = build_child_environment(self.profile, {"CODEX_HOME":"/parent", "CODEX_SQLITE_HOME":"/parent/sqlite", "PATH":"/bin", "SECRET_TOKEN":"fake", "OPENAI_API_KEY":"fake"})
+        self.assertEqual(env["CODEX_HOME"], self.home); self.assertEqual(env["CODEX_SQLITE_HOME"], os.path.join(self.state, "sqlite")); self.assertEqual(env["PATH"], "/bin"); self.assertFalse({"SECRET_TOKEN", "OPENAI_API_KEY"} & env.keys())
 
     def test_client_version_is_required(self):
-        with self.assertRaises(TypeError): CodexRuntimeManager([CodexProfile("p", "/chosen", "P")])
+        with self.assertRaises(TypeError): CodexRuntimeManager([self.profile])
 
     async def test_default_factory_uses_exec_fixed_argv_and_no_shell(self):
         with patch("codex_control.adapters.codex.runtime.asyncio.create_subprocess_exec", new_callable=AsyncMock) as spawn:
@@ -87,7 +96,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_initialize_uses_explicit_codexcontrol_client_version(self):
         factory = Factory(); runtime = await self.manager(factory).acquire("p")
-        init = json.loads(factory.processes[0].stdin.data[0]); self.assertEqual(init["params"]["clientInfo"]["version"], TEST_VERSION); self.assertNotEqual(TEST_VERSION, "0.144.6")
+        init = json.loads(factory.processes[0].stdin.data[0]); self.assertEqual(init["params"]["clientInfo"]["version"], TEST_VERSION)
         await runtime.client.close()
 
     async def test_successful_single_flight_owns_one_child(self):
