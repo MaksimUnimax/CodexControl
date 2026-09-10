@@ -2,7 +2,7 @@
 
 from hashlib import sha256
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MIGRATION_ID = "0001_initial_state"
 
 SCHEMA_V1_STATEMENTS: tuple[str, ...] = (
@@ -287,6 +287,25 @@ SCHEMA_V3_MIGRATION_SHA256 = sha256(
     SCHEMA_V3_MIGRATION_CANONICAL_SQL.encode("utf-8")
 ).hexdigest()
 
+SCHEMA_V4_MIGRATION_ID = "0004_delete_local_containment"
+SCHEMA_V4_MIGRATION_STATEMENTS: tuple[str, ...] = (
+    """CREATE TABLE delete_storage_containment (
+    dialogue_id TEXT PRIMARY KEY REFERENCES dialogues(dialogue_id) ON DELETE CASCADE,
+    profile_id TEXT NOT NULL CHECK (length(profile_id) BETWEEN 1 AND 128),
+    thread_identity_sha256 TEXT NOT NULL CHECK (length(thread_identity_sha256) = 64),
+    dialogue_version INTEGER NOT NULL CHECK (dialogue_version >= 0),
+    official_delete_authority TEXT NOT NULL CHECK (official_delete_authority = 'UNKNOWN'),
+    local_isolated_storage_containment TEXT NOT NULL CHECK (local_isolated_storage_containment = 'COMPLETED'),
+    contained_at_ms INTEGER NOT NULL CHECK (contained_at_ms >= 0)
+)""",
+)
+SCHEMA_V4_MIGRATION_CANONICAL_SQL = "\n".join(
+    canonicalize_sql(statement) for statement in SCHEMA_V4_MIGRATION_STATEMENTS
+) + "\n"
+SCHEMA_V4_MIGRATION_SHA256 = sha256(
+    SCHEMA_V4_MIGRATION_CANONICAL_SQL.encode("utf-8")
+).hexdigest()
+
 TABLE_NAMES = frozenset(
     statement.split()[2]
     for statement in SCHEMA_V1_STATEMENTS
@@ -297,3 +316,7 @@ INDEX_NAMES = frozenset(
     for statement in SCHEMA_V1_STATEMENTS
     if statement.lstrip().upper().startswith("CREATE INDEX ")
 )
+
+# These are deliberately separate from the historical object authorities.
+V4_TABLE_NAMES = TABLE_NAMES | frozenset({"delete_storage_containment"})
+V4_INDEX_NAMES = INDEX_NAMES

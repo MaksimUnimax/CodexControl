@@ -194,7 +194,7 @@ class StorageKernelTests(unittest.IsolatedAsyncioTestCase):
                 c.execute("PRAGMA trusted_schema").fetchone()[0],
                 c.execute("PRAGMA user_version").fetchone()[0],
             ))
-            self.assertEqual((1, "wal", 5000, 2, 0, 3), values)
+            self.assertEqual((1, "wal", 5000, 2, 0, 4), values)
         finally:
             await storage.close()
 
@@ -293,6 +293,7 @@ class StorageKernelTests(unittest.IsolatedAsyncioTestCase):
             (1, "0001_initial_state", "b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c"),
             (2, "0002_ingress_rejected_disposition", "a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85"),
             (3, SCHEMA_V3_MIGRATION_ID, SCHEMA_V3_MIGRATION_SHA256),
+            (4, "0004_delete_local_containment", "400a475cb074da6b82238af105412d8299b45816273136bfd54a2cbd2308e059"),
         ]
         try:
             statements = (
@@ -328,7 +329,7 @@ class StorageKernelTests(unittest.IsolatedAsyncioTestCase):
                         "SELECT version, migration_id, ddl_sha256 FROM schema_migrations ORDER BY version"
                     )])
                     self.assertEqual(expected, row)
-                    self.assertEqual(3, await storage.read(lambda c: c.execute(
+                    self.assertEqual(4, await storage.read(lambda c: c.execute(
                         "PRAGMA user_version"
                     ).fetchone()[0]))
         finally:

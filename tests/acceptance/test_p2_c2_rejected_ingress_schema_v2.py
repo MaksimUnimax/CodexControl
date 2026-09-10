@@ -55,13 +55,15 @@ class P2C2RejectedIngressSchemaV2AcceptanceTests(unittest.IsolatedAsyncioTestCas
                     c.execute("PRAGMA user_version").fetchone()[0],
                     [tuple(row) for row in c.execute("SELECT version, migration_id, ddl_sha256 FROM schema_migrations ORDER BY version")],
                 ))
-                self.assertEqual(3, ledger[0])
-                self.assertEqual(3, len(ledger[1]))
+                self.assertEqual(4, ledger[0])
+                self.assertEqual(4, len(ledger[1]))
                 self.assertEqual(SCHEMA_V2_MIGRATION_ID, ledger[1][1][1])
                 self.assertEqual(SCHEMA_V2_MIGRATION_SHA256, ledger[1][1][2])
                 self.assertEqual(SCHEMA_V3_MIGRATION_ID, ledger[1][2][1])
                 self.assertEqual(SCHEMA_V3_MIGRATION_SHA256, ledger[1][2][2])
-                self.assertEqual(2, len(migration_calls))
+                self.assertEqual(3, len(migration_calls))
+                self.assertEqual("0004_delete_local_containment", ledger[1][3][1])
+                self.assertEqual("400a475cb074da6b82238af105412d8299b45816273136bfd54a2cbd2308e059", ledger[1][3][2])
                 self.assertEqual(
                     [(1, "CONTROL"), (2, "IGNORED_SLEEP"),
                      (3, "IGNORED_UNAUTHORIZED"), (4, "JOB:job-1")],

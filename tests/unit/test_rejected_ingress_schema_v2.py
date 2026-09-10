@@ -23,7 +23,7 @@ from codex_control.storage.schema import (
 
 class RejectedIngressSchemaV2UnitTests(unittest.TestCase):
     def test_current_and_historical_schema_authority(self):
-        self.assertEqual(3, SCHEMA_VERSION)
+        self.assertEqual(4, SCHEMA_VERSION)
         self.assertEqual("0001_initial_state", MIGRATION_ID)
         self.assertEqual(
             "b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c",

@@ -170,6 +170,16 @@ class CodexRuntimeManager:
         self._before_watcher_update: RuntimeHook | None = None
         self._profile_shutdown_reserved: Callable[[str], Awaitable[None]] | None = None
 
+    @property
+    def isolation_authority(self) -> IsolationPathAuthority:
+        return self._isolation_authority
+
+    def profile(self, profile_id: str) -> CodexProfile:
+        try:
+            return self._profiles[profile_id]
+        except KeyError:
+            raise RuntimeErrorSafe("unknown_profile", profile_id) from None
+
     async def acquire(self, profile_id: str) -> CodexRuntime:
         async with self._lock:
             if self._capability_failure is not None: raise RuntimeErrorSafe(self._capability_failure, profile_id)

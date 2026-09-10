@@ -11,6 +11,7 @@ from .core_repositories import (
     _next_version,
     _validate_clock,
 )
+from .containment_repositories import validate_all_containment_rows
 from .idempotency_repositories import _materialize_ingress
 from .records import DialogueRecord, DialogueState
 from .repository_errors import RepositoryError, RepositoryErrorCategory
@@ -213,6 +214,7 @@ def _validate_canonical_dialogue(
 
 
 def _snapshot(connection: Any) -> ApplicationRecoverySnapshot:
+    validate_all_containment_rows(connection)
     row = _dialogue_row(connection)
     if row is None:
         return ApplicationRecoverySnapshot(None, ())

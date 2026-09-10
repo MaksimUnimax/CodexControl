@@ -11,6 +11,12 @@ from .schema import (
     SCHEMA_V2_MIGRATION_SHA256,
     SCHEMA_V3_MIGRATION_ID,
     SCHEMA_V3_MIGRATION_SHA256,
+    SCHEMA_V4_MIGRATION_ID,
+    SCHEMA_V4_MIGRATION_SHA256,
+    SCHEMA_V4_MIGRATION_CANONICAL_SQL,
+    SCHEMA_V4_MIGRATION_STATEMENTS,
+    V4_INDEX_NAMES,
+    V4_TABLE_NAMES,
 )
 from .sqlite import SqliteStorage
 from .core_repositories import (
@@ -79,6 +85,8 @@ from .approval_repositories import ApprovalRepository
 from .retention import RetentionRepository, RetentionSweepResult
 from .deletion_records import DeletionFinalizeResult, DeletionTombstoneRecord
 from .deletion_repositories import DeletionRepository
+from .containment_records import DeleteStorageContainmentRecord
+from .containment_repositories import DeleteStorageContainmentRepository
 from .error_records import ErrorFingerprintRecord
 from .error_repositories import ErrorFingerprintRepository
 from .metadata_retention import (
@@ -106,6 +114,12 @@ __all__ = [
     "SCHEMA_V2_MIGRATION_SHA256",
     "SCHEMA_V3_MIGRATION_ID",
     "SCHEMA_V3_MIGRATION_SHA256",
+    "SCHEMA_V4_MIGRATION_ID",
+    "SCHEMA_V4_MIGRATION_SHA256",
+    "SCHEMA_V4_MIGRATION_CANONICAL_SQL",
+    "SCHEMA_V4_MIGRATION_STATEMENTS",
+    "V4_INDEX_NAMES",
+    "V4_TABLE_NAMES",
     "SqliteStorage",
     "StorageError",
     "StorageErrorCategory",
@@ -164,6 +178,8 @@ __all__ = [
     "DeletionTombstoneRecord",
     "DeletionFinalizeResult",
     "DeletionRepository",
+    "DeleteStorageContainmentRecord",
+    "DeleteStorageContainmentRepository",
     "ErrorFingerprintRecord",
     "ErrorFingerprintRepository",
     "METADATA_RETENTION_MS",

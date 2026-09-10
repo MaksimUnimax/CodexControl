@@ -20,6 +20,10 @@ from codex_control.storage import (
 )
 from codex_control.storage.application_recovery import ApplicationRecoveryRepository
 from codex_control.storage.errors import StorageError
+from .delete_storage_cleanup import (
+    DeleteStorageCleanupCoordinator,
+    DeleteStorageCleanupStatus,
+)
 
 class DialogueRecoveryStatus(StrEnum):
     NO_ACTION = "NO_ACTION"
@@ -29,6 +33,11 @@ class DialogueRecoveryStatus(StrEnum):
     INTERRUPT_MARKED_UNKNOWN = "INTERRUPT_MARKED_UNKNOWN"
     DELETE_MARKED_UNKNOWN = "DELETE_MARKED_UNKNOWN"
     DELETE_CONFIRMED_STORAGE_PENDING = "DELETE_CONFIRMED_STORAGE_PENDING"
+    # C4 compatibility aliases retain the established public iteration while
+    # giving callers descriptive names for the composed local outcomes.
+    DELETE_FINALIZED_AFTER_STORAGE = "DELETE_CONFIRMED_STORAGE_PENDING"
+    DELETE_UNKNOWN_CONTAINED = "DELETE_MARKED_UNKNOWN"
+    DELETE_UNKNOWN_CONTAINMENT_PENDING = "DELETE_MARKED_UNKNOWN"
 
 
 class DialogueRecoveryErrorCategory(StrEnum):
@@ -90,11 +99,23 @@ class DialogueRecoveryResult:
 
 
 class DialogueRecoveryService:
-    def __init__(self, storage: SqliteStorage, *, now_ms: Callable[[], int] | None = None) -> None:
+    def __init__(
+        self,
+        storage: SqliteStorage,
+        *,
+        now_ms: Callable[[], int] | None = None,
+        local_cleanup: DeleteStorageCleanupCoordinator | None = None,
+    ) -> None:
         if not isinstance(storage, SqliteStorage) or (now_ms is not None and not callable(now_ms)):
+            raise _invariant()
+        if local_cleanup is not None and not (
+            callable(getattr(local_cleanup, "cleanup_confirmed", None))
+            and callable(getattr(local_cleanup, "contain_unknown", None))
+        ):
             raise _invariant()
         self._storage = storage
         self._clock = now_ms if now_ms is not None else _default_clock
+        self._local_cleanup = local_cleanup
 
     def __repr__(self) -> str:
         return "<DialogueRecoveryService>"
@@ -149,6 +170,8 @@ class DialogueRecoveryService:
                 raise _repository_error(error) from None
             if marked.state is not DialogueState.DELETE_UNKNOWN or marked.version != current.version + 1:
                 raise _invariant()
+            if self._local_cleanup is not None:
+                return await self._recover_unknown(marked)
             return DialogueRecoveryResult(DialogueRecoveryStatus.DELETE_MARKED_UNKNOWN, None, marked)
 
         if current.state is DialogueState.DELETE_PENDING:
@@ -159,9 +182,28 @@ class DialogueRecoveryService:
         if current.state is DialogueState.DELETE_CONFIRMED_PENDING_STORAGE:
             if snapshot.active_jobs:
                 raise _invariant()
+            if self._local_cleanup is not None:
+                try:
+                    outcome = await self._local_cleanup.cleanup_confirmed(
+                        dialogue_id=current.dialogue_id,
+                        expected_dialogue_version=current.version,
+                    )
+                except Exception:
+                    outcome = None
+                if outcome is not None and outcome.status is DeleteStorageCleanupStatus.CONFIRMED_FINALIZED:
+                    return DialogueRecoveryResult(
+                        DialogueRecoveryStatus.DELETE_FINALIZED_AFTER_STORAGE, None, None
+                    )
+                if outcome is not None and outcome.status is not DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE:
+                    raise _invariant()
             return DialogueRecoveryResult(
                 DialogueRecoveryStatus.DELETE_CONFIRMED_STORAGE_PENDING, None, current
             )
+
+        if current.state is DialogueState.DELETE_UNKNOWN:
+            if self._local_cleanup is not None:
+                return await self._recover_unknown(current)
+            return DialogueRecoveryResult(DialogueRecoveryStatus.NO_ACTION, None, current)
 
         if current.state in (DialogueState.CREATE_UNKNOWN, DialogueState.ERROR):
             if len(snapshot.active_jobs) > 1:
@@ -198,6 +240,26 @@ class DialogueRecoveryService:
         if transition.action == "NO_ACTION":
             return DialogueRecoveryResult(DialogueRecoveryStatus.NO_ACTION, transition.job, transition.dialogue)
         raise _invariant()
+
+    async def _recover_unknown(self, dialogue: DialogueRecord) -> DialogueRecoveryResult:
+        try:
+            outcome = await self._local_cleanup.contain_unknown(
+                dialogue_id=dialogue.dialogue_id,
+                expected_dialogue_version=dialogue.version,
+            )
+        except Exception:
+            outcome = None
+        if outcome is not None and outcome.status not in (
+            DeleteStorageCleanupStatus.UNKNOWN_CONTAINED,
+            DeleteStorageCleanupStatus.UNKNOWN_PENDING,
+        ):
+            raise _invariant()
+        status = (
+            DialogueRecoveryStatus.DELETE_UNKNOWN_CONTAINED
+            if outcome is not None and outcome.status is DeleteStorageCleanupStatus.UNKNOWN_CONTAINED
+            else DialogueRecoveryStatus.DELETE_UNKNOWN_CONTAINMENT_PENDING
+        )
+        return DialogueRecoveryResult(status, None, outcome.dialogue if outcome is not None and outcome.dialogue else dialogue)
 
 
 __all__ = [

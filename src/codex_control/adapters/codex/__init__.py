@@ -7,5 +7,6 @@ from .version_probe import CodexVersionProbe
 from .thread_lifecycle import CodexThreadLifecycleAdapter, ThreadBinding, ThreadLifecycleError, ThreadOperationResult, ThreadOperationStatus, TrustedWorkingDirectory
 
 from .isolation import IsolationError, IsolationPathAuthority, IsolatedStateRoot
+from .persistent_scanner import PersistentProfileResidualScanner, PersistentProfileScanResult
 
-__all__ = ["CodexProtocolClient", "ProtocolFault", "ProtocolRemoteError", "ProtocolState", "CodexCapability", "CodexCapabilityManifest", "CodexStorageCapabilities", "StorageRuntimeCapabilities", "load_manifest", "CodexAdapterError", "CodexAdapterErrorCategory", "normalize_error", "CodexVersionProbe", "CodexThreadLifecycleAdapter", "ThreadBinding", "ThreadLifecycleError", "ThreadOperationResult", "ThreadOperationStatus", "TrustedWorkingDirectory", "IsolationError", "IsolationPathAuthority", "IsolatedStateRoot"]
+__all__ = ["CodexProtocolClient", "ProtocolFault", "ProtocolRemoteError", "ProtocolState", "CodexCapability", "CodexCapabilityManifest", "CodexStorageCapabilities", "StorageRuntimeCapabilities", "load_manifest", "CodexAdapterError", "CodexAdapterErrorCategory", "normalize_error", "CodexVersionProbe", "CodexThreadLifecycleAdapter", "ThreadBinding", "ThreadLifecycleError", "ThreadOperationResult", "ThreadOperationStatus", "TrustedWorkingDirectory", "IsolationError", "IsolationPathAuthority", "IsolatedStateRoot", "PersistentProfileResidualScanner", "PersistentProfileScanResult"]

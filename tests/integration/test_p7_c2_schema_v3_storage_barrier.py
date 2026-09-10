@@ -118,12 +118,13 @@ class P7C2SchemaV3StorageBarrierTests(unittest.IsolatedAsyncioTestCase):
             ledger = await storage.read(lambda c: [tuple(row) for row in c.execute(
                 "SELECT version, migration_id, ddl_sha256, applied_at_ms FROM schema_migrations ORDER BY version"
             )])
-            self.assertEqual(3, len(calls))
-            self.assertEqual(3, await storage.read(lambda c: c.execute("PRAGMA user_version").fetchone()[0]))
+            self.assertEqual(4, len(calls))
+            self.assertEqual(4, await storage.read(lambda c: c.execute("PRAGMA user_version").fetchone()[0]))
             self.assertEqual([
                 (1, MIGRATION_ID, SCHEMA_V1_DDL_SHA256, 101),
                 (2, SCHEMA_V2_MIGRATION_ID, SCHEMA_V2_MIGRATION_SHA256, 102),
                 (3, SCHEMA_V3_MIGRATION_ID, SCHEMA_V3_MIGRATION_SHA256, 103),
+                (4, "0004_delete_local_containment", "400a475cb074da6b82238af105412d8299b45816273136bfd54a2cbd2308e059", 104),
             ], ledger)
             self.assertEqual(
                 SCHEMA_V1_DDL_SHA256,
@@ -141,7 +142,7 @@ class P7C2SchemaV3StorageBarrierTests(unittest.IsolatedAsyncioTestCase):
         storage = await self._open(lambda: 30)
         await storage.close()
         with sqlite3.connect(self.path) as connection:
-            self.assertEqual(3, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(4, connection.execute("PRAGMA user_version").fetchone()[0])
         self.tempdir.cleanup()
         self.tempdir = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.tempdir.name, "controller.sqlite3")

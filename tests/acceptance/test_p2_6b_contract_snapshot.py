@@ -10,7 +10,7 @@ from dataclasses import fields, is_dataclass
 from enum import StrEnum
 
 from codex_control.storage import *
-from codex_control.storage.schema import INDEX_NAMES, TABLE_NAMES
+from codex_control.storage.schema import INDEX_NAMES, TABLE_NAMES, V4_TABLE_NAMES
 
 
 DDL_SHA = "b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c"
@@ -25,7 +25,7 @@ def defined_public_callables(cls: type) -> set[str]:
 
 class P26bContractSnapshotTests(unittest.IsolatedAsyncioTestCase):
     async def test_schema_version_hash_and_exact_object_sets(self):
-        self.assertEqual(3, SCHEMA_VERSION)
+        self.assertEqual(4, SCHEMA_VERSION)
         self.assertEqual("0001_initial_state", MIGRATION_ID)
         self.assertEqual(DDL_SHA, SCHEMA_V1_DDL_SHA256)
         with tempfile.TemporaryDirectory() as directory:
@@ -47,6 +47,7 @@ class P26bContractSnapshotTests(unittest.IsolatedAsyncioTestCase):
             "schema_migrations", "controller_runtime", "settings", "dialogues",
             "turn_jobs", "transient_payloads", "delivery_segments", "ingress_updates",
             "callback_actions", "approvals", "deletion_tombstones", "errors",
+            "delete_storage_containment",
         }
         expected_indexes = {
             "idx_turn_jobs_dialogue_state", "idx_transient_payloads_expires",
@@ -59,9 +60,9 @@ class P26bContractSnapshotTests(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(expected_tables, actual["tables"])
         self.assertEqual(expected_indexes, actual["indexes"])
-        self.assertEqual(expected_tables, set(TABLE_NAMES))
+        self.assertEqual(expected_tables, set(V4_TABLE_NAMES))
         self.assertEqual(expected_indexes, set(INDEX_NAMES))
-        self.assertEqual(3, actual["user_version"])
+        self.assertEqual(4, actual["user_version"])
 
     def test_repository_public_surfaces_are_exact(self):
         expected = {

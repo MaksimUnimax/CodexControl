@@ -381,6 +381,11 @@ class DeletionRepository(_RepositoryBase):
             ).fetchone()
             if collision is not None:
                 raise _invariant()
+            containment = connection.execute(
+                "SELECT 1 FROM delete_storage_containment WHERE dialogue_id = ?", (dialogue_id,)
+            ).fetchone()
+            if containment is not None:
+                raise _invariant()
 
             now = _validate_clock(self._clock)
             deleted_at_ms = max(now, current.updated_at_ms)

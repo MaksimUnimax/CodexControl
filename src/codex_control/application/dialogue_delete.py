@@ -45,6 +45,10 @@ from .dialogue_interrupt import (
     DialogueInterruptStatus,
 )
 from .active_turn_registry import ActiveTurnRegistry
+from .delete_storage_cleanup import (
+    DeleteStorageCleanupCoordinator,
+    DeleteStorageCleanupStatus,
+)
 
 
 P3_DELETE_TOMBSTONE_RETENTION_MS = 604800000
@@ -276,6 +280,7 @@ class DialogueDeleteService:
         active_turn_registry: ActiveTurnRegistry | None = None,
         now_ms: Callable[[], int] | None = None,
         id_factory: Callable[[str], str] | None = None,
+        local_cleanup: DeleteStorageCleanupCoordinator | None = None,
     ) -> None:
         if not isinstance(storage, SqliteStorage):
             raise _invalid()
@@ -291,6 +296,11 @@ class DialogueDeleteService:
             raise _invalid()
         if id_factory is not None and not callable(id_factory):
             raise _invalid()
+        if local_cleanup is not None and not (
+            _async_callable(local_cleanup, "cleanup_confirmed")
+            and _async_callable(local_cleanup, "contain_unknown")
+        ):
+            raise _invalid()
         self._storage = storage
         self._server_id = server_id
         self._thread_lifecycle = thread_lifecycle
@@ -298,6 +308,7 @@ class DialogueDeleteService:
         self._active_turn_registry = active_turn_registry
         self._clock = now_ms if now_ms is not None else _default_clock
         self._id_factory = id_factory if id_factory is not None else _default_id_factory
+        self._local_cleanup = local_cleanup
         self._owned: dict[str, asyncio.Task[DialogueDeleteResult]] = {}
 
     def __repr__(self) -> str:
@@ -342,8 +353,12 @@ class DialogueDeleteService:
         # must report their finite state rather than accidentally becoming a
         # new request against an older optimistic version.
         if dialogue.state is DialogueState.DELETE_UNKNOWN:
+            if self._local_cleanup is not None:
+                return await self._contain_unknown(dialogue)
             return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, dialogue, None, None)
         if dialogue.state is DialogueState.DELETE_CONFIRMED_PENDING_STORAGE:
+            if self._local_cleanup is not None:
+                return await self._cleanup_confirmed(dialogue)
             return DialogueDeleteResult(
                 DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE, dialogue, None, None
             )
@@ -500,9 +515,13 @@ class DialogueDeleteService:
                     failed = await self._mark_error(deleting, "CODEX_PROCESS")
                     return DialogueDeleteResult(DialogueDeleteStatus.FAILED, failed, None, None)
                 unknown = await self._mark_unknown(deleting)
+                if self._local_cleanup is not None:
+                    return await self._contain_unknown(unknown)
                 return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
             except Exception:
                 unknown = await self._mark_unknown(deleting)
+                if self._local_cleanup is not None:
+                    return await self._contain_unknown(unknown)
                 return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
 
             if (
@@ -511,6 +530,8 @@ class DialogueDeleteService:
                 or result.binding is not binding
             ):
                 unknown = await self._mark_unknown(deleting)
+                if self._local_cleanup is not None:
+                    return await self._contain_unknown(unknown)
                 return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
             if result.status is ThreadOperationStatus.DELETE_CONFIRMED:
                 try:
@@ -530,10 +551,14 @@ class DialogueDeleteService:
                     or pending.last_error_class is not None
                 ):
                     raise _invariant()
+                if self._local_cleanup is not None:
+                    return await self._cleanup_confirmed(pending)
                 return DialogueDeleteResult(
                     DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE, pending, None, None
                 )
             unknown = await self._mark_unknown(deleting)
+            if self._local_cleanup is not None:
+                return await self._contain_unknown(unknown)
             return DialogueDeleteResult(DialogueDeleteStatus.UNKNOWN, unknown, None, None)
         finally:
             if retirement_watch is not None:
@@ -665,6 +690,49 @@ class DialogueDeleteService:
         ):
             raise _invariant()
         return marked
+
+    async def _cleanup_confirmed(self, dialogue: DialogueRecord) -> DialogueDeleteResult:
+        try:
+            outcome = await self._local_cleanup.cleanup_confirmed(
+                dialogue_id=dialogue.dialogue_id,
+                expected_dialogue_version=dialogue.version,
+            )
+        except Exception:
+            return DialogueDeleteResult(
+                DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE, dialogue, None, None
+            )
+        if outcome.status is DeleteStorageCleanupStatus.CONFIRMED_FINALIZED:
+            if outcome.tombstone is None:
+                raise _invariant()
+            return DialogueDeleteResult(DialogueDeleteStatus.DELETED, None, outcome.tombstone, None)
+        if outcome.status is not DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE:
+            raise _invariant()
+        return DialogueDeleteResult(
+            DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE,
+            outcome.dialogue or dialogue,
+            None,
+            None,
+        )
+
+    async def _contain_unknown(self, dialogue: DialogueRecord) -> DialogueDeleteResult:
+        try:
+            outcome = await self._local_cleanup.contain_unknown(
+                dialogue_id=dialogue.dialogue_id,
+                expected_dialogue_version=dialogue.version,
+            )
+        except Exception:
+            outcome = None
+        if outcome is not None and outcome.status not in (
+            DeleteStorageCleanupStatus.UNKNOWN_CONTAINED,
+            DeleteStorageCleanupStatus.UNKNOWN_PENDING,
+        ):
+            raise _invariant()
+        return DialogueDeleteResult(
+            DialogueDeleteStatus.UNKNOWN,
+            (outcome.dialogue if outcome is not None and outcome.dialogue is not None else dialogue),
+            None,
+            None,
+        )
 
     def _clock_value(self) -> int:
         try:

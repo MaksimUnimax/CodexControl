@@ -21,6 +21,12 @@ from codex_control.storage.schema import (
     SCHEMA_V3_DIALOGUES_STATEMENT,
     SCHEMA_V3_MIGRATION_ID,
     SCHEMA_V3_MIGRATION_SHA256,
+    SCHEMA_V4_MIGRATION_ID,
+    SCHEMA_V4_MIGRATION_CANONICAL_SQL,
+    SCHEMA_V4_MIGRATION_SHA256,
+    SCHEMA_V4_MIGRATION_STATEMENTS,
+    V4_INDEX_NAMES,
+    V4_TABLE_NAMES,
 )
 
 
@@ -103,15 +109,16 @@ class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
                 (2, "0002_ingress_rejected_disposition",
                  "a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85", 1234567890),
                 (3, SCHEMA_V3_MIGRATION_ID, SCHEMA_V3_MIGRATION_SHA256, 1234567890),
+                (4, SCHEMA_V4_MIGRATION_ID, SCHEMA_V4_MIGRATION_SHA256, 1234567890),
             ], rows)
-            self.assertEqual(3, await storage.read(lambda c: c.execute("PRAGMA user_version").fetchone()[0]))
+            self.assertEqual(4, await storage.read(lambda c: c.execute("PRAGMA user_version").fetchone()[0]))
             objects = await self._objects(storage)
-            self.assertEqual(TABLE_NAMES, {name for kind, name, _ in objects if kind == "table"})
+            self.assertEqual(V4_TABLE_NAMES, {name for kind, name, _ in objects if kind == "table"})
             self.assertEqual(INDEX_NAMES, {name for kind, name, _ in objects if kind == "index"})
             self.assertFalse([x for x in objects if x[0] in ("view", "trigger")])
             counts = await storage.read(lambda c: {
                 table: c.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
-                for table in TABLE_NAMES if table != "schema_migrations"
+                for table in V4_TABLE_NAMES if table != "schema_migrations"
             })
             self.assertTrue(all(count == 0 for count in counts.values()))
         finally:
@@ -122,6 +129,39 @@ class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(expected, SCHEMA_V1_CANONICAL_SQL)
         self.assertEqual(sha256(expected.encode("utf-8")).hexdigest(), SCHEMA_V1_DDL_SHA256)
         self.assertEqual(len(SCHEMA_V1_STATEMENTS), 26)
+
+    async def test_v4_hash_is_independently_derived_and_is_one_table_without_index(self):
+        expected = "\n".join(canonicalize_sql(s) for s in SCHEMA_V4_MIGRATION_STATEMENTS) + "\n"
+        self.assertEqual(expected, SCHEMA_V4_MIGRATION_CANONICAL_SQL)
+        self.assertEqual(
+            "400a475cb074da6b82238af105412d8299b45816273136bfd54a2cbd2308e059",
+            sha256(expected.encode("utf-8")).hexdigest(),
+        )
+        self.assertEqual("0004_delete_local_containment", SCHEMA_V4_MIGRATION_ID)
+        self.assertEqual(1, len(SCHEMA_V4_MIGRATION_STATEMENTS))
+        self.assertEqual(V4_INDEX_NAMES, INDEX_NAMES)
+        self.assertIn("delete_storage_containment", V4_TABLE_NAMES)
+
+    async def test_v3_to_v4_failure_rolls_back_and_retry_succeeds(self):
+        storage = await self._open(now_ms=lambda: 1)
+        await storage.close()
+        with self._direct() as connection:
+            connection.execute("DROP TABLE delete_storage_containment")
+            connection.execute("DELETE FROM schema_migrations WHERE version = 4")
+            connection.execute("PRAGMA user_version = 3")
+
+        with self.assertRaises(StorageError) as raised:
+            await self._open(now_ms=lambda: -1)
+        self.assertEqual(StorageErrorCategory.OPEN_FAILED, raised.exception.category)
+        with self._direct() as connection:
+            self.assertEqual(3, connection.execute("PRAGMA user_version").fetchone()[0])
+            self.assertEqual(3, connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0])
+            self.assertIsNone(connection.execute(
+                "SELECT name FROM sqlite_master WHERE name = 'delete_storage_containment'"
+            ).fetchone())
+
+        storage = await self._open(now_ms=lambda: 2)
+        await storage.close()
 
     async def test_reopen_is_idempotent_and_does_not_call_clock(self):
         storage = await self._open(now_ms=lambda: 7)
@@ -147,7 +187,7 @@ class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
 
     async def test_future_version_rejected(self):
         with sqlite3.connect(self.path) as connection:
-            connection.execute("PRAGMA user_version = 4")
+            connection.execute("PRAGMA user_version = 5")
         with self.assertRaises(StorageError) as raised:
             await self._open()
         self.assertEqual(StorageErrorCategory.SCHEMA_UNSUPPORTED, raised.exception.category)
@@ -190,6 +230,7 @@ class SchemaV1Tests(unittest.IsolatedAsyncioTestCase):
             expected = {s.split()[2]: canonicalize_sql(s) for s in SCHEMA_V1_STATEMENTS}
             expected["ingress_updates"] = canonicalize_sql(SCHEMA_V2_MIGRATION_STATEMENTS[1])
             expected["dialogues"] = canonicalize_sql(SCHEMA_V3_DIALOGUES_STATEMENT)
+            expected["delete_storage_containment"] = canonicalize_sql(SCHEMA_V4_MIGRATION_STATEMENTS[0])
             actual = await self._objects(storage)
             actual_by_name = {name: canonicalize_sql(sql) for _, name, sql in actual}
             self.assertEqual(expected, actual_by_name)

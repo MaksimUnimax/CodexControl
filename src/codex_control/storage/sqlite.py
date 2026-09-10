@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import hashlib
 import inspect
 import os
 import re
@@ -27,6 +28,11 @@ from .schema import (
     SCHEMA_V3_MIGRATION_SHA256,
     SCHEMA_V3_MIGRATION_STATEMENTS,
     SCHEMA_V3_DIALOGUES_STATEMENT,
+    SCHEMA_V4_MIGRATION_ID,
+    SCHEMA_V4_MIGRATION_SHA256,
+    SCHEMA_V4_MIGRATION_STATEMENTS,
+    V4_INDEX_NAMES,
+    V4_TABLE_NAMES,
     TABLE_NAMES,
     canonicalize_sql,
 )
@@ -302,7 +308,7 @@ class SqliteStorage:
             elif user_version == 1:
                 self._validate_v1(connection)
                 self._validate_v1_ingress_for_v2(connection)
-            elif user_version in (2, 3):
+            elif user_version in (2, 3, 4):
                 pass
             else:
                 raise _schema_failure(StorageErrorCategory.SCHEMA_UNSUPPORTED)
@@ -334,19 +340,29 @@ class SqliteStorage:
                 self._validate_v3_dialogues(connection, allow_pending_storage=False)
                 self._migrate_v3(connection, now_ms)
                 self._validate_v3(connection)
+                self._migrate_v4(connection, now_ms)
+                self._validate_v4(connection)
             elif user_version == 1:
                 self._migrate_v2(connection, now_ms)
                 self._validate_v2(connection)
                 self._validate_v3_dialogues(connection, allow_pending_storage=False)
                 self._migrate_v3(connection, now_ms)
                 self._validate_v3(connection)
+                self._migrate_v4(connection, now_ms)
+                self._validate_v4(connection)
             elif user_version == 2:
                 self._validate_v2(connection)
                 self._validate_v3_dialogues(connection, allow_pending_storage=False)
                 self._migrate_v3(connection, now_ms)
                 self._validate_v3(connection)
-            else:
+                self._migrate_v4(connection, now_ms)
+                self._validate_v4(connection)
+            elif user_version == 3:
                 self._validate_v3(connection)
+                self._migrate_v4(connection, now_ms)
+                self._validate_v4(connection)
+            else:
+                self._validate_v4(connection)
         except StorageError:
             raise
         except sqlite3.Error:
@@ -472,6 +488,50 @@ class SqliteStorage:
                 (3, SCHEMA_V3_MIGRATION_ID, SCHEMA_V3_MIGRATION_SHA256, applied_at_ms),
             )
             connection.execute("PRAGMA user_version = 3")
+            connection.execute("COMMIT")
+        except StorageError:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        except sqlite3.Error:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise _failure(StorageErrorCategory.SCHEMA_INVALID) from None
+        except BaseException:
+            try:
+                connection.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+
+    @staticmethod
+    def _migrate_v4(connection: sqlite3.Connection, now_ms: Callable[[], int] | None) -> None:
+        """Install only the additive UNKNOWN local-containment metadata table."""
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for statement in SCHEMA_V4_MIGRATION_STATEMENTS:
+                connection.execute(statement)
+            clock = now_ms if now_ms is not None else lambda: time.time_ns() // 1_000_000
+            try:
+                applied_at_ms = clock()
+            except Exception:
+                raise _failure(StorageErrorCategory.OPEN_FAILED) from None
+            if (
+                isinstance(applied_at_ms, bool)
+                or not isinstance(applied_at_ms, int)
+                or not 0 <= applied_at_ms <= _MAX_SQLITE_INT
+            ):
+                raise _failure(StorageErrorCategory.OPEN_FAILED)
+            connection.execute(
+                "INSERT INTO schema_migrations "
+                "(version, migration_id, ddl_sha256, applied_at_ms) VALUES (?, ?, ?, ?)",
+                (4, SCHEMA_V4_MIGRATION_ID, SCHEMA_V4_MIGRATION_SHA256, applied_at_ms),
+            )
+            connection.execute("PRAGMA user_version = 4")
             connection.execute("COMMIT")
         except StorageError:
             try:
@@ -732,6 +792,85 @@ class SqliteStorage:
         if invalid is not None:
             raise _schema_failure(StorageErrorCategory.SCHEMA_INVALID)
         SqliteStorage._validate_v3_dialogues(connection, allow_pending_storage=True)
+
+    @staticmethod
+    def _validate_v4(connection: sqlite3.Connection) -> None:
+        if connection.execute("PRAGMA user_version").fetchone()[0] != 4:
+            raise _schema_failure(StorageErrorCategory.SCHEMA_INVALID)
+        objects = SqliteStorage._user_objects(connection)
+        if (
+            objects.get("table", set()) != V4_TABLE_NAMES
+            or objects.get("index", set()) != V4_INDEX_NAMES
+            or objects.get("view", set())
+            or objects.get("trigger", set())
+        ):
+            raise _schema_failure(StorageErrorCategory.SCHEMA_INVALID)
+        rows = connection.execute(
+            "SELECT version, migration_id, ddl_sha256, applied_at_ms "
+            "FROM schema_migrations ORDER BY version"
+        ).fetchall()
+        if len(rows) != 4:
+            raise _schema_failure(StorageErrorCategory.SCHEMA_INVALID)
+        expected_ledger = (
+            (1, MIGRATION_ID, SCHEMA_V1_DDL_SHA256),
+            (2, SCHEMA_V2_MIGRATION_ID, SCHEMA_V2_MIGRATION_SHA256),
+            (3, SCHEMA_V3_MIGRATION_ID, SCHEMA_V3_MIGRATION_SHA256),
+            (4, SCHEMA_V4_MIGRATION_ID, SCHEMA_V4_MIGRATION_SHA256),
+        )
+        for row, expected in zip(rows, expected_ledger):
+            if tuple(row[:3]) != expected or (
+                isinstance(row[3], bool)
+                or not isinstance(row[3], int)
+                or not 0 <= row[3] <= _MAX_SQLITE_INT
+            ):
+                raise _schema_failure(StorageErrorCategory.SCHEMA_INVALID)
+        expected = {
+            statement.split()[2]: canonicalize_sql(statement)
+            for statement in SCHEMA_V1_STATEMENTS
+        }
+        expected["ingress_updates"] = canonicalize_sql(SCHEMA_V2_MIGRATION_STATEMENTS[1])
+        expected["dialogues"] = canonicalize_sql(SCHEMA_V3_DIALOGUES_STATEMENT)
+        expected["delete_storage_containment"] = canonicalize_sql(SCHEMA_V4_MIGRATION_STATEMENTS[0])
+        for name, expected_sql in expected.items():
+            row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE name = ?", (name,)
+            ).fetchone()
+            if row is None or row[0] is None or canonicalize_sql(row[0]) != expected_sql:
+                raise _schema_failure(StorageErrorCategory.SCHEMA_INVALID)
+        invalid_ingress = connection.execute(
+            "SELECT 1 FROM ingress_updates WHERE NOT ("
+            "typeof(disposition) = 'text' AND ("
+            "disposition IN ('CONTROL','IGNORED_SLEEP','IGNORED_UNAUTHORIZED','IGNORED_REJECTED')"
+            " OR (substr(disposition, 1, 4) = 'JOB:' AND length(disposition) BETWEEN 5 AND 132 "
+            "AND instr(disposition, char(0)) = 0)"
+            ")) LIMIT 1"
+        ).fetchone()
+        if invalid_ingress is not None:
+            raise _schema_failure(StorageErrorCategory.SCHEMA_INVALID)
+        SqliteStorage._validate_v3_dialogues(connection, allow_pending_storage=True)
+        rows = connection.execute(
+            "SELECT c.dialogue_id, c.profile_id, c.thread_identity_sha256, "
+            "c.dialogue_version, c.official_delete_authority, "
+            "c.local_isolated_storage_containment, c.contained_at_ms, "
+            "d.profile_id, d.thread_id, d.state, d.version "
+            ", d.last_error_class "
+            "FROM delete_storage_containment c LEFT JOIN dialogues d "
+            "ON d.dialogue_id = c.dialogue_id"
+        ).fetchall()
+        for row in rows:
+            if (
+                row[7] is None or row[9] != "DELETE_UNKNOWN" or row[11] != "DELETE_UNKNOWN"
+                or row[1] != row[7] or row[3] != row[10]
+                or row[4] != "UNKNOWN" or row[5] != "COMPLETED"
+                or not isinstance(row[0], str) or not 1 <= len(row[0]) <= 128 or "\x00" in row[0]
+                or not isinstance(row[1], str) or not 1 <= len(row[1]) <= 128 or "\x00" in row[1]
+                or not isinstance(row[2], str) or re.fullmatch(r"[0-9a-f]{64}", row[2]) is None
+                or not isinstance(row[3], int) or isinstance(row[3], bool) or not 0 <= row[3] <= _MAX_SQLITE_INT
+                or not isinstance(row[6], int) or isinstance(row[6], bool) or row[6] < 0
+                or not isinstance(row[8], str) or not row[8] or "\x00" in row[8]
+                or row[2] != hashlib.sha256(row[8].encode("utf-8")).hexdigest()
+            ):
+                raise _schema_failure(StorageErrorCategory.SCHEMA_INVALID)
 
     def _transaction(self, callback: Callable[[sqlite3.Connection], T], *, write: bool) -> T:
         connection = self._connection

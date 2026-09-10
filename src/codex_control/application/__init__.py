@@ -62,6 +62,14 @@ from .dialogue_recovery import (
     DialogueRecoveryService,
     DialogueRecoveryStatus,
 )
+from .delete_storage_cleanup import (
+    P7C4_DELETE_TOMBSTONE_RETENTION_MS,
+    DeleteStorageCleanupCoordinator,
+    DeleteStorageCleanupError,
+    DeleteStorageCleanupReason,
+    DeleteStorageCleanupResult,
+    DeleteStorageCleanupStatus,
+)
 from .private_settings import (
     P4_PRIVATE_BUTTON_LABEL_MAX_CHARS,
     P4_PRIVATE_CALLBACK_TTL_MS,
@@ -234,6 +242,12 @@ __all__ = [
     "DialogueRecoveryResult",
     "DialogueRecoveryService",
     "DialogueRecoveryStatus",
+    "P7C4_DELETE_TOMBSTONE_RETENTION_MS",
+    "DeleteStorageCleanupCoordinator",
+    "DeleteStorageCleanupError",
+    "DeleteStorageCleanupReason",
+    "DeleteStorageCleanupResult",
+    "DeleteStorageCleanupStatus",
     "P4_PRIVATE_BUTTON_LABEL_MAX_CHARS",
     "P4_PRIVATE_CALLBACK_TTL_MS",
     "P4_PRIVATE_PAGE_SIZE",
