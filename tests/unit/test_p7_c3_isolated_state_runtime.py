@@ -90,6 +90,21 @@ class ConfigurationAuthorityTests(unittest.TestCase):
             with self.assertRaises(ConfigurationError):
                 parse_server_configuration(_configuration([("p", alias, "P", state)]))
 
+    def test_configured_protected_paths_reject_existing_symlink_components(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = os.path.join(directory, "home"); state = os.path.join(directory, "state")
+            real = os.path.join(directory, "real"); alias = os.path.join(directory, "alias")
+            os.mkdir(home); os.mkdir(state); os.mkdir(real); os.symlink(real, alias)
+            cases = (
+                {"repository_root": alias},
+                {"controller_db_root": alias},
+                {"controller_db_path": os.path.join(alias, "controller.sqlite")},
+                {"protected_roots": [alias]},
+            )
+            for extra in cases:
+                with self.subTest(extra=extra), self.assertRaises(ConfigurationError):
+                    parse_server_configuration(_configuration([("p", home, "P", state)], **extra))
+
     def test_profile_repr_never_contains_either_sensitive_absolute_path(self):
         profile = CodexProfile("p", "/private/home", "P", "/private/state")
         self.assertNotIn("/private/home", repr(profile))
@@ -101,8 +116,8 @@ class StateRootAuthorityTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.parent = self.temp.name
         self.home = os.path.join(self.parent, "home"); self.root = os.path.join(self.parent, "state")
-        self.sibling = os.path.join(self.parent, "sibling"); self.controller = os.path.join(self.parent, "controller.sqlite")
-        os.mkdir(self.home, 0o700); os.mkdir(self.sibling, 0o700); open(self.controller, "wb").close()
+        self.sibling = os.path.join(self.parent, "sibling"); self.repository = os.path.join(self.parent, "repo"); self.controller = os.path.join(self.parent, "controller.sqlite")
+        os.mkdir(self.home, 0o700); os.mkdir(self.sibling, 0o700); os.mkdir(self.repository, 0o700); open(self.controller, "wb").close()
         self.profile = CodexProfile("profile", self.home, "Profile", self.root)
         self.authority = IsolationPathAuthority((self.profile,), controller_db_path=self.controller, repository_root=os.path.join(self.parent, "repo"))
         self.roots = IsolatedStateRoot(self.authority)
@@ -217,6 +232,115 @@ class StateRootAuthorityTests(unittest.TestCase):
         ancestor_profile = CodexProfile("ancestor", self.home, "Ancestor", os.path.join(ancestor, "state"))
         with self.assertRaises(IsolationError): IsolationPathAuthority((ancestor_profile,), require_global_roots=False).validate_profile_paths(ancestor_profile, state_root_may_be_missing=True)
 
+    def _assert_runtime_authority_rejected_without_mutation(self, authority):
+        marker = os.path.join(self.root, STATE_ROOT_MARKER)
+        with open(marker, "rb") as handle:
+            before = handle.read()
+        factory = _FakeFactory()
+
+        async def attempt():
+            manager = CodexRuntimeManager(
+                [self.profile], client_version=SUPPORTED_CODEX_VERSION,
+                isolation_authority=authority, installed_authority_probe=fake_installed_authority,
+                process_factory=factory,
+            )
+            with self.assertRaises(RuntimeErrorSafe):
+                await manager.acquire("profile")
+
+        asyncio.run(attempt())
+        self.assertEqual(factory.calls, [])
+        with open(marker, "rb") as handle:
+            self.assertEqual(handle.read(), before)
+
+    def test_runtime_requires_repository_and_controller_authority(self):
+        incomplete = IsolationPathAuthority((self.profile,), require_global_roots=False)
+        with self.assertRaises(IsolationError):
+            CodexRuntimeManager([self.profile], client_version=SUPPORTED_CODEX_VERSION, isolation_authority=incomplete)
+
+    def test_runtime_accepts_controller_root_as_storage_authority(self):
+        controller_root = os.path.join(self.parent, "controller-root")
+        os.mkdir(controller_root, 0o700)
+        authority = IsolationPathAuthority((self.profile,), controller_db_root=controller_root, repository_root=self.repository)
+        factory = _FakeFactory()
+
+        async def attempt():
+            manager = CodexRuntimeManager(
+                [self.profile], client_version=SUPPORTED_CODEX_VERSION,
+                isolation_authority=authority, installed_authority_probe=fake_installed_authority,
+                process_factory=factory,
+            )
+            await manager.acquire("profile")
+            await manager.shutdown_all()
+
+        asyncio.run(attempt())
+        self.assertEqual(len(factory.calls), 1)
+
+    def test_protected_path_descriptor_and_physical_alias_gates(self):
+        repository_alias = os.path.join(self.parent, "repository-alias")
+        os.symlink(self.root, repository_alias)
+        self._assert_runtime_authority_rejected_without_mutation(
+            IsolationPathAuthority((self.profile,), controller_db_path=self.controller, repository_root=repository_alias)
+        )
+
+        ancestor_target = os.path.join(self.parent, "ancestor-target")
+        ancestor_alias = os.path.join(self.parent, "ancestor-alias")
+        os.mkdir(ancestor_target, 0o700); os.symlink(ancestor_target, ancestor_alias)
+        repository = os.path.join(ancestor_target, "repository")
+        os.mkdir(repository, 0o700)
+        self._assert_runtime_authority_rejected_without_mutation(
+            IsolationPathAuthority((self.profile,), controller_db_path=self.controller, repository_root=os.path.join(ancestor_alias, "repository"))
+        )
+
+        protected_alias = os.path.join(self.parent, "protected-alias")
+        os.symlink(self.root, protected_alias)
+        self._assert_runtime_authority_rejected_without_mutation(
+            IsolationPathAuthority((self.profile,), controller_db_path=self.controller, repository_root=self.repository, protected_roots=(protected_alias,))
+        )
+
+        controller_root_alias = os.path.join(self.parent, "controller-root-alias")
+        os.symlink(self.root, controller_root_alias)
+        self._assert_runtime_authority_rejected_without_mutation(
+            IsolationPathAuthority((self.profile,), controller_db_path=self.controller, controller_db_root=controller_root_alias, repository_root=self.repository)
+        )
+
+        controller_target = os.path.join(self.parent, "controller-target")
+        controller_alias = os.path.join(self.parent, "controller-alias")
+        os.mkdir(controller_target, 0o700)
+        with open(os.path.join(controller_target, "db.sqlite"), "wb"):
+            pass
+        os.symlink(controller_target, controller_alias)
+        self._assert_runtime_authority_rejected_without_mutation(
+            IsolationPathAuthority((self.profile,), controller_db_path=os.path.join(controller_alias, "db.sqlite"), repository_root=self.repository)
+        )
+
+        controller_final_alias = os.path.join(self.parent, "controller-final-alias.sqlite")
+        os.symlink(self.controller, controller_final_alias)
+        self._assert_runtime_authority_rejected_without_mutation(
+            IsolationPathAuthority((self.profile,), controller_db_path=controller_final_alias, repository_root=self.repository)
+        )
+
+    def test_protected_path_missing_foreign_owner_and_writable_modes_fail_before_spawn(self):
+        missing = os.path.join(self.parent, "missing-protected")
+        self._assert_runtime_authority_rejected_without_mutation(
+            IsolationPathAuthority((self.profile,), controller_db_path=self.controller, repository_root=self.repository, protected_roots=(missing,))
+        )
+        protected = os.path.join(self.parent, "protected")
+        os.mkdir(protected, 0o700)
+        try:
+            os.chown(protected, 65534, 65534)
+            self._assert_runtime_authority_rejected_without_mutation(
+                IsolationPathAuthority((self.profile,), controller_db_path=self.controller, repository_root=self.repository, protected_roots=(protected,))
+            )
+            os.chown(protected, 0, 0)
+            for mode in (0o770, 0o707):
+                os.chmod(protected, mode)
+                with self.subTest(mode=oct(mode)):
+                    self._assert_runtime_authority_rejected_without_mutation(
+                        IsolationPathAuthority((self.profile,), controller_db_path=self.controller, repository_root=self.repository, protected_roots=(protected,))
+                    )
+        finally:
+            os.chown(protected, 0, 0); os.chmod(protected, 0o700)
+
     def test_recreate_ancestor_substitution_is_rejected_without_foreign_mutation(self):
         anchor = os.path.join(self.parent, "anchor")
         foreign = os.path.join(self.parent, "foreign")
@@ -323,6 +447,95 @@ class StateRootAuthorityTests(unittest.TestCase):
         self.assertTrue(substituted)
         self.assertFalse(os.path.exists(os.path.join(foreign, "state")))
         self.assertFalse(os.path.exists(root))
+
+    def test_recreate_post_anchor_ancestor_substitution_is_rejected_after_mutation(self):
+        anchor = os.path.join(self.parent, "post-recreate-anchor")
+        foreign = os.path.join(self.parent, "post-recreate-foreign")
+        os.mkdir(anchor, 0o700); os.mkdir(foreign, 0o700)
+        os.rename(self.root, os.path.join(anchor, "state"))
+        self.profile = CodexProfile("profile", self.home, "Profile", os.path.join(anchor, "state"))
+        self.authority = IsolationPathAuthority((self.profile,), controller_db_path=self.controller, repository_root=self.repository)
+        self.roots = IsolatedStateRoot(self.authority)
+        foreign_root = os.path.join(foreign, "state")
+        foreign_profile = CodexProfile("profile", self.home, "Profile", foreign_root)
+        IsolatedStateRoot(IsolationPathAuthority((foreign_profile,), controller_db_path=self.controller, repository_root=self.repository)).provision(foreign_profile)
+        sentinel = os.path.join(foreign_root, "sqlite", "sentinel")
+        with open(sentinel, "wb") as handle: handle.write(b"keep")
+        original = IsolatedStateRoot._prove_final_binding
+        saved = anchor + ".saved"
+
+        def substitute(instance, parent, parent_fd, leaf, root_fd, initial):
+            os.rename(anchor, saved)
+            os.symlink(foreign, anchor)
+            return original(instance, parent, parent_fd, leaf, root_fd, initial)
+
+        try:
+            with patch.object(IsolatedStateRoot, "_prove_final_binding", new=substitute):
+                async def attempt():
+                    manager = CodexRuntimeManager(
+                        [self.profile], client_version=SUPPORTED_CODEX_VERSION,
+                        isolation_authority=self.authority, installed_authority_probe=fake_installed_authority,
+                    )
+                    reservation = await manager.reserve("profile")
+                    with self.assertRaises(IsolationError):
+                        await manager.recreate_isolated_state_root(reservation)
+                    await reservation.release()
+                asyncio.run(attempt())
+        finally:
+            os.unlink(anchor); os.rename(saved, anchor)
+        with open(sentinel, "rb") as handle: self.assertEqual(handle.read(), b"keep")
+        self.roots.validate(self.profile)
+
+    def test_provision_post_anchor_ancestor_substitution_is_rejected_before_success(self):
+        anchor = os.path.join(self.parent, "post-provision-anchor")
+        foreign = os.path.join(self.parent, "post-provision-foreign")
+        os.mkdir(anchor, 0o700); os.mkdir(foreign, 0o700)
+        root = os.path.join(anchor, "state")
+        profile = CodexProfile("provision-post", self.home, "Provision", root)
+        authority = IsolationPathAuthority((profile,), controller_db_path=self.controller, repository_root=self.repository)
+        roots = IsolatedStateRoot(authority)
+        foreign_sentinel = os.path.join(foreign, "sentinel")
+        with open(foreign_sentinel, "wb") as handle: handle.write(b"keep")
+        original = IsolatedStateRoot._prove_final_binding
+        saved = anchor + ".saved"
+
+        def substitute(instance, parent, parent_fd, leaf, root_fd, initial):
+            os.rename(anchor, saved)
+            os.symlink(foreign, anchor)
+            return original(instance, parent, parent_fd, leaf, root_fd, initial)
+
+        try:
+            with patch.object(IsolatedStateRoot, "_prove_final_binding", new=substitute):
+                with self.assertRaises(IsolationError): roots.provision(profile)
+        finally:
+            os.unlink(anchor); os.rename(saved, anchor)
+        self.assertFalse(os.path.exists(os.path.join(foreign, "state")))
+        self.assertEqual(os.listdir(foreign), ["sentinel"])
+        self.assertTrue(os.path.isdir(root))
+
+    def test_root_leaf_post_open_substitution_is_rejected_before_success(self):
+        foreign = os.path.join(self.parent, "post-leaf-foreign")
+        os.mkdir(foreign, 0o700)
+        foreign_root = os.path.join(foreign, "state")
+        foreign_profile = CodexProfile("profile", self.home, "Profile", foreign_root)
+        IsolatedStateRoot(IsolationPathAuthority((foreign_profile,), controller_db_path=self.controller, repository_root=self.repository)).provision(foreign_profile)
+        sentinel = os.path.join(foreign_root, "sqlite", "sentinel")
+        with open(sentinel, "wb") as handle: handle.write(b"keep")
+        original = IsolatedStateRoot._prove_final_binding
+        saved = self.root + ".saved"
+
+        def substitute(instance, parent, parent_fd, leaf, root_fd, initial):
+            os.rename(self.root, saved)
+            os.symlink(foreign_root, self.root)
+            return original(instance, parent, parent_fd, leaf, root_fd, initial)
+
+        try:
+            with patch.object(IsolatedStateRoot, "_prove_final_binding", new=substitute):
+                with self.assertRaises(IsolationError): self.roots._recreate_bound(self.profile)
+        finally:
+            os.unlink(self.root); os.rename(saved, self.root)
+        with open(sentinel, "rb") as handle: self.assertEqual(handle.read(), b"keep")
+        self.roots.validate(self.profile)
 
     def test_recreate_is_bounded_idempotent_and_preserves_parent_sibling_controller(self):
         with open(os.path.join(self.root, "sqlite", "codex.sqlite"), "wb") as handle: handle.write(b"synthetic")

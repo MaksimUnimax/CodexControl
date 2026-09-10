@@ -133,6 +133,58 @@ def _chain_matches_fd(path: str, expected_fd: int, category: str) -> None:
         os.close(current_fd)
 
 
+def _fd_identity(fd: int, category: str) -> tuple[int, int]:
+    try:
+        value = os.fstat(fd)
+    except OSError:
+        raise IsolationError(category) from None
+    return value.st_dev, value.st_ino
+
+
+def _validate_authority_directory_fd(fd: int, category: str) -> tuple[int, int]:
+    try:
+        value = os.fstat(fd)
+    except OSError:
+        raise IsolationError(category) from None
+    if not stat.S_ISDIR(value.st_mode):
+        raise IsolationError(category)
+    if not _is_root_owned(value) or not _is_persistent_mode(value.st_mode):
+        raise IsolationError(category)
+    return value.st_dev, value.st_ino
+
+
+def _open_controller_db(path: str) -> tuple[int, int]:
+    parent = canonical_path(os.path.dirname(path))
+    leaf = os.path.basename(path)
+    if not leaf:
+        raise IsolationError("controller_db_invalid")
+    parent_fd = _open_directory_chain(parent)
+    try:
+        _validate_authority_directory_fd(parent_fd, "controller_db_parent_invalid")
+        try:
+            db_fd = os.open(
+                leaf,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            raise IsolationError("controller_db_missing") from None
+        except OSError:
+            raise IsolationError("controller_db_open_failed") from None
+        try:
+            value = os.fstat(db_fd)
+            if not stat.S_ISREG(value.st_mode):
+                raise IsolationError("controller_db_invalid")
+            if not _is_root_owned(value) or not _is_persistent_mode(value.st_mode):
+                raise IsolationError("controller_db_ownership")
+            return db_fd, (value.st_dev, value.st_ino)
+        except Exception:
+            os.close(db_fd)
+            raise
+    finally:
+        os.close(parent_fd)
+
+
 @dataclass(frozen=True)
 class IsolationPathAuthority:
     """Explicit protected-path set; no repository/cwd discovery is performed."""
@@ -170,6 +222,59 @@ class IsolationPathAuthority:
             raise IsolationError("duplicate_protected_path")
         if any(paths_overlap(path, protected_path) for path in all_paths for protected_path in protected):
             raise IsolationError("protected_path_overlap")
+
+    def require_runtime_completeness(self) -> None:
+        """Require the two independent global authorities needed by runtime."""
+        if self.repository_root is None:
+            raise IsolationError("repository_root_required")
+        if self.controller_db_path is None and self.controller_db_root is None:
+            raise IsolationError("controller_storage_authority_required")
+
+    def validate_runtime_authority(self, *, state_root_may_be_missing: bool = False) -> None:
+        """Prove protected and profile paths by descriptor identity, not strings."""
+        self.require_runtime_completeness()
+        protected_fds: list[int] = []
+        profile_fds: list[int] = []
+        try:
+            for path in (self.repository_root, self.controller_db_root):
+                if path is None:
+                    continue
+                fd = _open_directory_chain(canonical_path(path))
+                protected_fds.append(fd)
+                _validate_authority_directory_fd(fd, "protected_path_invalid")
+            for path in self.protected_roots:
+                fd = _open_directory_chain(canonical_path(path))
+                protected_fds.append(fd)
+                _validate_authority_directory_fd(fd, "protected_path_invalid")
+            if self.controller_db_path is not None:
+                db_fd, _ = _open_controller_db(canonical_path(self.controller_db_path))
+                protected_fds.append(db_fd)
+                # The DB file itself is metadata-only authority. Its parent is
+                # also a protected directory and is checked by _open_controller_db.
+                parent_fd = _open_directory_chain(os.path.dirname(canonical_path(self.controller_db_path)))
+                protected_fds.append(parent_fd)
+                _validate_authority_directory_fd(parent_fd, "controller_db_parent_invalid")
+
+            for profile in self.profiles:
+                home, state_root = self._profile_paths(profile)
+                home_fd = _open_directory_chain(home)
+                profile_fds.append(home_fd)
+                _validate_authority_directory_fd(home_fd, "persistent_home_ownership")
+                try:
+                    state_fd = _open_directory_chain(state_root)
+                except IsolationError as error:
+                    if state_root_may_be_missing and error.category == "path_missing":
+                        continue
+                    raise
+                profile_fds.append(state_fd)
+                _validate_authority_directory_fd(state_fd, "state_root_ownership")
+
+            protected_ids = {_fd_identity(fd, "protected_path_inspection_failed") for fd in protected_fds}
+            if any(_fd_identity(fd, "profile_path_inspection_failed") in protected_ids for fd in profile_fds):
+                raise IsolationError("protected_physical_alias")
+        finally:
+            for fd in profile_fds + protected_fds:
+                os.close(fd)
 
     @property
     def protected_paths(self) -> tuple[str, ...]:
@@ -292,6 +397,7 @@ class IsolatedStateRoot:
 
     def _open_root_with_parent(self, profile: CodexProfile) -> tuple[int, int, str, str, str]:
         configured = self.authority._bound_profile(profile)
+        self.authority.validate_runtime_authority()
         home, root = self.authority._profile_paths(configured)
         home_fd = _open_directory_chain(home)
         try:
@@ -371,12 +477,27 @@ class IsolatedStateRoot:
             finally:
                 os.close(child)
 
+    def _prove_final_binding(self, parent: str, parent_fd: int, leaf: str, root_fd: int, initial: tuple[int, int]) -> None:
+        """Prove both the old descriptor binding and the current configured path."""
+        if _fd_identity(root_fd, "state_root_replaced") != initial:
+            raise IsolationError("state_root_replaced")
+        _chain_matches_fd(parent, parent_fd, "state_root_replaced")
+        _entry_matches_fd(parent_fd, leaf, root_fd, "state_root_replaced")
+        current_parent_fd = _open_directory_chain(parent)
+        try:
+            if _fd_identity(current_parent_fd, "state_root_replaced") != _fd_identity(parent_fd, "state_root_replaced"):
+                raise IsolationError("state_root_replaced")
+            _entry_matches_fd(current_parent_fd, leaf, root_fd, "state_root_replaced")
+        finally:
+            os.close(current_parent_fd)
+
     def validate(self, profile: CodexProfile) -> None:
         fd, _, _ = self._open_root(profile)
         os.close(fd)
 
     def provision(self, profile: CodexProfile) -> None:
         configured = self.authority._bound_profile(profile)
+        self.authority.validate_runtime_authority(state_root_may_be_missing=True)
         home, root = self.authority._profile_paths(configured, state_root_may_be_missing=True)
         home_fd = _open_directory_chain(home)
         try:
@@ -414,6 +535,7 @@ class IsolatedStateRoot:
                     raise IsolationError("state_root_ownership")
                 if not created:
                     self._validate_layout(root_fd, configured.profile_id)
+                    self._prove_final_binding(parent, parent_fd, leaf, root_fd, (root_stat.st_dev, root_stat.st_ino))
                     return
                 # The descriptor and its parent entry were opened from the same
                 # parent descriptor. Recheck immediately before the first write.
@@ -439,6 +561,7 @@ class IsolatedStateRoot:
                     os.close(marker_fd)
                 _entry_matches_fd(parent_fd, leaf, root_fd, "state_root_replaced")
                 self._validate_layout(root_fd, configured.profile_id)
+                self._prove_final_binding(parent, parent_fd, leaf, root_fd, (root_stat.st_dev, root_stat.st_ino))
             finally:
                 os.close(root_fd)
         except OSError:
@@ -481,6 +604,7 @@ class IsolatedStateRoot:
                 raise IsolationError("state_root_replaced")
             _entry_matches_fd(parent_fd, leaf, fd, "state_root_replaced")
             self._validate_layout(fd, configured.profile_id)
+            self._prove_final_binding(os.path.dirname(root), parent_fd, leaf, fd, (initial.st_dev, initial.st_ino))
         except IsolationError:
             raise
         except OSError:

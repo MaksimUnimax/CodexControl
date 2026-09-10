@@ -120,6 +120,11 @@ def parse_server_configuration(data: dict) -> ServerConfiguration:
     if not isinstance(raw_protected, (list, tuple)):
         raise ConfigurationError("protected_path_invalid")
     protected_roots = tuple(_path(value, "protected_path_invalid") for value in raw_protected)
+    configured_protected = tuple(
+        path for path in (controller_db_path, controller_db_root, repository_root) if path is not None
+    ) + protected_roots
+    if any(_existing_path_has_symlink_component(path) for path in configured_protected):
+        raise ConfigurationError("symlink_path")
     protected = tuple(path for path in (controller_db_path, controller_db_root, repository_root) if path) + protected_roots
     if len(set(protected)) != len(protected):
         raise ConfigurationError("duplicate_protected_path")

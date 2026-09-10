@@ -139,6 +139,9 @@ class CodexRuntimeManager:
         if not client_version: raise ValueError("client_version_required")
         self._executable, self._client_version = executable, client_version
         authority = isolation_authority or IsolationPathAuthority(tuple(profiles))
+        # Low-level tests may construct an intentionally incomplete authority
+        # with require_global_roots=False, but runtime may never accept it.
+        authority.require_runtime_completeness()
         configured_profiles: dict[str, CodexProfile] = {}
         for profile in profiles:
             configured = authority._bound_profile(profile)
@@ -191,6 +194,7 @@ class CodexRuntimeManager:
         process: ProcessLike | None = None; runtime: CodexRuntime | None = None; failure = RuntimeErrorSafe("startup_failed", profile.profile_id)
         try:
             try:
+                self._isolation_authority.validate_runtime_authority()
                 self._isolation_authority.validate_profile_paths(profile)
                 self._state_root.validate(profile)
             except IsolationError as error:

@@ -307,3 +307,66 @@ business RPC, thread/delete operation, Telegram call, credential read/copy/
 symlink, or production process mutation occurred. P7.C2 schema version,
 migration hashes, delete orchestration, and finalization files remain
 unchanged.
+
+## Third architect repair
+
+`THIRD_ARCHITECT_REVIEW=REWORK_REQUIRED`.
+`SECOND_REPAIR=2a6c5d8f2ed0980c4c7bc32cec471002432e1c9d`.
+
+`ARCHITECT_DEFECT_F=PROTECTED_PATHS_NOT_DESCRIPTOR_VALIDATED_AND_RUNTIME_COMPLETENESS_NOT_ENFORCED`.
+`ARCHITECT_DEFECT_G=POST_MUTATION_CONFIGURED_PARENT_CHAIN_NOT_REVALIDATED_BEFORE_SUCCESS`.
+
+The protected-path authority now requires both `repository_root` and an
+explicit controller storage authority (`controller_db_path` or
+`controller_db_root`) for runtime. `require_global_roots=False` remains only
+as a low-level construction aid; `CodexRuntimeManager` rejects incomplete
+authorities before an app-server factory call. Repository, controller root,
+additional protected roots, controller DB parents, and controller DB files
+are validated with lexical canonical paths and descriptor-relative
+no-follow opens. Directory authorities must exist, be directories, root
+owned, and not group/world writable. Controller DB files are metadata-only
+checked as root-owned regular non-writable files. Profile home/state
+descriptors are compared against protected descriptor identities to reject
+physical aliases. Configuration parsing also rejects existing symlink
+components in all protected-path fields.
+
+Provisioning and recreation now perform a final chain gate after layout
+validation and mutation. The gate rechecks the opened root inode, the old
+parent descriptor leaf, the current configured parent chain, and the current
+configured root leaf against the same root descriptor. A post-anchor
+ancestor or root-leaf substitution therefore fails closed; any detached old
+root content is not reported as successfully provisioned or recreated.
+
+Third-repair focused results:
+
+```text
+FOCUSED_C3_TESTS=49
+FOCUSED_C3_SKIPPED=0
+FOCUSED_C3_FAILURES=0
+FOCUSED_C3_ERRORS=0
+FOCUSED_RUNTIME_TESTS=27
+FOCUSED_CAPABILITY_VERSION_TESTS=40
+FOCUSED_P7C2_COMPATIBILITY_TESTS=20
+POST_ANCHOR_RECREATE=REJECTED
+POST_ANCHOR_PROVISION=REJECTED
+POST_OPEN_ROOT_LEAF_SUBSTITUTION=REJECTED
+PROTECTED_AUTHORITY_ALIAS_AND_METADATA_GATES=PASS
+APP_SERVER_FACTORY_CALLS_FOR_REJECTED_AUTHORITIES=0
+STATE_ROOT_MUTATION_FOR_REJECTED_AUTHORITIES=0
+PYTHONPATH=src python3 -m compileall -q src tests       PASS
+git diff --check                                        PASS
+FULL_TESTS=1016
+FULL_SKIPPED=0
+FULL_FAILURES=0
+FULL_ERRORS=0
+```
+
+The mandated full regression was run once as
+`PYTHONPATH=src python3 -m unittest discover -s tests -v`. All new runtime
+launch and race tests use synthetic temporary filesystem trees, fake process
+factories, and fake installed-authority manifests. No real Codex version
+process, app-server start, business RPC, thread/delete operation, Telegram
+call, credential read/copy/symlink, or production process mutation occurred.
+The protected-path repair did not modify schema, dialogue deletion/recovery,
+repository deletion, dialogue state, or finalization code; P7.C4 remains
+not started.
