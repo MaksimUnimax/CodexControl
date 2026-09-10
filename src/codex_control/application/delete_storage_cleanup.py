@@ -116,9 +116,15 @@ class DeleteStorageCleanupCoordinator:
         if type(tombstone_retention_ms) is not int or tombstone_retention_ms <= 0:
             raise ValueError("retention_invalid")
         authority = getattr(runtime_manager, "isolation_authority", None)
+        if authority is None:
+            raise ValueError("isolation_authority_required")
+        controller_db_path = getattr(authority, "controller_db_path", None)
+        if (
+            not isinstance(controller_db_path, str)
+            or not storage.matches_database_path(controller_db_path)
+        ):
+            raise ValueError("controller_storage_mismatch")
         if scanner is None:
-            if authority is None:
-                raise ValueError("isolation_authority_required")
             scanner = PersistentProfileResidualScanner(authority)
         if not callable(getattr(scanner, "scan", None)):
             raise ValueError("scanner_invalid")
@@ -293,6 +299,15 @@ class DeleteStorageCleanupCoordinator:
                     )
                 return DeleteStorageCleanupResult(DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE, dialogue, reason=DeleteStorageCleanupReason.FINALIZE_FAILED, scan=scan)
             if not self._valid_finalize_result(finalized, dialogue):
+                replay = await self._reconcile_committed_tombstone(
+                    dialogue, dialogue_id, expected_version
+                )
+                if replay is not None:
+                    release_error = await self._release_after_commit(dialogue.profile_id, reservation)
+                    return DeleteStorageCleanupResult(
+                        replay.status, replay.dialogue, replay.tombstone,
+                        reason=release_error, scan=scan,
+                    )
                 return DeleteStorageCleanupResult(DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE, dialogue, reason=DeleteStorageCleanupReason.FINALIZE_FAILED, scan=scan)
             release_error = await self._release_after_commit(dialogue.profile_id, reservation)
             return DeleteStorageCleanupResult(

@@ -142,7 +142,7 @@ class PersistentProfileResidualScanner:
         if stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode):
             result.error()
             return
-        if entry.st_uid != 0 or stat.S_IMODE(entry.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
+        if entry.st_uid != 0 or entry.st_nlink != 1 or stat.S_IMODE(entry.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
             result.error()
             return
         result.path_match("history.jsonl")
@@ -197,6 +197,9 @@ class PersistentProfileResidualScanner:
                     except OSError:
                         result.error()
             elif stat.S_ISREG(entry.st_mode):
+                if entry.st_nlink != 1:
+                    result.error()
+                    continue
                 self._scan_file(fd, name, child_relative, result, entry)
             else:
                 result.error()
@@ -218,6 +221,7 @@ class PersistentProfileResidualScanner:
             if (
                 not stat.S_ISREG(opened.st_mode)
                 or opened.st_uid != 0
+                or opened.st_nlink != 1
                 or stat.S_IMODE(opened.st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
                 or (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino)
             ):

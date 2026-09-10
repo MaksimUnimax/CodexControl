@@ -261,6 +261,18 @@ class SqliteStorage:
     def __repr__(self) -> str:
         return "<SqliteStorage open>" if self._state == "OPEN" else "<SqliteStorage closed>"
 
+    def matches_database_path(self, path: str | os.PathLike[str]) -> bool:
+        """Compare the configured database identity without exposing it."""
+        try:
+            candidate = os.fspath(path)
+            if not isinstance(candidate, str) or not candidate or "\x00" in candidate:
+                return False
+            if not os.path.isabs(candidate):
+                return False
+            return os.path.normpath(os.path.abspath(candidate)) == self._database_path
+        except (TypeError, ValueError, OSError):
+            return False
+
     async def _await_owned(self, future: Future[Any]) -> Any:
         while True:
             try:

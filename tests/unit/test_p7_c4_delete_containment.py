@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from codex_control.adapters.codex import IsolationPathAuthority, IsolatedStateRoot
+import codex_control.adapters.codex.isolation as isolation_module
 from codex_control.adapters.codex.thread_lifecycle import (
     ThreadOperationResult,
     ThreadOperationStatus,
@@ -70,7 +71,7 @@ class P7C4DeleteContainmentTests(unittest.IsolatedAsyncioTestCase):
         self.state_root = os.path.join(self.parent, "isolated")
         self.repository = os.path.join(base, "repository")
         self.controller = os.path.join(base, "controller.sqlite3")
-        self.database = os.path.join(base, "control.sqlite3")
+        self.database = self.controller
         for path in (self.home, self.parent, self.repository):
             os.mkdir(path, 0o700)
         with open(self.controller, "wb"):
@@ -118,6 +119,12 @@ class P7C4DeleteContainmentTests(unittest.IsolatedAsyncioTestCase):
 
     def _scanner(self, **kwargs):
         return PersistentProfileResidualScanner(self.authority, **kwargs)
+
+    def _new_manager(self):
+        return CodexRuntimeManager(
+            [self.profile], client_version="test",
+            isolation_authority=self.authority,
+        )
 
     async def test_schema_v4_and_unknown_record_are_content_free_and_idempotent(self):
         unknown = await self._seed(DialogueState.DELETE_UNKNOWN)
@@ -174,6 +181,80 @@ class P7C4DeleteContainmentTests(unittest.IsolatedAsyncioTestCase):
         limited_bytes = self._scanner(max_bytes=1).scan(self.profile, "thread-c4")
         self.assertTrue(limited_bytes.limit_exceeded)
         self.assertGreater(limited_bytes.scan_errors, 0)
+
+    async def test_scanner_history_symlink_foreign_owner_and_read_error_fail_closed(self):
+        history = os.path.join(self.home, "history.jsonl")
+        os.symlink(self.repository, history)
+        result = self._scanner().scan(self.profile, "thread-c4")
+        self.assertFalse(result.passed)
+        os.unlink(history)
+        with open(history, "wb") as handle:
+            handle.write(b"unrelated")
+        os.chown(history, 65534, 65534)
+        result = self._scanner().scan(self.profile, "thread-c4")
+        self.assertFalse(result.passed)
+        os.chown(history, 0, 0)
+
+        def fail_read(fd, size):
+            raise OSError("synthetic read failure")
+
+        with patch.object(scanner_module.os, "read", side_effect=fail_read):
+            result = self._scanner().scan(self.profile, "thread-c4")
+        self.assertFalse(result.passed)
+        self.assertGreater(result.scan_errors, 0)
+
+    async def test_scanner_hardlinked_regular_files_rejected_before_content_read(self):
+        sessions = os.path.join(self.home, "sessions")
+        os.mkdir(sessions, 0o700)
+        source = os.path.join(self.repository, "credential-source")
+        with open(source, "wb") as handle:
+            handle.write(b"thread-c4")
+        os.link(source, os.path.join(sessions, "auth.json"))
+        os.link(source, os.path.join(sessions, "config.toml"))
+        reads = []
+        original_read = os.read
+
+        def observe_read(fd, size):
+            reads.append(fd)
+            return original_read(fd, size)
+
+        with patch.object(scanner_module.os, "read", side_effect=observe_read):
+            result = self._scanner().scan(self.profile, "thread-c4")
+        self.assertFalse(result.passed)
+        self.assertGreaterEqual(result.scan_errors, 2)
+        self.assertEqual([], reads)
+
+    async def test_scanner_matches_relative_filenames_and_directories_without_credentials(self):
+        sessions = os.path.join(self.home, "sessions")
+        os.mkdir(sessions, 0o700)
+        with open(os.path.join(sessions, "thread-c4"), "wb") as handle:
+            handle.write(b"unrelated")
+        os.mkdir(os.path.join(sessions, "nested-thread-c4"), 0o700)
+        with open(os.path.join(sessions, "nested-thread-c4", "unrelated"), "wb") as handle:
+            handle.write(b"unrelated")
+        result = self._scanner().scan(self.profile, "thread-c4")
+        self.assertGreaterEqual(result.match_count, 2)
+        self.assertEqual(0, result.scan_errors)
+        os.unlink(os.path.join(sessions, "thread-c4"))
+        os.unlink(os.path.join(sessions, "nested-thread-c4", "unrelated"))
+        os.rmdir(os.path.join(sessions, "nested-thread-c4"))
+        os.rmdir(sessions)
+
+        with open(os.path.join(self.home, "auth.json"), "wb") as handle:
+            handle.write(b"credential-thread-c4")
+        with open(os.path.join(self.home, "config.toml"), "wb") as handle:
+            handle.write(b"config-thread-c4")
+        reads = []
+        original_read = os.read
+
+        def observe_read(fd, size):
+            reads.append(fd)
+            return original_read(fd, size)
+
+        with patch.object(scanner_module.os, "read", side_effect=observe_read):
+            result = self._scanner().scan(self.profile, "other-thread")
+        self.assertGreaterEqual(result.match_count, 0)
+        self.assertEqual([], reads)
 
     async def test_scanner_special_and_writable_entries_fail_closed(self):
         os.mkdir(os.path.join(self.home, "sessions"), 0o700)
@@ -284,6 +365,172 @@ class P7C4DeleteContainmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(calls))
         self.assertIn("profile", coordinator._reservations)
         self.assertIsNone(await DialogueRepository(self.storage).get_live())
+
+    async def test_malformed_postcommit_result_reconciles_committed_tombstone(self):
+        pending = await self._seed(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE)
+        original = DeletionRepository.finalize_confirmed
+        calls = []
+
+        async def commit_then_malformed(repository, **kwargs):
+            calls.append(1)
+            await original(repository, **kwargs)
+            return object()
+
+        coordinator = DeleteStorageCleanupCoordinator(self.storage, self.manager, now_ms=lambda: 20)
+        with patch.object(DeletionRepository, "finalize_confirmed", new=commit_then_malformed):
+            result = await coordinator.cleanup_confirmed(
+                dialogue_id="d", expected_dialogue_version=pending.version
+            )
+        self.assertEqual(DeleteStorageCleanupStatus.CONFIRMED_FINALIZED, result.status)
+        self.assertIsNotNone(result.tombstone)
+        self.assertEqual([1], calls)
+        replay = await coordinator.cleanup_confirmed(
+            dialogue_id="d", expected_dialogue_version=pending.version
+        )
+        self.assertEqual(DeleteStorageCleanupStatus.CONFIRMED_FINALIZED, replay.status)
+        self.assertEqual([1], calls)
+
+    async def test_coordinator_binds_actual_controller_database_before_reservation(self):
+        self.assertTrue(self.storage.matches_database_path(self.controller))
+        self.assertFalse(self.storage.matches_database_path(os.path.join(self.parent, "dummy.sqlite3")))
+        other_path = os.path.join(self.parent, "other.sqlite3")
+        other = await SqliteStorage.open(other_path, now_ms=lambda: 1)
+        try:
+            with self.assertRaisesRegex(ValueError, "controller_storage_mismatch"):
+                DeleteStorageCleanupCoordinator(other, self.manager)
+            self.assertEqual({}, self.manager._reservations)
+        finally:
+            await other.close()
+
+    async def test_recreate_preserves_layout_and_retries_after_mid_mutation_crash(self):
+        sqlite_dir = os.path.join(self.state_root, "sqlite")
+        logs_dir = os.path.join(self.state_root, "logs")
+        os.makedirs(os.path.join(sqlite_dir, "nested"), 0o700)
+        os.makedirs(os.path.join(logs_dir, "nested"), 0o700)
+        for path in (
+            os.path.join(sqlite_dir, "nested", "db"),
+            os.path.join(logs_dir, "nested", "log"),
+        ):
+            with open(path, "wb") as handle:
+                handle.write(b"stale")
+        marker_identity = os.stat(os.path.join(self.state_root, ".codexcontrol-state-root-v1")).st_ino
+        sqlite_identity = os.stat(sqlite_dir).st_ino
+        logs_identity = os.stat(logs_dir).st_ino
+        original_clear = isolation_module._clear_directory
+        calls = []
+
+        def clear_then_crash(fd):
+            original_clear(fd)
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("simulated process crash")
+
+        with patch.object(isolation_module, "_clear_directory", new=clear_then_crash):
+            with self.assertRaisesRegex(RuntimeError, "simulated process crash"):
+                self.manager._state_root._recreate_bound(self.profile)
+        self.assertEqual([1], calls)
+        self.assertEqual(marker_identity, os.stat(os.path.join(self.state_root, ".codexcontrol-state-root-v1")).st_ino)
+        self.assertEqual(sqlite_identity, os.stat(sqlite_dir).st_ino)
+        self.assertEqual(logs_identity, os.stat(logs_dir).st_ino)
+        self.assertEqual(["nested"], os.listdir(sqlite_dir))
+        IsolatedStateRoot(self.authority).validate(self.profile)
+
+        manager = self._new_manager()
+        reservation = await manager.reserve("profile")
+        await manager.recreate_isolated_state_root(reservation)
+        self.assertEqual([], os.listdir(sqlite_dir))
+        self.assertEqual([], os.listdir(logs_dir))
+        await reservation.release()
+
+    async def test_recreate_failure_and_scanner_failure_keep_pending_quarantine_and_no_tombstone(self):
+        pending = await self._seed(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE)
+        coordinator = DeleteStorageCleanupCoordinator(self.storage, self.manager, now_ms=lambda: 20)
+        with patch.object(self.manager, "recreate_isolated_state_root", side_effect=RuntimeError("recreate")):
+            result = await coordinator.cleanup_confirmed(
+                dialogue_id="d", expected_dialogue_version=pending.version
+            )
+        self.assertEqual(DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE, result.status)
+        self.assertIsNone(await DeletionRepository(self.storage).get_tombstone("d"))
+        self.assertIn("profile", coordinator._reservations)
+
+        failing = DeleteStorageCleanupCoordinator(
+            self.storage, self.manager, scanner=_FailingScanner(), now_ms=lambda: 20
+        )
+        result = await failing.cleanup_confirmed(
+            dialogue_id=pending.dialogue_id, expected_dialogue_version=pending.version
+        )
+        self.assertEqual(DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE, result.status)
+        self.assertIn("profile", coordinator._reservations)
+
+    async def test_precommit_failure_is_pending_and_fresh_coordinator_retries_local_only(self):
+        pending = await self._seed(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE)
+        first = DeleteStorageCleanupCoordinator(self.storage, self.manager, now_ms=lambda: 20)
+        with patch.object(DeletionRepository, "finalize_confirmed", side_effect=RuntimeError("precommit")):
+            result = await first.cleanup_confirmed(
+                dialogue_id="d", expected_dialogue_version=pending.version
+            )
+        self.assertEqual(DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE, result.status)
+        self.assertIsNone(await DeletionRepository(self.storage).get_tombstone("d"))
+        self.assertIn("profile", first._reservations)
+
+        manager = self._new_manager()
+        second = DeleteStorageCleanupCoordinator(self.storage, manager, now_ms=lambda: 20)
+        retried = await second.cleanup_confirmed(
+            dialogue_id="d", expected_dialogue_version=pending.version
+        )
+        self.assertEqual(DeleteStorageCleanupStatus.CONFIRMED_FINALIZED, retried.status)
+        self.assertIsNone(await DialogueRepository(self.storage).get_live())
+
+    async def test_unknown_failures_retain_unknown_then_fresh_process_retries_containment(self):
+        unknown = await self._seed(DialogueState.DELETE_UNKNOWN)
+        first = DeleteStorageCleanupCoordinator(self.storage, self.manager, now_ms=lambda: 20)
+        with patch.object(self.manager, "recreate_isolated_state_root", side_effect=RuntimeError("recreate")):
+            result = await first.contain_unknown(
+                dialogue_id="d", expected_dialogue_version=unknown.version
+            )
+        self.assertEqual(DeleteStorageCleanupStatus.UNKNOWN_PENDING, result.status)
+        self.assertIsNone(await DeleteStorageContainmentRepository(self.storage).get("d"))
+        self.assertIn("profile", first._reservations)
+
+        manager = self._new_manager()
+        second = DeleteStorageCleanupCoordinator(self.storage, manager, now_ms=lambda: 20)
+        original_insert = DeleteStorageContainmentRepository.mark_unknown_contained
+        with patch.object(DeleteStorageContainmentRepository, "mark_unknown_contained", side_effect=RuntimeError("insert")):
+            failed_insert = await second.contain_unknown(
+                dialogue_id="d", expected_dialogue_version=unknown.version
+            )
+        self.assertEqual(DeleteStorageCleanupStatus.UNKNOWN_PENDING, failed_insert.status)
+        self.assertIsNone(await DeleteStorageContainmentRepository(self.storage).get("d"))
+
+        with patch.object(DeleteStorageContainmentRepository, "mark_unknown_contained", new=original_insert):
+            recovered = await DeleteStorageCleanupCoordinator(
+                self.storage, self._new_manager(), now_ms=lambda: 20
+            ).contain_unknown(dialogue_id="d", expected_dialogue_version=unknown.version)
+        self.assertEqual(DeleteStorageCleanupStatus.UNKNOWN_CONTAINED, recovered.status)
+        self.assertIsNotNone(await DeleteStorageContainmentRepository(self.storage).get("d"))
+
+    async def test_unknown_fresh_process_requarantines_existing_immutable_row(self):
+        unknown = await self._seed(DialogueState.DELETE_UNKNOWN)
+        first = await DeleteStorageCleanupCoordinator(
+            self.storage, self.manager, now_ms=lambda: 20
+        ).contain_unknown(dialogue_id="d", expected_dialogue_version=unknown.version)
+        record = await DeleteStorageContainmentRepository(self.storage).get("d")
+        calls = []
+        manager = self._new_manager()
+        original_recreate = manager.recreate_isolated_state_root
+
+        async def recreate(reservation):
+            calls.append(1)
+            await original_recreate(reservation)
+
+        with patch.object(manager, "recreate_isolated_state_root", new=recreate):
+            second = await DeleteStorageCleanupCoordinator(
+                self.storage, manager, now_ms=lambda: 30
+            ).contain_unknown(dialogue_id="d", expected_dialogue_version=unknown.version)
+        self.assertEqual(DeleteStorageCleanupStatus.UNKNOWN_CONTAINED, first.status)
+        self.assertEqual(DeleteStorageCleanupStatus.UNKNOWN_CONTAINED, second.status)
+        self.assertEqual([1], calls)
+        self.assertEqual(record, await DeleteStorageContainmentRepository(self.storage).get("d"))
 
     async def test_stale_and_mismatched_replay_tombstones_fail_closed(self):
         pending = await self._seed(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE)

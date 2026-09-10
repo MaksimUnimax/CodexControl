@@ -580,25 +580,44 @@ class IsolatedStateRoot:
             initial = os.fstat(fd)
             _chain_matches_fd(os.path.dirname(root), parent_fd, "state_root_replaced")
             _entry_matches_fd(parent_fd, leaf, fd, "state_root_replaced")
-            _clear_directory(fd)
-            current = os.fstat(fd)
-            if (initial.st_dev, initial.st_ino) != (current.st_dev, current.st_ino):
-                raise IsolationError("state_root_replaced")
-            _entry_matches_fd(parent_fd, leaf, fd, "state_root_replaced")
             for directory in ("sqlite", "logs"):
+                entry = _safe_entry_stat(directory, fd)
+                if not stat.S_ISDIR(entry.st_mode) or entry.st_uid != 0 or not _is_private_mode(entry.st_mode, 0o700):
+                    raise IsolationError("state_directory_invalid")
                 _entry_matches_fd(parent_fd, leaf, fd, "state_root_replaced")
-                os.mkdir(directory, 0o700, dir_fd=fd)
-            _entry_matches_fd(parent_fd, leaf, fd, "state_root_replaced")
-            marker_fd = os.open(
-                STATE_ROOT_MARKER,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
-                0o600,
-                dir_fd=fd,
-            )
-            try:
-                os.write(marker_fd, _expected_marker(configured.profile_id))
-            finally:
-                os.close(marker_fd)
+                child = os.open(directory, _directory_open_flags(), dir_fd=fd)
+                try:
+                    child_initial = os.fstat(child)
+                    if (
+                        not stat.S_ISDIR(child_initial.st_mode)
+                        or child_initial.st_uid != 0
+                        or not _is_private_mode(child_initial.st_mode, 0o700)
+                    ):
+                        raise IsolationError("state_directory_invalid")
+                    if (entry.st_dev, entry.st_ino) != (child_initial.st_dev, child_initial.st_ino):
+                        raise IsolationError("state_directory_replaced")
+                    _clear_directory(child)
+                    child_current = os.fstat(child)
+                    if (child_initial.st_dev, child_initial.st_ino) != (child_current.st_dev, child_current.st_ino):
+                        raise IsolationError("state_directory_replaced")
+                    if (
+                        not stat.S_ISDIR(child_current.st_mode)
+                        or child_current.st_uid != 0
+                        or not _is_private_mode(child_current.st_mode, 0o700)
+                    ):
+                        raise IsolationError("state_directory_invalid")
+                    _entry_matches_fd(fd, directory, child, "state_directory_replaced")
+                    try:
+                        if os.listdir(child):
+                            raise IsolationError("state_root_mutation_failed")
+                    except OSError:
+                        raise IsolationError("state_root_mutation_failed") from None
+                finally:
+                    os.close(child)
+                current = os.fstat(fd)
+                if (initial.st_dev, initial.st_ino) != (current.st_dev, current.st_ino):
+                    raise IsolationError("state_root_replaced")
+                _entry_matches_fd(parent_fd, leaf, fd, "state_root_replaced")
             current = os.fstat(fd)
             if (initial.st_dev, initial.st_ino) != (current.st_dev, current.st_ino):
                 raise IsolationError("state_root_replaced")

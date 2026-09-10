@@ -210,3 +210,40 @@ Repair regression coverage includes:
 The repair focused suite passed with 22 tests, 0 skipped, 0 failures, and
 0 errors. The required compile, diff, compatibility, and full regression
 results are recorded below after execution.
+
+## Second architect repair
+
+FIRST_REPAIR=
+fe646af1487d13571337e605641ecc86dbb1f6c7
+
+SECOND_ARCHITECT_VERDICT=
+REWORK_REQUIRED
+
+ARCHITECT_DEFECT_F=
+ISOLATED_ROOT_RECREATE_NOT_RESUMABLE_AFTER_MID_MUTATION_PROCESS_CRASH
+
+ARCHITECT_DEFECT_G=
+C4_COORDINATOR_NOT_BOUND_TO_ACTUAL_CONTROLLER_SQLITE_AUTHORITY
+
+ARCHITECT_DEFECT_H=
+FIRST_REPAIR_EVIDENCE_OVERCLAIMED_UNMATERIALIZED_FAILURE_RESTART_SCANNER_AND_REPLAY_TESTS
+
+The second repair keeps `.codexcontrol-state-root-v1`, `sqlite/`, and `logs/`
+in place during recreation and clears only descendants beneath the two
+top-level directories. Descriptor identity, ownership, mode, substitution,
+and final-layout gates remain active, so a process crash during descendant
+clearing leaves a valid retryable root. The C4 coordinator now requires the
+actual `SqliteStorage` database path to match the authority's protected
+controller database path before any reservation or recreation can occur.
+
+The second repair materializes mid-recreation crash/retry coverage, confirmed
+pending failure and fresh-process local retry coverage, UNKNOWN containment
+failure/retry and re-quarantine coverage, scanner path/ownership/read-error
+coverage, and credential non-read coverage. A malformed in-memory return from
+`finalize_confirmed()` is reconciled against the durable committed tombstone;
+the committed result remains final and no second finalizer call is made.
+
+Scanned regular files now require `st_nlink == 1` both before opening and after
+`fstat()`. Hard-linked scanned credential-named files are rejected before any
+credential bytes are read. Normal `auth.json` and `config.toml` remain outside
+the scanner content scope and are not opened.
