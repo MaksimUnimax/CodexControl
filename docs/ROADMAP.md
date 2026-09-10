@@ -20,7 +20,7 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P3.2 lazy thread creation.
 - [DONE] P3.3 settings selection.
 - [DONE] P3.4 durable interrupt.
-- [DONE] P3.5 hard-delete orchestration/fake P3 acceptance. ADR-0043/0044 later supersede the confirmed-delete storage ordering while preserving P1.9 UNKNOWN semantics.
+- [DONE] P3.5 hard-delete orchestration/fake P3 acceptance. ADR-0043/0044 later supersede confirmed-delete storage ordering while preserving P1.9 UNKNOWN semantics.
 
 ## P4 — Telegram private management
 - [DONE] P4.1 private auth/menu/settings.
@@ -39,39 +39,39 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 
 ## P7 — Real Codex acceptance and hard-delete correction lane
 
-- [REJECTED / HISTORICAL BLOCKER] **Original P7 under ADR-0042.** Exactly one official P1.9 `thread/delete` returned terminal `DELETE_UNKNOWN`; forensic commit `5aac49bd1b8a349343db52071520beed7f95592d` proved material residual. No retry/read/list/manual repair occurred. The historical thread is never reused.
+- [REJECTED / HISTORICAL BLOCKER] **Original P7 under ADR-0042.** Exactly one official P1.9 `thread/delete` returned terminal `DELETE_UNKNOWN`; forensic commit `5aac49bd1b8a349343db52071520beed7f95592d` proved material residual. No retry/read/list/manual repair occurred. Historical thread never reused.
 
 - [DONE] **P7.C1 — storage-isolation discovery.** Accepted `a9900471d0599be21b1a1834301c4421d95acb29`.
 
-- [DONE] **P7.C2 — schema-v3 confirmed-delete storage barrier.** Accepted repair `80673db644962b0cc5b1a388d64cb5902bd4f46c`. Exact confirmation becomes durable `DELETE_CONFIRMED_PENDING_STORAGE` before local purge/tombstone.
+- [DONE] **P7.C2 — schema-v3 confirmed-delete storage barrier.** Accepted `80673db644962b0cc5b1a388d64cb5902bd4f46c`.
 
-- [DONE] **P7.C3 — configured persistent profile + isolated state-root runtime authority.** Accepted `f76a32b2d18600fcf7ace6b9aa24067238d6dec7`, tree `13eea89362694da594bb2b717c037980b0df446f`. ADR-0045 supersedes only the mistaken persistent-home exclusivity interpretation; C3 isolated-root/runtime-manager ownership remains accepted.
+- [DONE] **P7.C3 — configured persistent profile + isolated state-root runtime authority.** Accepted `f76a32b2d18600fcf7ace6b9aa24067238d6dec7`, tree `13eea89362694da594bb2b717c037980b0df446f`.
 
-- [DONE] **P7.C4 — confirmed cleanup + DELETE_UNKNOWN local containment.** Accepted final `df161566cab5f8fa7ccf70f94379c78a9fb02ffe`, tree `be2ea7a5eead9b2d61039a2d98ec4d2b80047526`. Schema v4 adds bounded UNKNOWN containment metadata; confirmed finalization requires CodexControl-local reservation/quiescence, crash-resumable isolated reset and persistent exact-thread gate; UNKNOWN remains official UNKNOWN and quarantined.
+- [DONE] **P7.C4 — confirmed cleanup + DELETE_UNKNOWN local containment.** Accepted `df161566cab5f8fa7ccf70f94379c78a9fb02ffe`, tree `be2ea7a5eead9b2d61039a2d98ec4d2b80047526`.
 
-- [DONE] **P7.C5 — corrected fake hard-delete acceptance.** Accepted final proof `946ddf7ac6f7c3539bc3f344c6edf21d6ffce528`, tree `c4d5310a2afb05fc4f2f92eea822a1ccc7a8c88c`. Final full regression: 1065, zero skipped/failures/errors. Acceptance: `docs/evidence/p7c5/P7C5_ARCHITECT_ACCEPTANCE_2026-09-10.md`.
+- [DONE] **P7.C5 — corrected fake hard-delete acceptance.** Accepted `946ddf7ac6f7c3539bc3f344c6edf21d6ffce528`, tree `c4d5310a2afb05fc4f2f92eea822a1ccc7a8c88c`; full regression 1065, zero failures/errors.
 
-- [ACCEPTED CORRECTION] **ADR-0045 — shared persistent CODEX_HOME with isolated CodexControl mutable state.** Existing authenticated `CODEX_HOME` may be concurrently shared by other Codex processes/applications. CodexControl owns only its own app-server child/generation, isolated state root, controller SQLite and process-local reservation. No unrelated process is killed/stopped merely because it shares the persistent home.
+- [ACCEPTED CORRECTION] **ADR-0045 — shared persistent CODEX_HOME.** Existing authenticated persistent `CODEX_HOME` may be concurrently shared. CodexControl owns only its own app-server child/generation, isolated state root, controller SQLite and process-local reservation; unrelated shared-home processes are not stopped.
 
-- [RUN 1 REJECTED / HARNESS DEFECT] **P7.C6 — renewed real T3 + corrected hard-delete acceptance.** Run-1 evidence commit `785a82e2e9bc392173ea1e910b490f84cfa590b2`; architect review: `docs/evidence/p7c6/P7C6_RUN1_ARCHITECT_REVIEW_2026-09-10.md`.
+- [RUN 1 REJECTED / HARNESS DEFECT] **P7.C6 real Run 1.** Evidence `785a82e2e9bc392173ea1e910b490f84cfa590b2`. One real thread, one resume and three turns occurred. Turn 1/2 proved persistence; Turn 3 reached one approval request and stopped at `P7C6_APPROVAL_NOT_EXACTLY_ALLOWED`. No P1.8 interrupt, delete, thread/read or thread/list occurred. Run-1 approval result remains `RESPONSE_UNKNOWN`; old request is permanently non-retryable.
 
-  Run 1 used `/root/.codex_second` in `SHARED_AUTHENTICATED` mode and safely reached one thread, one generation restart/resume and three turns. Turn 1/2 passed persistence proof. Turn 3 reached one approval request and stopped at `P7C6_APPROVAL_NOT_EXACTLY_ALLOWED`; no interrupt, delete, thread/read or thread/list occurred. Recovery identity is retained outside Git.
+  Architect review established three harness/recovery defects without establishing any production defect: literal/under-bound approval matcher; declared host-level one-shot latch never materialized; failure-path ledger failed to retain Run-1 synthetic marker plaintext needed for final all-marker erasure proof.
 
-  Independent review establishes two acceptance-harness defects: the C6 operator used a literal guessed-command matcher instead of the previously proven structural `EXACT_INNER|ONE_SHELL_WRAPPER` matcher with exact thread/turn/cwd/marker/sentinel relations, and the declared global one-shot ledger was only checked rather than materialized. No production P1.7/P1.8/P1.9/C3/C4/C5 defect is established.
+- [DONE / ZERO-REAL-EFFECT FORENSIC] **P7.C6 retained Turn-3 forensic.** Accepted commit `e6835e7eaff21ce6a452c24f3309269df67c82ba`. Exact Turn 3 is durably terminal `INTERRUPTED`; one command item is `COMPLETED`; no persisted approval request/decision/response remains; no delayed process or sentinel remains; zero scan/parse errors. The persisted command is outside the historical safe approval grammar (`OTHER/TOKEN_MISMATCH`), so the old approval can never be retroactively accepted. The retained thread is a safe candidate for a new same-thread turn after harness preparation.
 
-  Published zero-effect forensic records `C6_APPROVAL_HANDLING_RESULT=RESPONSE_UNKNOWN`, so the old approval request may never be resent or reinterpreted.
+- [NEXT / ZERO-REAL-EFFECT] **P7.C6 same-thread continuation preparation.** Contract: `docs/evidence/p7c6/P7C6_SAME_THREAD_CONTINUATION_PREP_CONTRACT_2026-09-10.md`.
 
-- [NEXT / ZERO-REAL-EFFECT] **P7.C6 retained Turn-3 forensic.** Contract: `docs/evidence/p7c6/P7C6_RETAINED_TURN3_FORENSIC_CONTRACT_2026-09-10.md`.
+  Preparation must not perform any Codex business RPC. It closes the Run-1 latch hole, reconstructs exactly the three Run-1 synthetic marker values from the exact retained target artifact into a root-only recovery supplement, validates the retained isolated/controller topology, implements and tests the historical structural approval relation, implements/tests a separate continuation one-shot latch, and materializes a gated same-thread continuation harness.
 
-  This forensic may inspect only existing local recovery/session/process metadata and must perform zero Codex/app-server/business RPC effects. It must determine whether Run-1 Turn 3 has a durable terminal record and whether any approval/command state remains pending/running/ambiguous. `P7C6_CONTINUATION_AUTHORIZED=NO` until independent architect review of this forensic.
+  The prepared future continuation contains no new-thread path. If later independently authorized, it may add at most one retained-thread resume, two new turns, one new distinct approval response for the new approval-proof turn, one P1.8 interrupt for the interrupt-proof turn, and the still-unused cumulative single official `thread/delete` through the corrected application path.
 
-  Only if a safe terminal boundary is proven may the architect consider a separately frozen same-thread continuation. Any such continuation would use no new real thread, never resend the Run-1 approval request, repair the approval matcher and durable latch, and retain the still-unused single official `thread/delete` budget.
+  `P7C6_REAL_CONTINUATION_AUTHORIZED=NO` until independent architect review of the preparation commit.
 
 ## P8 — Deployment packaging/rollback
-[BLOCKED BY P7.C6] Root-owned config/secrets, systemd, install/upgrade/rollback runbooks, resource/retention guards. Reopens only after architect-accepted C6.
+[BLOCKED BY P7.C6] Reopens only after architect-accepted C6.
 
 ## P9 — server-80 live Telegram acceptance
-[BLOCKED BY P7.C6] Dedicated token/private test group; T4/T5 UX/auth/restart/delete/rollback. Reopens only after architect-accepted C6.
+[BLOCKED BY P7.C6] Reopens only after architect-accepted C6.
 
 ## P10 — server-78 discovery/deployment
 Repeat discovery/profile/storage/capability; dedicated deploy key/token/config; same source architecture, no fork.
