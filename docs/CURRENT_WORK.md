@@ -20,7 +20,7 @@ The historical rejected thread must never be touched again by the correction lan
 
 Accepted discovery: `a9900471d0599be21b1a1834301c4421d95acb29`.
 
-C1 proved the physical residual families and exact 0.144.6 routing controls used by ADR-0043: `CODEX_SQLITE_HOME`/`sqlite_home`, `log_dir`, `history.persistence=none`; sessions/rollouts remain under persistent `CODEX_HOME`.
+C1 proved the physical residual families and exact 0.144.6 routing controls used by the correction lane: `CODEX_SQLITE_HOME`/`sqlite_home`, `log_dir`, `history.persistence=none`; sessions/rollouts remain under persistent `CODEX_HOME`.
 
 ## P7.C2 — COMPLETE / architect accepted
 
@@ -32,7 +32,9 @@ Exact upstream confirmation first becomes durable `DELETE_CONFIRMED_PENDING_STOR
 
 Accepted final implementation: `f76a32b2d18600fcf7ace6b9aa24067238d6dec7`; accepted tree `13eea89362694da594bb2b717c037980b0df446f`.
 
-C3 owns dedicated persistent `CODEX_HOME` + distinct isolated state root, exact per-generation 0.144.6 capability authority, descriptor/no-follow protected-path checks, exact SQLite/log/history routing, exclusive profile reservation/quiescence and manager-owned bounded root lifecycle.
+C3 owns explicit configured persistent `CODEX_HOME` plus a distinct CodexControl-owned isolated state root, exact per-generation 0.144.6 capability authority, descriptor/no-follow protected-path checks, exact SQLite/log/history routing, CodexControl-local profile reservation/quiescence and manager-owned bounded root lifecycle.
+
+ADR-0045 supersedes the earlier mistaken interpretation that the persistent `CODEX_HOME` itself must be exclusive to CodexControl. The accepted runtime reservation already scopes itself to CodexControl-managed children; it is not a host-wide lock on the persistent home.
 
 ## P7.C4 — COMPLETE / architect accepted
 
@@ -46,6 +48,8 @@ Accepted lineage:
 Acceptance: `docs/evidence/p7c4/P7C4_ARCHITECT_ACCEPTANCE_2026-09-10.md`.
 
 C4 adds schema-v4 UNKNOWN containment metadata and composes the corrected local hard-delete lifecycle. Confirmed cleanup is `reserve -> shutdown -> quiesce -> isolated payload reset -> persistent exact-thread scan -> finalize -> release`. UNKNOWN remains official UNKNOWN, retains binding and no tombstone/finalizer, while isolated local containment may be recorded separately. Isolated reset is crash-resumable and the cleanup coordinator is bound to the actual protected controller SQLite.
+
+Under ADR-0045, C4 shutdown/quiescence applies only to CodexControl-owned children that can use the exact isolated state root. It does not authorize stopping unrelated Codex processes that merely share the persistent `CODEX_HOME`.
 
 ## P7.C5 — COMPLETE / architect accepted
 
@@ -67,23 +71,41 @@ Final executor evidence: dedicated C5 tests `15`; focused `248`; ordinary full r
 
 Dynamic mount/namespace mutation was intentionally not run; the bounded risk is carried to C6/P13.
 
+## ADR-0045 — shared persistent CODEX_HOME correction
+
+ADR-0045 is binding and supersedes only the persistent-home exclusivity clauses of ADR-0043 and downstream C6 wording derived from them.
+
+A configured authenticated persistent `CODEX_HOME` may be concurrently shared by independent Codex processes/applications. CodexControl owns only its own app-server child/generation, its own isolated `sqlite/logs` state root, its controller SQLite and its process-local reservation/quiescence authority.
+
+Other Codex processes using the same persistent home are allowed and must not be killed/stopped/signaled merely to make the home quiet. They are a blocker only if they use or ambiguously alias the exact CodexControl-owned isolated state root/controller boundary.
+
 ## Current slice
 
-**P7.C6 — NEXT / REAL-EFFECT ONE-SHOT CONTRACT FROZEN.**
+**P7.C6 — NEXT / REAL-EFFECT ONE-SHOT, WITH SHARED-HOME CORRECTION.**
 
-Contract:
+Base contract:
 
 `docs/evidence/p7c6/P7C6_ARCHITECT_EXECUTION_CONTRACT_2026-09-10.md`.
 
-C6 is the first separately authorized real Codex run after the correction lane. It may create exactly one new disposable thread, run the bounded real T3 persistence/approval/interrupt proof, and dispatch exactly one official P1.9 `thread/delete` through the complete corrected application cleanup path.
+Binding correction with precedence:
 
-C6 must use an explicitly designated already-authenticated **CodexControl-dedicated** persistent `CODEX_HOME`; historical `codex1/codex2/codex3` names are not automatically eligible. A fresh run-owned isolated state root and separate synthetic controller DB are mandatory. If no explicit dedicated profile authority exists, stop before authenticated business RPC with `P7C6_PROFILE_AUTHORITY_REQUIRED`; never copy/symlink/migrate credentials or fall back to a shared home.
+`docs/evidence/p7c6/P7C6_ARCHITECT_CONTRACT_CORRECTION_SHARED_HOME_2026-09-10.md`.
 
-Before real business RPC, C6 must also perform a read-only mount/alias preflight. Any unresolved bind-mount/namespace ambiguity stops the run; no privileged mount mutation is authorized.
+P7.C6 shall use the existing authenticated configured home `/root/.codex_second` in `SHARED_AUTHENTICATED` mode. Live unrelated Codex processes with that same `CODEX_HOME` and their open descriptors under that persistent home are not blockers by themselves.
 
-PASS requires exact real `DELETE_CONFIRMED`, complete `DELETE_CONFIRMED_PENDING_STORAGE` local cleanup to `DELETED`, zero exact target thread residual, zero known synthetic marker residual across measured dialogue-bearing persistent/isolated families, preserved unrelated baseline and green ordinary regression.
+C6 must create a fresh run-owned isolated state root and separate synthetic controller DB and prove that no unrelated process uses those exact protected boundaries. It must not kill, stop, signal or request shutdown of unrelated Codex processes.
 
-Any `DELETE_UNKNOWN`, persistent residual, local confirmed-pending failure, profile-authority failure, mount-alias uncertainty, production defect or inconclusive physical proof keeps P8/P9 blocked. No real C6 run is automatically retried.
+The previous C6 profile-authority/process-owner stops occurred before any authenticated business RPC and consumed none of the one-shot budget. No harness/evidence/commit was created by those stops.
+
+C6 may still create exactly one new disposable real thread, run the bounded real T3 persistence/approval/interrupt proof, and dispatch exactly one official P1.9 `thread/delete` through the complete corrected application cleanup path.
+
+Before real business RPC, C6 must perform the corrected read-only mount/alias/protected-boundary preflight. Sharing the persistent home is allowed; use or unresolved aliasing of the C6 isolated root/controller boundary is not.
+
+PASS requires exact real `DELETE_CONFIRMED`, complete `DELETE_CONFIRMED_PENDING_STORAGE` local cleanup to `DELETED`, zero exact target thread residual, zero known synthetic marker residual across measured dialogue-bearing persistent/isolated families, zero proof errors and green ordinary regression.
+
+The persistent home is a live shared authority, so C6 does not require its entire session/history tree to remain globally stable while unrelated processes continue working. The acceptance proof is target-specific and must also prove CodexControl made zero unrelated process termination/signal effects and zero manual persistent-home cleanup effects.
+
+Any `DELETE_UNKNOWN`, target residual, local confirmed-pending failure, protected-boundary alias/use conflict, production defect or inconclusive physical proof keeps P8/P9 blocked. No real C6 run is automatically retried.
 
 ## Remaining lane
 
@@ -94,4 +116,4 @@ After independent architect acceptance of P7.C6 only:
 
 ## Current non-goals
 
-Do not touch the historical rejected P7 thread. Do not use a shared/interactively owned Codex home. Do not copy credentials. Do not call `thread/read`/`thread/list`. Do not retry an ambiguous delete. Do not manually delete persistent session/history to manufacture a pass. Do not start P8/P9 before C6 acceptance.
+Do not touch the historical rejected P7 thread. Do not require persistent-home exclusivity. Do not stop unrelated Codex processes merely because they share `/root/.codex_second`. Do not create/copy/migrate a new authenticated profile. Do not copy credentials. Do not call `thread/read`/`thread/list`. Do not retry an ambiguous delete. Do not manually delete persistent session/history to manufacture a pass. Do not start P8/P9 before C6 acceptance.
