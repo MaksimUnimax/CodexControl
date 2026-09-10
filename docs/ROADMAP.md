@@ -24,60 +24,58 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 ## P2 — Durable local state/idempotency
 - [DONE] P2.1 secure SQLite storage kernel + historical schema-v1 bootstrap/migration/process lock. Accepted `61301fd25ff7253693f367664ce99e13dfc88446`.
 - [DONE] P2.2 controller/settings/dialogue core repositories. Accepted `5187c080a7188a59989013defe7d07075662d007`.
-- [DONE] P2.3 ingress dedupe + atomic control-message epoch/mode claims + hashed opaque callback one-time claim semantics. Accepted `0d8f34beaa35a2bc02b349abba9507ebb9bc3802`.
+- [DONE] P2.3 ingress dedupe + atomic control epoch/mode claims + opaque callback claims. Accepted `0d8f34beaa35a2bc02b349abba9507ebb9bc3802`.
 - [DONE] P2.4a atomic JOB ingress + turn-job execution claims + transient payloads. Accepted `ca5b5cc19ac9278377b96abec46c523603b2ff47`.
-- [DONE] P2.4b delivery segments + atomic approval callback/subject claims + bounded transient retention. Accepted `1dedc737ffa3092ba0dbcd8618a57fa6c351b849`.
+- [DONE] P2.4b delivery/approval/transient-retention authority. Accepted `1dedc737ffa3092ba0dbcd8618a57fa6c351b849`.
 - [DONE] P2.5 deletion claims/tombstones/error fingerprints/confirmed local purge. Accepted `87ef37cf245d79f6d20b507b13c0f36014c1580f`.
 - [DONE] P2.6a bounded non-content metadata retention. Accepted `e6f59739b3091d00894d3434abb5a99e2af72885`.
-- [DONE] P2.6b crash/restart/idempotency harness and final historical P2 acceptance. Accepted `9db97f0dda109b4d0c0ecfa5f167733905df2766`; full 500.
-- [DONE] P2.C1 retention-compatible JOB duplicate replay correction. Accepted `4b6d226ce647fbf38a6ada7b82947be7ad3e30c2`; full 506.
-- [DONE] P2.C2 terminal authorized pre-JOB rejection + schema-v2 migration under ADR-0036. Accepted `082c6df79a7c3a6d8dd04b73f15563f1668b6c9b`; full 796.
+- [DONE] P2.6b final historical P2 crash/restart/idempotency acceptance. Accepted `9db97f0dda109b4d0c0ecfa5f167733905df2766`.
+- [DONE] P2.C1 retention-compatible JOB duplicate replay correction. Accepted `4b6d226ce647fbf38a6ada7b82947be7ad3e30c2`.
+- [DONE] P2.C2 schema-v2 terminal pre-JOB rejection correction. Accepted `082c6df79a7c3a6d8dd04b73f15563f1668b6c9b`.
 
 ## P3 — Dialogue application service
-- [DONE] P3.1 existing-dialogue prompt admission + immutable authenticated selection + one-turn orchestration. Accepted `9e0a86b311bb63d6a36a4641cb588321987e1550`; full 543.
-- [DONE] P3.2 lazy `thread/start` + first-turn orchestration/restart fail-closed. Accepted `c484c56db007569170363b3d08c24766148c3e30`; full 566.
-- [DONE] P3.3 profile/model/reasoning selection + authenticated catalog validation + settings/dialogue locks. Accepted `66a37d8b8065ecd31e17351e8062f9ebf1ee8828`; full 596.
-- [DONE] P3.4 durable interrupt orchestration over P1.8 + exact active-binding registry. Accepted `6460a449f861b7b86ab664e5ff877c108715082d`; full 633.
-- [DONE] P3.5 hard-delete orchestration over P1.9/P2.5 + quiescence + startup recovery + final fake P3 acceptance. Accepted `6145d262787465ac6b4a17327114211cd86e8104`; full 671.
-
-P3 is complete at the fake/application boundary. ADR-0043 later partially supersedes confirmed-delete finalization/recovery ordering; P1.9 and DELETE_UNKNOWN no-retry semantics remain frozen.
+- [DONE] P3.1 existing-dialogue orchestration. Accepted `9e0a86b311bb63d6a36a4641cb588321987e1550`.
+- [DONE] P3.2 lazy thread creation. Accepted `c484c56db007569170363b3d08c24766148c3e30`.
+- [DONE] P3.3 settings selection. Accepted `66a37d8b8065ecd31e17351e8062f9ebf1ee8828`.
+- [DONE] P3.4 durable interrupt. Accepted `6460a449f861b7b86ab664e5ff877c108715082d`.
+- [DONE] P3.5 hard-delete orchestration/fake P3 acceptance. Accepted `6145d262787465ac6b4a17327114211cd86e8104`.
 
 ## P4 — Telegram private management
-- [DONE] P4.1 private Telegram auth/normalization + durable private-menu dedupe + opaque callbacks + settings panel under ADR-0032. Accepted `5a7db46c6e06662c379149c454c06003d48feb30`; full 694.
-- [DONE] P4.2 private dialogue status + exact P3.4 interrupt + mandatory two-step hard-delete confirmation under ADR-0033. Accepted `a5a8ee6773936b1dcbb777e36ffa33519cd8ab39`; full 728.
-- [DONE] P4.3 final private facade/root + callback-family dispatch + diagnostics + approval projection/atomic P2.4b decisions + final fake P4 acceptance under ADR-0034. Accepted `d053f24061e20aa44e07e5b92c9b92c6506647fd`; final full 762.
+- [DONE] P4.1 private auth/menu/settings. Accepted `5a7db46c6e06662c379149c454c06003d48feb30`.
+- [DONE] P4.2 dialogue control + two-step delete confirmation. Accepted `a5a8ee6773936b1dcbb777e36ffa33519cd8ab39`.
+- [DONE] P4.3 final private facade/approval projection. Accepted `d053f24061e20aa44e07e5b92c9b92c6506647fd`.
 
 ## P5 — Telegram group routing
-- [DONE] P5.1 shared immutable fleet manifest + persistent reply keyboard + fail-closed group normalization/auth + durable activation/all-sleep routing under ADR-0035. Accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`; full 777.
-- [DONE] P5.2 serialized ordinary group TEXT admission under ADR-0037 with short lock, no queue, durable stale/SLEEP/BUSY handling and accepted P3 delegation. Accepted `345c48722c4faa03be19d38b6f07304276075f64`; full 841.
-- [DONE] P5.3 fleet-status identity/mismatch visibility + final fake multi-controller acceptance under ADR-0038. Accepted `c23d9356e7033ce44a62933f7749250433d49f61`; final P5 full 860.
+- [DONE] P5.1 fleet manifest/activation routing. Accepted `0d1e530a1b9fdc70fc36ca985ef1cdcbf41688d3`.
+- [DONE] P5.2 serialized ordinary TEXT admission. Accepted `345c48722c4faa03be19d38b6f07304276075f64`.
+- [DONE] P5.3 fleet-status/final fake P5 acceptance. Accepted `c23d9356e7033ce44a62933f7749250433d49f61`.
 
 ## P6 — Response delivery/full local orchestration
-- [DONE] P6.1 deterministic successful-response segmentation + transient DISPLAY materialization + accepted P2.4b durable one-attempt delivery under ADR-0039. Accepted `51902dcbd743cd91ad209cd96879b4ad45a26a9e`; full 900.
-- [DONE] P6.2 durable live approval operator + owned P1.7 response under ADR-0040. Accepted `51a681b09cf2eb2e75fbd2663f88b7a96077a39d`; full 922.
-- [DONE] P6.3 final local orchestration under ADR-0041. Accepted `0409ad4a0744159aad875a5ddea4deaf1181699e`; final P6 full 954. Acceptance: `docs/evidence/p6/P6_3_ARCHITECT_ACCEPTANCE_2026-09-08.md`.
+- [DONE] P6.1 deterministic response delivery. Accepted `51902dcbd743cd91ad209cd96879b4ad45a26a9e`.
+- [DONE] P6.2 durable live approval operator. Accepted `51a681b09cf2eb2e75fbd2663f88b7a96077a39d`.
+- [DONE] P6.3 final local orchestration/fake P6 acceptance. Accepted `0409ad4a0744159aad875a5ddea4deaf1181699e`.
 
 ## P7 — Real Codex acceptance and hard-delete correction lane
 
-- [REJECTED / ARCHITECTURE BLOCKED] **Original P7 under ADR-0042.** One official P1.9 `thread/delete` returned terminal `DELETE_UNKNOWN`; forensic commit `5aac49bd1b8a349343db52071520beed7f95592d` proved `DELETE_UNKNOWN_WITH_MATERIAL_RESIDUAL` with five synthetic material-marker matches. No retry/read/list/manual repair occurred. P8/P9 remain blocked.
+- [REJECTED / ARCHITECTURE BLOCKED] **Original P7 under ADR-0042.** One official P1.9 `thread/delete` returned terminal `DELETE_UNKNOWN`; forensic commit `5aac49bd1b8a349343db52071520beed7f95592d` proved material residual. No retry/read/list/manual repair occurred.
 
-- [DONE] **P7.C1 — hard-delete storage isolation discovery.** Accepted discovery `a9900471d0599be21b1a1834301c4421d95acb29`; acceptance `docs/evidence/p7c1/P7C1_ARCHITECT_ACCEPTANCE_2026-09-09.md`. ADR-0043 selected the dedicated-profile + isolated-state-root correction.
+- [DONE] **P7.C1 — storage-isolation discovery.** Accepted `a9900471d0599be21b1a1834301c4421d95acb29`.
 
-- [DONE] **P7.C2 — schema-v3 confirmed-delete storage barrier.** Accepted lineage `fbe1ea7d2f55f8f4a24d1c86e6effbbcd04e87bc` → repair `80673db644962b0cc5b1a388d64cb5902bd4f46c`. Exact confirmation now becomes durable `DELETE_CONFIRMED_PENDING_STORAGE` with binding retained and no premature tombstone/purge. Final executor regression 967. Acceptance: `docs/evidence/p7c2/P7C2_ARCHITECT_ACCEPTANCE_2026-09-09.md`.
+- [DONE] **P7.C2 — schema-v3 confirmed-delete storage barrier.** Accepted candidate/repair `fbe1ea7d2f55f8f4a24d1c86e6effbbcd04e87bc` -> `80673db644962b0cc5b1a388d64cb5902bd4f46c`; exact confirmation becomes `DELETE_CONFIRMED_PENDING_STORAGE` before purge/tombstone.
 
-- [DONE] **P7.C3 — dedicated profile + isolated state-root runtime authority.** Accepted lineage `0654ee1cbd70d4d6a6d5a317e948d2f08b2c081f` → `a549e6f1f295a37f14a7833ede0233d94745555a` → `2a6c5d8f2ed0980c4c7bc32cec471002432e1c9d` → final `f76a32b2d18600fcf7ace6b9aa24067238d6dec7`. Accepted tree `13eea89362694da594bb2b717c037980b0df446f`. Implements explicit isolated roots, protected path authority, exact per-generation 0.144.6 gate, child SQLite/log/history routing, exclusive profile reservation/quiescence, descriptor-bounded provision/recreate and substitution defenses. Final executor regression 1016. Acceptance: `docs/evidence/p7c3/P7C3_ARCHITECT_ACCEPTANCE_2026-09-10.md`.
+- [DONE] **P7.C3 — dedicated profile + isolated state-root runtime authority.** Accepted final `f76a32b2d18600fcf7ace6b9aa24067238d6dec7`; exact 0.144.6 routing/capability gate, descriptor path authority, profile reservation/quiescence and bounded root lifecycle.
 
-- [NEXT / AUTHORITY FROZEN] **P7.C4 — confirmed cleanup + `DELETE_UNKNOWN` local-containment orchestration under ADR-0044.** Add additive schema v4 migration `0004_delete_local_containment` with SHA-256 `400a475cb074da6b82238af105412d8299b45816273136bfd54a2cbd2308e059`. Confirmed-pending may finalize only after exact C3 reservation/quiescence, isolated-root recreation and read-only persistent `sessions/history` exact-thread residual gate. UNKNOWN remains official UNKNOWN; successful local isolated-root containment is persisted separately, retains binding, creates no tombstone, never calls delete/read/list reconciliation, and keeps the profile quarantined. No real Codex effect.
+- [DONE] **P7.C4 — confirmed cleanup + DELETE_UNKNOWN local containment.** Accepted lineage `70cdf0edc3f319c0254313eabc5d3c56c2f9ef16` -> `fe646af1487d13571337e605641ecc86dbb1f6c7` -> final `df161566cab5f8fa7ccf70f94379c78a9fb02ffe`. Schema v4 adds bounded UNKNOWN containment metadata. Confirmed finalization requires exact reservation/quiescence, crash-resumable isolated payload reset, persistent sessions/history gate, then finalizer. UNKNOWN remains official UNKNOWN, retains binding/tombstone absence and quarantines the profile. C4 coordinator is bound to the actual protected controller SQLite. Final executor regression: 1050, 0 skipped/failures/errors. Acceptance: `docs/evidence/p7c4/P7C4_ARCHITECT_ACCEPTANCE_2026-09-10.md`.
 
-- [PLANNED] **P7.C5 — corrected fake hard-delete acceptance.** Proof-only matrix across schema/runtime/storage/application boundaries: material markers, SQLite/WAL/SHM/log/session families, crash points, unrelated baselines, ownership failures, duplicate-effect prohibition and additional mount/namespace alias hardening where safely available.
+- [NEXT / CONTRACT FROZEN] **P7.C5 — corrected fake hard-delete acceptance.** Proof-only tests/evidence across accepted C2/C3/C4: complete synthetic marker/path-family coverage, confirmed/UNKNOWN matrices, both isolated-subtree crash points, restart/replay/no-P1 duplication, cancellation/concurrency, unrelated-baseline/controller preservation, scanner credential/alias defenses and bounded mount/namespace risk analysis. Contract: `docs/evidence/p7c5/P7C5_ARCHITECT_EXECUTION_CONTRACT_2026-09-10.md`. A production defect causes STOP; normal C5 does not edit production source.
 
-- [PLANNED] **P7.C6 — renewed isolated real T3 + hard-delete acceptance.** Separately authorized one-thread/one-delete real proof on the corrected topology. PASS requires exact `DELETE_CONFIRMED`, complete confirmed-pending local cleanup, zero synthetic material residual, zero active thread-ID residual, preserved unrelated baseline and green ordinary regressions.
+- [BLOCKED BY C5] **P7.C6 — renewed isolated real T3 + one-delete hard-delete acceptance.** Must be separately authorized after C5 architect acceptance. PASS requires exact real `DELETE_CONFIRMED`, complete corrected local cleanup, zero synthetic material/active thread residual, preserved unrelated baseline and green ordinary regression.
 
 ## P8 — Deployment packaging/rollback
-[BLOCKED BY P7] Root-owned config/secrets, systemd, install/upgrade/rollback runbooks, resource/retention guards; production fleet configuration is wired only after renewed P7 acceptance.
+[BLOCKED BY P7.C6] Root-owned config/secrets, systemd, install/upgrade/rollback runbooks, resource/retention guards; production configuration is wired only after renewed P7 acceptance.
 
 ## P9 — server-80 live Telegram acceptance
-[BLOCKED BY P7] Dedicated token/private test group; T4/T5 UX/auth/restart/delete/rollback; promote only an exact accepted post-P7 SHA.
+[BLOCKED BY P7.C6] Dedicated token/private test group; T4/T5 UX/auth/restart/delete/rollback; promote only an exact accepted post-P7 SHA.
 
 ## P10 — server-78 discovery/deployment
 Repeat discovery/profile/storage/capability; dedicated deploy key/token/config; same source architecture, no fork.
