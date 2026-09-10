@@ -6,100 +6,92 @@ Date: 2026-09-10
 
 - Repository: `MaksimUnimax/CodexControl`.
 - Installed server-80 authority remains `codex-cli 0.144.6`; generated app-server schema SHA-256 remains `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`.
-- P0–P6 are complete at their accepted boundaries. P6 final accepted commit remains `0409ad4a0744159aad875a5ddea4deaf1181699e`; no live Telegram or production deployment acceptance has occurred.
-- Historical storage schema-v1 DDL SHA-256 remains `b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c`.
-- Historical schema-v2 migration SHA-256 remains `a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85`.
-- Accepted schema-v3 migration ID is `0003_confirmed_pending_storage` with SHA-256 `cc4fe584962da3bdc13023d6361517cb858b64e16c2d0d38c3459741843b5eb4`.
-- Current schema is v4. Accepted v4 migration ID is `0004_delete_local_containment` with SHA-256 `400a475cb074da6b82238af105412d8299b45816273136bfd54a2cbd2308e059`.
+- P0–P6 are complete at their accepted boundaries. P6 final accepted commit remains `0409ad4a0744159aad875a5ddea4deaf1181699e`.
+- Historical schema-v1/v2/v3 authorities remain immutable. Current schema is v4 with migration `0004_delete_local_containment`, SHA-256 `400a475cb074da6b82238af105412d8299b45816273136bfd54a2cbd2308e059`.
+- No live Telegram/deployment acceptance has occurred.
 
 ## Rejected original P7
 
-Original real P7 under ADR-0042 remains **REJECTED / ARCHITECTURE BLOCKED**. Exactly one official P1.9 `thread/delete` returned terminal `DELETE_UNKNOWN`; no retry/read/list occurred. Final forensic commit `5aac49bd1b8a349343db52071520beed7f95592d` proved `DELETE_UNKNOWN_WITH_MATERIAL_RESIDUAL` with five synthetic material-marker matches. Issue #38 remains historical blocker evidence.
+Original real P7 under ADR-0042 remains **REJECTED / ARCHITECTURE BLOCKED historical evidence**. Exactly one official P1.9 `thread/delete` returned terminal `DELETE_UNKNOWN`; it was not retried/read/list-reconciled. Final forensic commit `5aac49bd1b8a349343db52071520beed7f95592d` proved `DELETE_UNKNOWN_WITH_MATERIAL_RESIDUAL` with five synthetic marker matches. Issue #38 remains historical blocker evidence.
+
+The historical rejected thread must never be touched again by the correction lane.
 
 ## P7.C1 — COMPLETE / architect accepted
 
 Accepted discovery: `a9900471d0599be21b1a1834301c4421d95acb29`.
 
-Acceptance: `docs/evidence/p7c1/P7C1_ARCHITECT_ACCEPTANCE_2026-09-09.md`.
-
-C1 proved residual storage provenance and exact installed 0.144.6 controls: `CODEX_SQLITE_HOME`/`sqlite_home`, `log_dir`, `history.persistence=none`; session/rollout remains under `CODEX_HOME`.
+C1 proved the physical residual families and exact 0.144.6 routing controls used by ADR-0043: `CODEX_SQLITE_HOME`/`sqlite_home`, `log_dir`, `history.persistence=none`; sessions/rollouts remain under persistent `CODEX_HOME`.
 
 ## P7.C2 — COMPLETE / architect accepted
 
-Accepted implementation lineage: `fbe1ea7d2f55f8f4a24d1c86e6effbbcd04e87bc` -> `80673db644962b0cc5b1a388d64cb5902bd4f46c`.
+Accepted implementation: `80673db644962b0cc5b1a388d64cb5902bd4f46c` after initial candidate `fbe1ea7d2f55f8f4a24d1c86e6effbbcd04e87bc`.
 
-Acceptance: `docs/evidence/p7c2/P7C2_ARCHITECT_ACCEPTANCE_2026-09-09.md`.
-
-C2 introduced schema-v3 `DELETE_CONFIRMED_PENDING_STORAGE`: exact upstream confirmation is persisted before local purge/tombstone; full binding remains retained; `DELETING` restart remains ambiguity -> `DELETE_UNKNOWN`; confirmed-pending/UNKNOWN never redispatch external delete.
+Exact upstream confirmation first becomes durable `DELETE_CONFIRMED_PENDING_STORAGE` with full binding retained and no premature tombstone/purge. `DELETING` restart remains ambiguity -> `DELETE_UNKNOWN`; confirmed-pending and UNKNOWN never redispatch delete.
 
 ## P7.C3 — COMPLETE / architect accepted
 
-Accepted lineage: `0654ee1cbd70d4d6a6d5a317e948d2f08b2c081f` -> `a549e6f1f295a37f14a7833ede0233d94745555a` -> `2a6c5d8f2ed0980c4c7bc32cec471002432e1c9d` -> `f76a32b2d18600fcf7ace6b9aa24067238d6dec7`.
+Accepted final implementation: `f76a32b2d18600fcf7ace6b9aa24067238d6dec7`; accepted tree `13eea89362694da594bb2b717c037980b0df446f`.
 
-Accepted implementation tree: `13eea89362694da594bb2b717c037980b0df446f`.
-
-Acceptance: `docs/evidence/p7c3/P7C3_ARCHITECT_ACCEPTANCE_2026-09-10.md`.
-
-C3 owns explicit persistent `CODEX_HOME` + distinct isolated state root, exact 0.144.6 per-child-generation authority, descriptor/no-follow protected-path authority, exact SQLite/log/history routing, exclusive profile reservation/quiescence and descriptor-bounded root lifecycle.
-
-## ADR-0044
-
-ADR-0044 freezes durable local containment and C4 cleanup semantics:
-
-`docs/adr/0044-durable-local-containment-and-p7c4-cleanup.md`.
-
-`DELETE_UNKNOWN` always retains `OFFICIAL_DELETE_AUTHORITY=UNKNOWN`; successful isolated local containment is a separate durable fact and never a tombstone or upstream reconciliation.
+C3 owns dedicated persistent `CODEX_HOME` + distinct isolated state root, exact per-generation 0.144.6 capability authority, descriptor/no-follow protected-path checks, exact SQLite/log/history routing, exclusive profile reservation/quiescence and manager-owned bounded root lifecycle.
 
 ## P7.C4 — COMPLETE / architect accepted
 
 Accepted lineage:
 
-- architect base: `7572df1e95e79f3292489b096e8b0a22789df1e5`;
-- initial candidate: `70cdf0edc3f319c0254313eabc5d3c56c2f9ef16`;
+- initial: `70cdf0edc3f319c0254313eabc5d3c56c2f9ef16`;
 - first repair: `fe646af1487d13571337e605641ecc86dbb1f6c7`;
-- second repair / accepted implementation: `df161566cab5f8fa7ccf70f94379c78a9fb02ffe`;
-- accepted implementation tree: `be2ea7a5eead9b2d61039a2d98ec4d2b80047526`.
+- final accepted: `df161566cab5f8fa7ccf70f94379c78a9fb02ffe`;
+- accepted tree: `be2ea7a5eead9b2d61039a2d98ec4d2b80047526`.
 
-Acceptance:
+Acceptance: `docs/evidence/p7c4/P7C4_ARCHITECT_ACCEPTANCE_2026-09-10.md`.
 
-`docs/evidence/p7c4/P7C4_ARCHITECT_ACCEPTANCE_2026-09-10.md`.
+C4 adds schema-v4 UNKNOWN containment metadata and composes the corrected local hard-delete lifecycle. Confirmed cleanup is `reserve -> shutdown -> quiesce -> isolated payload reset -> persistent exact-thread scan -> finalize -> release`. UNKNOWN remains official UNKNOWN, retains binding and no tombstone/finalizer, while isolated local containment may be recorded separately. Isolated reset is crash-resumable and the cleanup coordinator is bound to the actual protected controller SQLite.
 
-Accepted C4 authority includes:
+## P7.C5 — COMPLETE / architect accepted
 
-- additive schema-v4 `delete_storage_containment` metadata for UNKNOWN local containment;
-- historical v1/v2/v3 schema authorities unchanged;
-- exact `DELETE_UNKNOWN` state/version/binding retained after local containment;
-- confirmed cleanup order `reserve -> shutdown -> quiesce -> reset isolated payload -> sessions/history scan -> finalize -> release`;
-- local failures keep confirmed-pending/binding and process-local quarantine;
-- UNKNOWN containment never finalizes or creates a tombstone and retains quarantine;
-- persistent scanner is descriptor/no-follow, content-silent, finite, opened-FD-bound and excludes credentials/configuration;
-- isolated reset preserves the ownership marker and top-level `sqlite/`/`logs/` envelope while clearing all payload descendants, making mid-reset crash retryable;
-- C4 coordinator proves its actual controller `SqliteStorage` matches the protected `controller_db_path` before destructive local work;
-- post-commit finalizer truth cannot regress to pending;
-- recovery outcomes are distinct and all pre-existing delete recovery is local-only/no-retry.
+Accepted corrected proof lineage:
 
-Final executor report: `1050` tests, `0` skipped, `0` failures, `0` errors; all real Codex/Telegram/credential/production-effect counters zero.
+- corrected architect base: `44dcb874659940998734fdfe76fb8683250be05d`;
+- proof candidate: `d963a4982382d28a90ed18ac9d6384ba424f7dc0`;
+- architect proof-review correction: `29448176312d47a51b7b321a6268398eff724c4a`;
+- final accepted proof repair: `946ddf7ac6f7c3539bc3f344c6edf21d6ffce528`;
+- accepted tree: `c4d5310a2afb05fc4f2f92eea822a1ccc7a8c88c`.
+
+Acceptance: `docs/evidence/p7c5/P7C5_ARCHITECT_ACCEPTANCE_2026-09-10.md`.
+
+Historical stopped C5 proof `581a31e9a450230eed50bad6c247159898d72f7f` remains evidence of a corrected architect-contract mistake, not a production C4 defect.
+
+C5 proves the complete fake hard-delete acceptance across accepted C2/C3/C4: production exact-thread gate, independent test-only marker oracle, full isolated state/log family cleanup, persistent residual blockers, UNKNOWN containment, both isolated-subtree crash/retry paths, concurrency/cancellation, no-P1 replay, actual controller DB identity/schema authority and unrelated session/history baseline preservation.
+
+Final executor evidence: dedicated C5 tests `15`; focused `248`; ordinary full regression `1065`; zero skipped/failures/errors. Production source changed: no. All real Codex/Telegram/credential/production-effect counters: zero.
+
+Dynamic mount/namespace mutation was intentionally not run; the bounded risk is carried to C6/P13.
 
 ## Current slice
 
-**P7.C5 — NEXT / FAKE HARD-DELETE ACCEPTANCE CONTRACT FROZEN.**
+**P7.C6 — NEXT / REAL-EFFECT ONE-SHOT CONTRACT FROZEN.**
 
-Frozen contract:
+Contract:
 
-`docs/evidence/p7c5/P7C5_ARCHITECT_EXECUTION_CONTRACT_2026-09-10.md`.
+`docs/evidence/p7c6/P7C6_ARCHITECT_EXECUTION_CONTRACT_2026-09-10.md`.
 
-C5 is proof-only. Normal C5 work changes tests/evidence only and independently exercises the complete accepted C2/C3/C4 architecture: full synthetic marker/path-family storage coverage, confirmed/UNKNOWN outcomes, crash/restart at all relevant local boundaries, unrelated-baseline preservation, controller DB preservation, duplicate/concurrency/cancellation behavior, no-P1 replay and path/alias hardening. A production defect discovered by C5 is a STOP requiring a separately reviewed repair, not an inline C5 production edit.
+C6 is the first separately authorized real Codex run after the correction lane. It may create exactly one new disposable thread, run the bounded real T3 persistence/approval/interrupt proof, and dispatch exactly one official P1.9 `thread/delete` through the complete corrected application cleanup path.
 
-No real Codex thread/delete is authorized in C5.
+C6 must use an explicitly designated already-authenticated **CodexControl-dedicated** persistent `CODEX_HOME`; historical `codex1/codex2/codex3` names are not automatically eligible. A fresh run-owned isolated state root and separate synthetic controller DB are mandatory. If no explicit dedicated profile authority exists, stop before authenticated business RPC with `P7C6_PROFILE_AUTHORITY_REQUIRED`; never copy/symlink/migrate credentials or fall back to a shared home.
 
-## Remaining correction lane
+Before real business RPC, C6 must also perform a read-only mount/alias preflight. Any unresolved bind-mount/namespace ambiguity stops the run; no privileged mount mutation is authorized.
 
-After P7.C5 architect acceptance only:
+PASS requires exact real `DELETE_CONFIRMED`, complete `DELETE_CONFIRMED_PENDING_STORAGE` local cleanup to `DELETED`, zero exact target thread residual, zero known synthetic marker residual across measured dialogue-bearing persistent/isolated families, preserved unrelated baseline and green ordinary regression.
 
-1. **P7.C6** — separately authorized renewed isolated real T3 + one-delete hard-delete acceptance.
+Any `DELETE_UNKNOWN`, persistent residual, local confirmed-pending failure, profile-authority failure, mount-alias uncertainty, production defect or inconclusive physical proof keeps P8/P9 blocked. No real C6 run is automatically retried.
 
-P8 and P9 remain blocked until P7.C6 is independently architect accepted.
+## Remaining lane
+
+After independent architect acceptance of P7.C6 only:
+
+- P8 deployment packaging/rollback reopens;
+- P9 server-80 live Telegram acceptance reopens.
 
 ## Current non-goals
 
-Do not run another real P7 thread/delete in C5. Do not mutate retained rejected P7 evidence. Do not manually delete persistent sessions/history to manufacture a pass. Do not copy/migrate credentials. Do not start P7.C6/P8/P9 inside C5.
+Do not touch the historical rejected P7 thread. Do not use a shared/interactively owned Codex home. Do not copy credentials. Do not call `thread/read`/`thread/list`. Do not retry an ambiguous delete. Do not manually delete persistent session/history to manufacture a pass. Do not start P8/P9 before C6 acceptance.
