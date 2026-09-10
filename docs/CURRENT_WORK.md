@@ -36,13 +36,7 @@ Architect review: `docs/evidence/p7c6/P7C6_RUN1_ARCHITECT_REVIEW_2026-09-10.md`.
 
 Run 1 used `/root/.codex_second` in `SHARED_AUTHENTICATED` mode. It performed one real `model/list`, one new disposable thread, one runtime-generation resume and three turns. Turn 1/2 proved bounded persistence. Turn 3 reached one approval request and the harness stopped at `P7C6_APPROVAL_NOT_EXACTLY_ALLOWED`. No P1.8 interrupt, official delete, thread/read or thread/list occurred.
 
-Independent review established acceptance-harness defects, not production defects:
-
-1. Run-1 `_ExactApprovalOperator` used literal guessed command strings instead of the already-proven structural `EXACT_INNER|ONE_SHELL_WRAPPER` relation and did not enforce exact turn/cwd identity.
-2. The declared host-level Run-1 one-shot ledger was checked but never materialized by the harness.
-3. The Run-1 failure-path recovery ledger retained the raw target thread ID but did not retain the generated synthetic marker plaintext required for a later all-marker erasure oracle.
-
-The Run-1 approval result remains `RESPONSE_UNKNOWN`; the old request must never be answered/retried/reinterpreted.
+Independent review established acceptance-harness defects, not production defects: the Run-1 approval matcher was literal/under-bound; the declared host-level one-shot latch was not created by the Run-1 harness; and failure-path recovery did not retain the synthetic marker plaintext needed for the later all-marker erasure oracle. The old Turn-3 approval result remains `RESPONSE_UNKNOWN` and must never be answered/retried/reinterpreted.
 
 `P7C6_PRODUCTION_DEFECT_ESTABLISHED=NO`.
 
@@ -58,40 +52,53 @@ Architect review: `docs/evidence/p7c6/P7C6_RETAINED_TURN3_ARCHITECT_REVIEW_2026-
 
 The zero-real-effect forensic proves exact Run-1 Turn 3 is durably terminal `INTERRUPTED`, its single command item is `COMPLETED`, no persisted approval request/decision/response remains, no run-owned delayed process/sentinel remains, and scan/parse errors are zero. The persisted Turn-3 command is outside the historical safe approval grammar (`OTHER/TOKEN_MISMATCH`), so the old approval can never be retroactively accepted. The retained thread is a safe candidate for a new same-thread turn after harness preparation.
 
-## P7.C6 same-thread continuation preparation — BLOCKED AT EXISTING RUN-1 LATCH
+## P7.C6 existing Run-1 latch — COMPLETE / architect accepted
 
-Preparation contract:
+Accepted forensic commit: `c308c765d9915844fce97d1d1f6c933e302a75aa`.
+
+Forensic evidence: `docs/evidence/p7c6/P7C6_RUN1_EXISTING_LATCH_FORENSIC_EVIDENCE_2026-09-10.md`.
+
+Architect acceptance: `docs/evidence/p7c6/P7C6_RUN1_EXISTING_LATCH_ARCHITECT_ACCEPTANCE_2026-09-10.md`.
+
+The existing `/root/.codexcontrol/p7c6-real-one-shot-ledger.json` is accepted as the safe Run-1 consumed replay barrier. The forensic proved parent/file authority, mode `0600`, single link, stable identity, bounded non-empty UTF-8 JSON, exact Run-1 architect-base match, exact retained-thread SHA-256 match, `CONSUMED_OR_NO_RERUN` status semantics, zero secret-risk classes and static proof that the rejected Run-1 harness is blocked by the file.
+
+Accepted latch SHA-256:
+
+`50616410354022747284c1ce61bd02b8ecd1eb2636657eac502092fde800d55e`.
+
+The absence of later Run-1 evidence/Turn-3 forensic commit values from this pre-existing latch is expected and does not weaken its replay-barrier role.
+
+`RUN1_GLOBAL_ONE_SHOT_LATCH=ACCEPTED_EXISTING_SAFE`.
+
+The file must not be overwritten, replaced or normalized merely to match a later representation.
+
+## Current slice — P7.C6 same-thread continuation preparation
+
+Status: **NEXT / ZERO-REAL-EFFECT / RESUME AFTER ACCEPTED LATCH / REAL CONTINUATION NOT AUTHORIZED**.
+
+Frozen preparation contract remains:
 
 `docs/evidence/p7c6/P7C6_SAME_THREAD_CONTINUATION_PREP_CONTRACT_2026-09-10.md`.
 
-The zero-effect preparation started from its exact architect base and stopped before any repository or Codex effect because `/root/.codexcontrol/p7c6-real-one-shot-ledger.json` already exists. Filesystem ownership/mode were safe, but its bytes did not match the newly prescribed latch representation. Overwrite is forbidden.
+The obsolete step that attempted to create/replace the Run-1 global latch is skipped. Preparation must first re-verify the existing latch read-only for safe authority and exact accepted SHA-256, then continue with all remaining zero-effect requirements:
 
-This stop does not establish that the existing latch is wrong. The rejected Run-1 harness itself blocks replay whenever this file exists and is non-empty; therefore exact JSON byte/field equality with the later prep format is stronger than the historical replay-barrier requirement. Conversely, a safe-looking file at the path must not be silently adopted as CodexControl authority without classification.
+- recover exactly one `C6_RESPONSE_*`, one `C6_MEMORY_*` and one `C6_INTERRUPT_*` marker from the exact retained target artifact and store plaintext only in a root-owned `0600` recovery supplement outside Git;
+- validate reuse of the retained isolated state root/controller path without cleaning it;
+- create a new gated same-thread continuation harness while preserving the rejected Run-1 harness unchanged;
+- implement/test the strict structural approval matcher with exact thread/new-turn/cwd/marker/sentinel relation and `EXACT_INNER|ONE_SHELL_WRAPPER` grammar;
+- implement/test a distinct continuation one-shot latch without consuming it during preparation;
+- prove the continuation harness has no new-thread path;
+- encode but do not execute the future retained-thread continuation and the still-unused cumulative single official delete path;
+- run only gate-disabled/offline/fake regression and publish sanitized preparation evidence.
 
-## Current slice — Run-1 existing-latch forensic
+`P7C6_SAME_THREAD_CONTINUATION_PREP_AUTHORIZED=YES`.
 
-Status: **NEXT / ZERO-REAL-EFFECT / READ-ONLY**.
+`P7C6_REAL_CONTINUATION_AUTHORIZED=NO`.
 
-Frozen contract:
-
-`docs/evidence/p7c6/P7C6_RUN1_EXISTING_LATCH_FORENSIC_CONTRACT_2026-09-10.md`.
-
-The forensic may only read and classify the existing latch with bounded no-follow checks. It must not overwrite, rename, delete or otherwise mutate it, and must perform zero Codex/app-server/business RPC effects.
-
-It must establish filesystem identity/safety, bounded content SHA/representation class, safe key/value classes without exposing unknown values, whether known Run-1 authorities are referenced, secret-risk counters, and whether the published Run-1 harness is definitely blocked by the existing non-empty latch.
-
-Possible classifications are `SAFE_REPLAY_BARRIER_CANDIDATE`, `SAFE_BUT_SEMANTICALLY_UNKNOWN`, or `UNSAFE_OR_AMBIGUOUS`.
-
-Current authority:
-
-`P7C6_SAME_THREAD_PREP_CONTINUATION_AUTHORIZED=NO`
-
-`P7C6_REAL_CONTINUATION_AUTHORIZED=NO`
-
-No real `thread/resume`, new turn, approval response, interrupt or delete may occur until the latch forensic receives independent architect review and the continuation preparation itself is later completed and accepted.
+No real `model/list`, `thread/resume`, new turn, approval response, interrupt or delete may occur until the preparation commit receives independent architect review.
 
 ## Remaining lane
 
-If the existing latch is architect-accepted as a safe Run-1 replay barrier, continuation preparation may resume from the next zero-effect gate without overwriting it. Preparation must still recover the three Run-1 markers, validate retained topology, build/test the structural approval matcher, implement the separate continuation latch and materialize a new gated same-thread harness. Only after that preparation is independently accepted may any real same-thread continuation be considered.
+Only after preparation is architect-accepted may a separately frozen one-shot same-thread real continuation be authorized. It may not create a new real thread and may never answer the Run-1 Turn-3 approval request.
 
 P8 and P9 remain blocked until P7.C6 is independently accepted.
