@@ -42,13 +42,9 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [REJECTED / HISTORICAL BLOCKER] **Original P7 under ADR-0042.** Exactly one official P1.9 `thread/delete` returned terminal `DELETE_UNKNOWN`; forensic commit `5aac49bd1b8a349343db52071520beed7f95592d` proved material residual. No retry/read/list/manual repair occurred. Historical thread never reused.
 
 - [DONE] **P7.C1 — storage-isolation discovery.** Accepted `a9900471d0599be21b1a1834301c4421d95acb29`.
-
 - [DONE] **P7.C2 — schema-v3 confirmed-delete storage barrier.** Accepted `80673db644962b0cc5b1a388d64cb5902bd4f46c`.
-
 - [DONE] **P7.C3 — configured persistent profile + isolated state-root runtime authority.** Accepted `f76a32b2d18600fcf7ace6b9aa24067238d6dec7`, tree `13eea89362694da594bb2b717c037980b0df446f`.
-
 - [DONE] **P7.C4 — confirmed cleanup + DELETE_UNKNOWN local containment.** Accepted `df161566cab5f8fa7ccf70f94379c78a9fb02ffe`, tree `be2ea7a5eead9b2d61039a2d98ec4d2b80047526`.
-
 - [DONE] **P7.C5 — corrected fake hard-delete acceptance.** Accepted `946ddf7ac6f7c3539bc3f344c6edf21d6ffce528`, tree `c4d5310a2afb05fc4f2f92eea822a1ccc7a8c88c`; full regression 1065, zero failures/errors.
 
 - [ACCEPTED CORRECTION] **ADR-0045 — shared persistent CODEX_HOME.** Existing authenticated persistent `CODEX_HOME` may be concurrently shared. CodexControl owns only its own app-server child/generation, isolated state root, controller SQLite and process-local reservation; unrelated shared-home processes are not stopped.
@@ -59,13 +55,17 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 
 - [DONE / ZERO-REAL-EFFECT FORENSIC] **P7.C6 retained Turn-3 forensic.** Accepted commit `e6835e7eaff21ce6a452c24f3309269df67c82ba`. Exact Turn 3 is durably terminal `INTERRUPTED`; one command item is `COMPLETED`; no persisted approval request/decision/response remains; no delayed process or sentinel remains; zero scan/parse errors. The persisted command is outside the historical safe approval grammar (`OTHER/TOKEN_MISMATCH`), so the old approval can never be retroactively accepted. The retained thread is a safe candidate for a new same-thread turn after harness preparation.
 
-- [NEXT / ZERO-REAL-EFFECT] **P7.C6 same-thread continuation preparation.** Contract: `docs/evidence/p7c6/P7C6_SAME_THREAD_CONTINUATION_PREP_CONTRACT_2026-09-10.md`.
+- [BLOCKED AT LATCH GATE / ZERO REAL EFFECT] **P7.C6 same-thread continuation preparation.** Base preparation contract: `docs/evidence/p7c6/P7C6_SAME_THREAD_CONTINUATION_PREP_CONTRACT_2026-09-10.md`.
 
-  Preparation must not perform any Codex business RPC. It closes the Run-1 latch hole, reconstructs exactly the three Run-1 synthetic marker values from the exact retained target artifact into a root-only recovery supplement, validates the retained isolated/controller topology, implements and tests the historical structural approval relation, implements/tests a separate continuation one-shot latch, and materializes a gated same-thread continuation harness.
+  Preparation correctly stopped because `/root/.codexcontrol/p7c6-real-one-shot-ledger.json` already exists and must not be overwritten. Filesystem ownership/mode were safe, but its representation did not match the newly prescribed latch format. No harness/evidence change and no real effect occurred.
 
-  The prepared future continuation contains no new-thread path. If later independently authorized, it may add at most one retained-thread resume, two new turns, one new distinct approval response for the new approval-proof turn, one P1.8 interrupt for the interrupt-proof turn, and the still-unused cumulative single official `thread/delete` through the corrected application path.
+- [NEXT / ZERO-REAL-EFFECT] **P7.C6 existing Run-1 latch forensic.** Contract: `docs/evidence/p7c6/P7C6_RUN1_EXISTING_LATCH_FORENSIC_CONTRACT_2026-09-10.md`.
 
-  `P7C6_REAL_CONTINUATION_AUTHORIZED=NO` until independent architect review of the preparation commit.
+  This read-only forensic determines whether the existing non-empty root-owned latch is a safe Run-1 replay barrier candidate despite using an older/different representation. It may read only bounded latch metadata/content for classification, may not expose unknown raw values, and may not overwrite/delete/rename the file. It must also prove statically that the rejected Run-1 harness is blocked by the existing non-empty latch.
+
+  `P7C6_SAME_THREAD_PREP_CONTINUATION_AUTHORIZED=NO` until architect review of this forensic.
+
+  If accepted as an equivalent safe Run-1 replay barrier, preparation may resume **after** the latch gate without overwriting it. It must still recover Run-1 markers, validate retained topology, build/test the structural approval matcher and separate continuation latch, and materialize a new gated same-thread harness. Real continuation remains separately gated.
 
 ## P8 — Deployment packaging/rollback
 [BLOCKED BY P7.C6] Reopens only after architect-accepted C6.
