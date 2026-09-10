@@ -1,14 +1,17 @@
 import asyncio
 import hashlib
 import os
+import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from codex_control.adapters.codex import IsolationPathAuthority, IsolatedStateRoot
 from codex_control.adapters.codex.thread_lifecycle import (
     ThreadOperationResult,
     ThreadOperationStatus,
 )
+import codex_control.adapters.codex.persistent_scanner as scanner_module
 from codex_control.adapters.codex.persistent_scanner import PersistentProfileResidualScanner
 from codex_control.adapters.codex.runtime import CodexRuntimeManager
 from codex_control.application import (
@@ -17,18 +20,22 @@ from codex_control.application import (
     DialogueDeleteRequest,
     DialogueDeleteService,
     DialogueDeleteStatus,
+    DialogueRecoveryError,
     DialogueRecoveryService,
     DialogueRecoveryStatus,
 )
 from codex_control.domain import CodexProfile
 from codex_control.storage import (
     DeleteStorageContainmentRepository,
+    DeletionFinalizeResult,
+    DeletionTombstoneRecord,
     DeletionRepository,
     DialogueRepository,
     DialogueState,
     RepositoryErrorCategory,
     SqliteStorage,
 )
+from codex_control.storage.errors import StorageErrorCategory
 
 
 class _ConfirmedDelete:
@@ -49,6 +56,11 @@ class _AmbiguousDelete:
         raise RuntimeError("synthetic ambiguous transport")
 
 
+class _FailingScanner:
+    def scan(self, profile, thread_id):
+        return scanner_module.PersistentProfileScanResult(0, 0, 0, 1)
+
+
 class P7C4DeleteContainmentTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -58,6 +70,7 @@ class P7C4DeleteContainmentTests(unittest.IsolatedAsyncioTestCase):
         self.state_root = os.path.join(self.parent, "isolated")
         self.repository = os.path.join(base, "repository")
         self.controller = os.path.join(base, "controller.sqlite3")
+        self.database = os.path.join(base, "control.sqlite3")
         for path in (self.home, self.parent, self.repository):
             os.mkdir(path, 0o700)
         with open(self.controller, "wb"):
@@ -74,7 +87,7 @@ class P7C4DeleteContainmentTests(unittest.IsolatedAsyncioTestCase):
             isolation_authority=self.authority,
         )
         self.storage = await SqliteStorage.open(
-            os.path.join(base, "control.sqlite3"), now_ms=lambda: 1
+            self.database, now_ms=lambda: 1
         )
 
     async def asyncTearDown(self):
@@ -189,6 +202,319 @@ class P7C4DeleteContainmentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(DeleteStorageCleanupStatus.CONFIRMED_FINALIZED, result.status)
         self.assertIsNone(await DialogueRepository(self.storage).get_live())
         self.assertIsNotNone(await DeletionRepository(self.storage).get_tombstone("d"))
+
+    async def test_recovery_outcome_statuses_are_distinct_and_truthful(self):
+        self.assertIsNot(
+            DialogueRecoveryStatus.DELETE_FINALIZED_AFTER_STORAGE,
+            DialogueRecoveryStatus.DELETE_CONFIRMED_STORAGE_PENDING,
+        )
+        self.assertIsNot(
+            DialogueRecoveryStatus.DELETE_UNKNOWN_CONTAINED,
+            DialogueRecoveryStatus.DELETE_UNKNOWN_CONTAINMENT_PENDING,
+        )
+        self.assertEqual("DELETE_FINALIZED_AFTER_STORAGE", DialogueRecoveryStatus.DELETE_FINALIZED_AFTER_STORAGE.value)
+        self.assertEqual("DELETE_UNKNOWN_CONTAINED", DialogueRecoveryStatus.DELETE_UNKNOWN_CONTAINED.value)
+        self.assertEqual("DELETE_UNKNOWN_CONTAINMENT_PENDING", DialogueRecoveryStatus.DELETE_UNKNOWN_CONTAINMENT_PENDING.value)
+
+        pending = await self._seed(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE)
+        finalized = await DialogueRecoveryService(
+            self.storage, now_ms=lambda: 20,
+            local_cleanup=DeleteStorageCleanupCoordinator(self.storage, self.manager, now_ms=lambda: 20),
+        ).recover_startup()
+        self.assertEqual("DELETE_FINALIZED_AFTER_STORAGE", finalized.status.value)
+        self.assertIsNone(finalized.dialogue)
+
+        unknown = await self._seed(DialogueState.DELETE_UNKNOWN, "unknown-status")
+        contained = await DialogueRecoveryService(
+            self.storage, now_ms=lambda: 20,
+            local_cleanup=DeleteStorageCleanupCoordinator(self.storage, self.manager, now_ms=lambda: 20),
+        ).recover_startup()
+        self.assertEqual("DELETE_UNKNOWN_CONTAINED", contained.status.value)
+        self.assertEqual(DialogueState.DELETE_UNKNOWN, contained.dialogue.state)
+
+        def remove_containment(connection):
+            connection.execute(
+                "DELETE FROM delete_storage_containment WHERE dialogue_id = ?", (unknown.dialogue_id,)
+            )
+        await self.storage.write(remove_containment)
+        failing = DeleteStorageCleanupCoordinator(
+            self.storage, self.manager, scanner=_FailingScanner(), now_ms=lambda: 20
+        )
+        pending_unknown = await DialogueRecoveryService(
+            self.storage, now_ms=lambda: 20, local_cleanup=failing
+        ).recover_startup()
+        self.assertEqual("DELETE_UNKNOWN_CONTAINMENT_PENDING", pending_unknown.status.value)
+        self.assertEqual(DialogueState.DELETE_UNKNOWN, pending_unknown.dialogue.state)
+
+    async def test_committed_finalizer_never_regresses_when_old_verification_seam_fails(self):
+        pending = await self._seed(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE)
+        original = DeletionRepository.finalize_confirmed
+
+        async def commit_then_fail(repository, **kwargs):
+            result = await original(repository, **kwargs)
+            self.assertIs(type(result), DeletionFinalizeResult)
+            raise RuntimeError("old post-finalizer verification seam")
+
+        coordinator = DeleteStorageCleanupCoordinator(self.storage, self.manager, now_ms=lambda: 20)
+        with patch.object(DeletionRepository, "finalize_confirmed", new=commit_then_fail):
+            result = await coordinator.cleanup_confirmed(
+                dialogue_id="d", expected_dialogue_version=pending.version
+            )
+        self.assertEqual(DeleteStorageCleanupStatus.CONFIRMED_FINALIZED, result.status)
+        self.assertIsNone(result.dialogue)
+        self.assertIsNotNone(result.tombstone)
+        self.assertIsNone(await DialogueRepository(self.storage).get_live())
+        self.assertIsNotNone(await DeletionRepository(self.storage).get_tombstone("d"))
+
+    async def test_post_commit_reservation_release_failure_is_truthful_and_not_retried(self):
+        pending = await self._seed(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE)
+        coordinator = DeleteStorageCleanupCoordinator(self.storage, self.manager, now_ms=lambda: 20)
+        calls = []
+
+        async def fail_release(reservation):
+            calls.append(1)
+            raise RuntimeError("release failure")
+
+        with patch.object(self.manager, "release", new=fail_release):
+            result = await coordinator.cleanup_confirmed(
+                dialogue_id="d", expected_dialogue_version=pending.version
+            )
+        self.assertEqual(DeleteStorageCleanupStatus.CONFIRMED_FINALIZED, result.status)
+        self.assertEqual("RESERVATION_RELEASE_FAILED", result.reason.value)
+        self.assertEqual(1, len(calls))
+        self.assertIn("profile", coordinator._reservations)
+        self.assertIsNone(await DialogueRepository(self.storage).get_live())
+
+    async def test_stale_and_mismatched_replay_tombstones_fail_closed(self):
+        pending = await self._seed(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE)
+        coordinator = DeleteStorageCleanupCoordinator(self.storage, self.manager, now_ms=lambda: 20)
+        first = await coordinator.cleanup_confirmed(
+            dialogue_id="d", expected_dialogue_version=pending.version
+        )
+        self.assertEqual(DeleteStorageCleanupStatus.CONFIRMED_FINALIZED, first.status)
+        stale = await coordinator.cleanup_confirmed(
+            dialogue_id="d", expected_dialogue_version=pending.version + 1
+        )
+        self.assertEqual(DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE, stale.status)
+
+        pending = await self._seed(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE, "d2")
+        original = DeletionRepository.finalize_confirmed
+
+        async def commit_corrupt_then_fail(repository, **kwargs):
+            result = await original(repository, **kwargs)
+            def corrupt_tombstone(connection):
+                connection.execute(
+                    "UPDATE deletion_tombstones SET thread_identity_sha256 = ? WHERE dialogue_id = ?",
+                    (hashlib.sha256(b"other-thread").hexdigest(), "d2"),
+                )
+            await self.storage.write(corrupt_tombstone)
+            raise RuntimeError("concurrent mismatched tombstone")
+
+        with patch.object(DeletionRepository, "finalize_confirmed", new=commit_corrupt_then_fail):
+            replay = await DeleteStorageCleanupCoordinator(
+                self.storage, self.manager, now_ms=lambda: 20
+            ).cleanup_confirmed(
+                dialogue_id="d2", expected_dialogue_version=pending.version
+            )
+        self.assertEqual(DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE, replay.status)
+
+    async def test_regular_file_substitution_after_stat_is_rejected_before_read(self):
+        os.mkdir(os.path.join(self.home, "sessions"), 0o700)
+        victim = os.path.join(self.home, "sessions", "victim")
+        replacement = os.path.join(self.home, "replacement")
+        with open(victim, "wb") as handle:
+            handle.write(b"safe")
+        with open(replacement, "wb") as handle:
+            handle.write(b"thread-c4")
+        reads = []
+        original_open = os.open
+        original_read = os.read
+        replaced = False
+
+        def substitute_open(name, flags, *args, **kwargs):
+            nonlocal replaced
+            if name == "victim" and not replaced:
+                replaced = True
+                os.replace(replacement, victim)
+            return original_open(name, flags, *args, **kwargs)
+
+        def observe_read(fd, size):
+            reads.append(fd)
+            return original_read(fd, size)
+
+        with patch.object(scanner_module.os, "open", side_effect=substitute_open), \
+                patch.object(scanner_module.os, "read", side_effect=observe_read):
+            result = self._scanner().scan(self.profile, "thread-c4")
+        self.assertGreater(result.scan_errors, 0)
+        self.assertEqual(0, result.match_count)
+        self.assertEqual([], reads)
+
+    async def test_v4_containment_tombstone_collision_is_rejected_at_open(self):
+        unknown = await self._seed(DialogueState.DELETE_UNKNOWN)
+        await DeleteStorageContainmentRepository(self.storage, now_ms=lambda: 20).mark_unknown_contained(
+            dialogue_id=unknown.dialogue_id, expected_dialogue_version=unknown.version
+        )
+        await self.storage.close()
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "INSERT INTO deletion_tombstones "
+                "(dialogue_id, thread_identity_sha256, stale_generation, deleted_at_ms, expires_at_ms) "
+                "VALUES (?, ?, ?, ?, ?)",
+                ("d", hashlib.sha256(b"thread-c4").hexdigest(), unknown.version, 20, 21),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(Exception) as raised:
+            await SqliteStorage.open(self.database, now_ms=lambda: 1)
+        self.assertEqual(StorageErrorCategory.SCHEMA_INVALID, raised.exception.category)
+
+    async def test_v4_containment_active_job_collision_is_rejected_at_open(self):
+        unknown = await self._seed(DialogueState.DELETE_UNKNOWN)
+        await DeleteStorageContainmentRepository(self.storage, now_ms=lambda: 20).mark_unknown_contained(
+            dialogue_id=unknown.dialogue_id, expected_dialogue_version=unknown.version
+        )
+        await self.storage.close()
+        connection = sqlite3.connect(self.database)
+        try:
+            connection.execute(
+                "INSERT INTO turn_jobs "
+                "(job_id, telegram_update_id, source_chat_id, source_message_id, dialogue_id, "
+                "server_id, profile_id, thread_id, model_id, reasoning_effort, input_sha256, "
+                "codex_turn_id, state, version, created_at_ms, updated_at_ms, error_class) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'RECEIVED', 0, 1, 1, NULL)",
+                ("job", 99, 1, 1, "d", "s", "profile", "thread-c4", "model", "low", "0" * 64),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(Exception) as raised:
+            await SqliteStorage.open(self.database, now_ms=lambda: 1)
+        self.assertEqual(StorageErrorCategory.SCHEMA_INVALID, raised.exception.category)
+
+    async def test_application_recovery_rejects_forged_containment_active_job(self):
+        unknown = await self._seed(DialogueState.DELETE_UNKNOWN)
+        await DeleteStorageContainmentRepository(self.storage, now_ms=lambda: 20).mark_unknown_contained(
+            dialogue_id=unknown.dialogue_id, expected_dialogue_version=unknown.version
+        )
+
+        def insert_active_job(connection):
+            connection.execute(
+                "INSERT INTO turn_jobs "
+                "(job_id, telegram_update_id, source_chat_id, source_message_id, dialogue_id, "
+                "server_id, profile_id, thread_id, model_id, reasoning_effort, input_sha256, "
+                "codex_turn_id, state, version, created_at_ms, updated_at_ms, error_class) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'RECEIVED', 0, 1, 1, NULL)",
+                ("job", 99, 1, 1, "d", "s", "profile", "thread-c4", "model", "low", "0" * 64),
+            )
+        await self.storage.write(insert_active_job)
+        with self.assertRaises(DialogueRecoveryError) as raised:
+            await DialogueRecoveryService(self.storage, now_ms=lambda: 20).recover_startup()
+        self.assertEqual("INVARIANT", raised.exception.category.value)
+
+    async def test_two_concurrent_confirmed_calls_have_one_local_commit_and_release(self):
+        pending = await self._seed(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE)
+        coordinator = DeleteStorageCleanupCoordinator(self.storage, self.manager, now_ms=lambda: 20)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        root_calls = []
+        finalize_calls = []
+        release_calls = []
+        original_recreate = self.manager.recreate_isolated_state_root
+        original_finalize = DeletionRepository.finalize_confirmed
+        original_release = self.manager.release
+
+        async def recreate(reservation):
+            root_calls.append(1)
+            entered.set()
+            await release.wait()
+            await original_recreate(reservation)
+
+        async def finalize(repository, **kwargs):
+            finalize_calls.append(1)
+            return await original_finalize(repository, **kwargs)
+
+        async def release_reservation(reservation):
+            release_calls.append(1)
+            return await original_release(reservation)
+
+        with patch.object(self.manager, "recreate_isolated_state_root", new=recreate), \
+                patch.object(self.manager, "release", new=release_reservation), \
+                patch.object(DeletionRepository, "finalize_confirmed", new=finalize):
+            first = asyncio.create_task(coordinator.cleanup_confirmed(
+                dialogue_id="d", expected_dialogue_version=pending.version
+            ))
+            second = asyncio.create_task(coordinator.cleanup_confirmed(
+                dialogue_id="d", expected_dialogue_version=pending.version
+            ))
+            await entered.wait()
+            release.set()
+            results = await asyncio.gather(first, second)
+        self.assertEqual([1], root_calls)
+        self.assertEqual([1], finalize_calls)
+        self.assertEqual([1], release_calls)
+        self.assertTrue(all(result.status is DeleteStorageCleanupStatus.CONFIRMED_FINALIZED for result in results))
+
+    async def test_two_concurrent_unknown_calls_have_one_containment_and_keep_quarantine(self):
+        unknown = await self._seed(DialogueState.DELETE_UNKNOWN)
+        coordinator = DeleteStorageCleanupCoordinator(self.storage, self.manager, now_ms=lambda: 20)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        root_calls = []
+        insert_calls = []
+        original_recreate = self.manager.recreate_isolated_state_root
+        original_insert = DeleteStorageContainmentRepository.mark_unknown_contained
+
+        async def recreate(reservation):
+            root_calls.append(1)
+            entered.set()
+            await release.wait()
+            await original_recreate(reservation)
+
+        async def insert(repository, **kwargs):
+            insert_calls.append(1)
+            return await original_insert(repository, **kwargs)
+
+        with patch.object(self.manager, "recreate_isolated_state_root", new=recreate), \
+                patch.object(DeleteStorageContainmentRepository, "mark_unknown_contained", new=insert):
+            first = asyncio.create_task(coordinator.contain_unknown(
+                dialogue_id="d", expected_dialogue_version=unknown.version
+            ))
+            second = asyncio.create_task(coordinator.contain_unknown(
+                dialogue_id="d", expected_dialogue_version=unknown.version
+            ))
+            await entered.wait()
+            release.set()
+            results = await asyncio.gather(first, second)
+        self.assertEqual([1], root_calls)
+        self.assertEqual([1], insert_calls)
+        self.assertTrue(all(result.status is DeleteStorageCleanupStatus.UNKNOWN_CONTAINED for result in results))
+        self.assertIn("profile", coordinator._reservations)
+
+    async def test_caller_cancellation_after_ownership_keeps_unknown_quarantine(self):
+        unknown = await self._seed(DialogueState.DELETE_UNKNOWN)
+        coordinator = DeleteStorageCleanupCoordinator(self.storage, self.manager, now_ms=lambda: 20)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_recreate = self.manager.recreate_isolated_state_root
+
+        async def recreate(reservation):
+            entered.set()
+            await release.wait()
+            await original_recreate(reservation)
+
+        with patch.object(self.manager, "recreate_isolated_state_root", new=recreate):
+            caller = asyncio.create_task(coordinator.contain_unknown(
+                dialogue_id="d", expected_dialogue_version=unknown.version
+            ))
+            await entered.wait()
+            caller.cancel()
+            await asyncio.sleep(0)
+            release.set()
+            result = await caller
+        self.assertEqual(DeleteStorageCleanupStatus.UNKNOWN_CONTAINED, result.status)
+        self.assertIn("profile", coordinator._reservations)
 
     async def test_confirmed_persistent_residual_blocks_finalizer_and_holds_quarantine(self):
         pending = await self._seed(DialogueState.DELETE_CONFIRMED_PENDING_STORAGE)

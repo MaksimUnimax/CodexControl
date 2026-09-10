@@ -94,6 +94,12 @@ def _validate_attached_containment(connection: Any, dialogue_id: str, dialogue: 
         or record.thread_identity_sha256 != hashlib.sha256(dialogue.thread_id.encode("utf-8")).hexdigest()
     ):
         raise _invariant()
+    if connection.execute(
+        "SELECT 1 FROM turn_jobs WHERE dialogue_id = ? AND state IN "
+        "('RECEIVED','CLAIMED','CODEX_STARTING','CODEX_RUNNING') LIMIT 1",
+        (dialogue_id,),
+    ).fetchone() is not None:
+        raise _invariant()
     return record
 
 

@@ -20,6 +20,7 @@ from codex_control.storage import (
     DeleteStorageContainmentRepository,
     DeletionFinalizeResult,
     DeletionRepository,
+    DeletionTombstoneRecord,
     DialogueRecord,
     DialogueRepository,
     DialogueState,
@@ -46,6 +47,7 @@ class DeleteStorageCleanupReason(StrEnum):
     LIMIT_EXCEEDED = "LIMIT_EXCEEDED"
     FINALIZE_FAILED = "FINALIZE_FAILED"
     CONTAINMENT_FAILED = "CONTAINMENT_FAILED"
+    RESERVATION_RELEASE_FAILED = "RESERVATION_RELEASE_FAILED"
 
 
 @dataclass(frozen=True, repr=False)
@@ -239,8 +241,14 @@ class DeleteStorageCleanupCoordinator:
         try:
             dialogue = await self._load_dialogue(dialogue_id, expected_version, DialogueState.DELETE_CONFIRMED_PENDING_STORAGE)
             if dialogue is None:
+                live = await DialogueRepository(self._storage).get_live()
+                if live is not None:
+                    return DeleteStorageCleanupResult(
+                        DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE,
+                        live, reason=DeleteStorageCleanupReason.FINALIZE_FAILED,
+                    )
                 tombstone = await DeletionRepository(self._storage).get_tombstone(dialogue_id)
-                if tombstone is not None:
+                if self._valid_replay_tombstone(tombstone, dialogue_id, expected_version):
                     return DeleteStorageCleanupResult(DeleteStorageCleanupStatus.CONFIRMED_FINALIZED, None, tombstone)
                 return DeleteStorageCleanupResult(DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE, None, reason=DeleteStorageCleanupReason.FINALIZE_FAILED)
             reservation = await self._reservation(dialogue.profile_id)
@@ -274,15 +282,23 @@ class DeleteStorageCleanupCoordinator:
                     tombstone_expires_at_ms=expiry,
                 )
             except Exception:
+                replay = await self._reconcile_committed_tombstone(
+                    dialogue, dialogue_id, expected_version
+                )
+                if replay is not None:
+                    release_error = await self._release_after_commit(dialogue.profile_id, reservation)
+                    return DeleteStorageCleanupResult(
+                        replay.status, replay.dialogue, replay.tombstone,
+                        reason=release_error, scan=scan,
+                    )
                 return DeleteStorageCleanupResult(DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE, dialogue, reason=DeleteStorageCleanupReason.FINALIZE_FAILED, scan=scan)
-            if not isinstance(finalized, DeletionFinalizeResult) or finalized.tombstone.dialogue_id != dialogue_id:
+            if not self._valid_finalize_result(finalized, dialogue):
                 return DeleteStorageCleanupResult(DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE, dialogue, reason=DeleteStorageCleanupReason.FINALIZE_FAILED, scan=scan)
-            current = await ApplicationRecoveryRepository(self._storage, now_ms=self._clock).inspect()
-            if current.dialogue is not None:
-                return DeleteStorageCleanupResult(DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE, dialogue, reason=DeleteStorageCleanupReason.FINALIZE_FAILED, scan=scan)
-            await reservation.release()
-            self._reservations.pop(dialogue.profile_id, None)
-            return DeleteStorageCleanupResult(DeleteStorageCleanupStatus.CONFIRMED_FINALIZED, None, finalized.tombstone, scan=scan)
+            release_error = await self._release_after_commit(dialogue.profile_id, reservation)
+            return DeleteStorageCleanupResult(
+                DeleteStorageCleanupStatus.CONFIRMED_FINALIZED, None, finalized.tombstone,
+                reason=release_error, scan=scan,
+            )
         except Exception:
             if dialogue is None:
                 try:
@@ -290,6 +306,70 @@ class DeleteStorageCleanupCoordinator:
                 except Exception:
                     pass
             return DeleteStorageCleanupResult(DeleteStorageCleanupStatus.CONFIRMED_PENDING_STORAGE, dialogue, reason=DeleteStorageCleanupReason.FINALIZE_FAILED)
+
+    @staticmethod
+    def _valid_finalize_result(value: object, pending: DialogueRecord) -> bool:
+        if type(value) is not DeletionFinalizeResult:
+            return False
+        tombstone = value.tombstone
+        if type(tombstone) is not DeletionTombstoneRecord:
+            return False
+        if (
+            tombstone.dialogue_id != pending.dialogue_id
+            or tombstone.stale_generation != pending.version
+            or tombstone.thread_identity_sha256 != hashlib.sha256(pending.thread_id.encode("utf-8")).hexdigest()
+            or type(tombstone.deleted_at_ms) is not int
+            or tombstone.deleted_at_ms < pending.updated_at_ms
+            or type(tombstone.expires_at_ms) is not int
+            or tombstone.expires_at_ms <= tombstone.deleted_at_ms
+        ):
+            return False
+        counts = (
+            value.purged_jobs,
+            value.purged_payloads,
+            value.purged_delivery_segments,
+            value.purged_approvals,
+        )
+        return all(type(count) is int and 0 <= count <= 9223372036854775807 for count in counts)
+
+    @classmethod
+    def _valid_replay_tombstone(
+        cls, tombstone: object, dialogue_id: str, expected_version: int
+    ) -> bool:
+        return (
+            type(tombstone) is DeletionTombstoneRecord
+            and tombstone.dialogue_id == dialogue_id
+            and tombstone.stale_generation == expected_version
+            and type(tombstone.deleted_at_ms) is int
+            and type(tombstone.expires_at_ms) is int
+            and tombstone.expires_at_ms > tombstone.deleted_at_ms
+        )
+
+    async def _reconcile_committed_tombstone(
+        self, pending: DialogueRecord, dialogue_id: str, expected_version: int
+    ) -> DeleteStorageCleanupResult | None:
+        try:
+            live = await DialogueRepository(self._storage).get_live()
+            tombstone = await DeletionRepository(self._storage).get_tombstone(dialogue_id)
+        except Exception:
+            return None
+        if live is not None or not self._valid_replay_tombstone(tombstone, dialogue_id, expected_version):
+            return None
+        if tombstone.thread_identity_sha256 != hashlib.sha256(pending.thread_id.encode("utf-8")).hexdigest():
+            return None
+        return DeleteStorageCleanupResult(
+            DeleteStorageCleanupStatus.CONFIRMED_FINALIZED, None, tombstone
+        )
+
+    async def _release_after_commit(
+        self, profile_id: str, reservation: object
+    ) -> DeleteStorageCleanupReason | None:
+        try:
+            await reservation.release()
+        except Exception:
+            return DeleteStorageCleanupReason.RESERVATION_RELEASE_FAILED
+        self._reservations.pop(profile_id, None)
+        return None
 
     async def _contain_unknown(self, dialogue_id: str, expected_version: int) -> DeleteStorageCleanupResult:
         dialogue: DialogueRecord | None = None

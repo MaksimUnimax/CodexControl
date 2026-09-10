@@ -853,7 +853,10 @@ class SqliteStorage:
             "c.dialogue_version, c.official_delete_authority, "
             "c.local_isolated_storage_containment, c.contained_at_ms, "
             "d.profile_id, d.thread_id, d.state, d.version "
-            ", d.last_error_class "
+            ", d.last_error_class, "
+            "EXISTS (SELECT 1 FROM deletion_tombstones t WHERE t.dialogue_id = c.dialogue_id), "
+            "EXISTS (SELECT 1 FROM turn_jobs j WHERE j.dialogue_id = c.dialogue_id "
+            "AND j.state IN ('RECEIVED','CLAIMED','CODEX_STARTING','CODEX_RUNNING')) "
             "FROM delete_storage_containment c LEFT JOIN dialogues d "
             "ON d.dialogue_id = c.dialogue_id"
         ).fetchall()
@@ -862,6 +865,7 @@ class SqliteStorage:
                 row[7] is None or row[9] != "DELETE_UNKNOWN" or row[11] != "DELETE_UNKNOWN"
                 or row[1] != row[7] or row[3] != row[10]
                 or row[4] != "UNKNOWN" or row[5] != "COMPLETED"
+                or row[12] or row[13]
                 or not isinstance(row[0], str) or not 1 <= len(row[0]) <= 128 or "\x00" in row[0]
                 or not isinstance(row[1], str) or not 1 <= len(row[1]) <= 128 or "\x00" in row[1]
                 or not isinstance(row[2], str) or re.fullmatch(r"[0-9a-f]{64}", row[2]) is None

@@ -158,3 +158,55 @@ Tests:
 This evidence file is the only P7.C4 evidence artifact. No architect
 authority document, predecessor acceptance artifact, P7.C5/P7.C6 artifact, or
 real-P7 artifact was edited or created.
+
+## First architect repair
+
+INITIAL_CANDIDATE=
+70cdf0edc3f319c0254313eabc5d3c56c2f9ef16
+
+INITIAL_ARCHITECT_VERDICT=
+REWORK_REQUIRED
+
+ARCHITECT_DEFECT_A=
+RECOVERY_OUTCOMES_COLLAPSED_BY_ENUM_ALIASES
+
+ARCHITECT_DEFECT_B=
+COMMITTED_FINALIZER_COULD_BE_REPORTED_PENDING_AND_LEAK_RESERVATION
+
+ARCHITECT_DEFECT_C=
+V4_SCHEMA_OPEN_DID_NOT_REJECT_CONTAINMENT_TOMBSTONE_OR_ACTIVE_JOB_COLLISION
+
+ARCHITECT_DEFECT_D=
+SCANNER_DID_NOT_REVALIDATE_OPENED_REGULAR_FILE_IDENTITY_BEFORE_CONTENT_READ
+
+ARCHITECT_DEFECT_E=
+MANDATORY_CRASH_RESTART_CONCURRENCY_MATRIX_NOT_ACTUALLY_PROVED
+
+The first repair makes all three C4 recovery outcomes distinct, validates the
+exact committed `DeletionFinalizeResult` and its tombstone/count authority,
+removes the post-commit downgrade read, preserves a truthful finalized result
+when reservation release fails, and accepts only exact local tombstone replay
+identity. V4 open validation rejects containment/tombstone and
+containment/active-job collisions while retaining the unchanged v4 DDL and
+hash. The scanner now validates pre-open metadata, post-open metadata, and
+descriptor identity before reading any regular file.
+
+Repair regression coverage includes:
+
+- distinct finalized, UNKNOWN-contained, and UNKNOWN-pending recovery status
+  values and the complete local cleanup result matrix;
+- committed-finalizer post-verification failure, reservation-release failure,
+  exact concurrent tombstone replay, stale-generation rejection, and
+  mismatched-thread-hash rejection;
+- direct forged v4 reopen rejection and forged application-recovery invariant
+  rejection;
+- deterministic regular-file substitution, history symlink/ownership/mode,
+  scanner I/O fail-closed, path/chunk matching, and credential/configuration
+  non-read checks;
+- confirmed and UNKNOWN concurrent async ownership, caller cancellation,
+  containment quarantine retention, and no duplicate root/finalizer/insert;
+- startup/delete recovery replay with no external thread-delete effect.
+
+The repair focused suite passed with 22 tests, 0 skipped, 0 failures, and
+0 errors. The required compile, diff, compatibility, and full regression
+results are recorded below after execution.

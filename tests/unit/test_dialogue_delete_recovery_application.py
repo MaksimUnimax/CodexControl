@@ -59,7 +59,8 @@ class DialogueDeleteRecoveryApplicationUnitTests(unittest.IsolatedAsyncioTestCas
                          [item.value for item in DialogueDeleteErrorCategory])
         self.assertEqual(["NO_ACTION", "CREATE_MARKED_UNKNOWN", "PRE_EFFECT_FAILED",
                           "TURN_MARKED_UNKNOWN", "INTERRUPT_MARKED_UNKNOWN", "DELETE_MARKED_UNKNOWN",
-                          "DELETE_CONFIRMED_STORAGE_PENDING"],
+                          "DELETE_CONFIRMED_STORAGE_PENDING", "DELETE_FINALIZED_AFTER_STORAGE",
+                          "DELETE_UNKNOWN_CONTAINED", "DELETE_UNKNOWN_CONTAINMENT_PENDING"],
                          [item.value for item in DialogueRecoveryStatus])
         self.assertEqual(["STORAGE", "INVARIANT"],
                          [item.value for item in DialogueRecoveryErrorCategory])

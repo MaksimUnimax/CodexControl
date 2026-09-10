@@ -90,18 +90,34 @@ class PersistentProfileResidualScanner:
 
     def _scan_sessions(self, home_fd: int, result: "_ScanAccumulator") -> None:
         try:
+            entry = _safe_entry_stat("sessions", home_fd)
+            if (
+                not stat.S_ISDIR(entry.st_mode)
+                or entry.st_uid != 0
+                or stat.S_IMODE(entry.st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
+            ):
+                result.error()
+                return
             sessions_fd = os.open(
                 "sessions",
                 os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
                 dir_fd=home_fd,
             )
-        except FileNotFoundError:
+        except IsolationError:
+            try:
+                os.stat("sessions", dir_fd=home_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            except OSError:
+                result.error()
+                return
+            result.error()
             return
         except OSError:
             result.error()
             return
         try:
-            self._validate_directory(sessions_fd)
+            self._validate_directory(sessions_fd, entry)
             self._scan_directory(sessions_fd, "sessions", result)
         finally:
             try:
@@ -130,15 +146,17 @@ class PersistentProfileResidualScanner:
             result.error()
             return
         result.path_match("history.jsonl")
-        self._scan_file(home_fd, "history.jsonl", "history.jsonl", result)
+        self._scan_file(home_fd, "history.jsonl", "history.jsonl", result, entry)
 
     @staticmethod
-    def _validate_directory(fd: int) -> None:
+    def _validate_directory(fd: int, expected: os.stat_result | None = None) -> None:
         value = os.fstat(fd)
         if not stat.S_ISDIR(value.st_mode) or value.st_uid != 0:
             raise OSError("directory_unsafe")
         if stat.S_IMODE(value.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
             raise OSError("directory_writable")
+        if expected is not None and (value.st_dev, value.st_ino) != (expected.st_dev, expected.st_ino):
+            raise OSError("directory_replaced")
 
     def _scan_directory(self, fd: int, relative: str, result: "_ScanAccumulator") -> None:
         try:
@@ -171,7 +189,7 @@ class PersistentProfileResidualScanner:
                     result.error()
                     continue
                 try:
-                    self._validate_directory(child_fd)
+                    self._validate_directory(child_fd, entry)
                     self._scan_directory(child_fd, child_relative, result)
                 finally:
                     try:
@@ -179,11 +197,11 @@ class PersistentProfileResidualScanner:
                     except OSError:
                         result.error()
             elif stat.S_ISREG(entry.st_mode):
-                self._scan_file(fd, name, child_relative, result)
+                self._scan_file(fd, name, child_relative, result, entry)
             else:
                 result.error()
 
-    def _scan_file(self, parent_fd: int, name: str, relative: str, result: "_ScanAccumulator") -> None:
+    def _scan_file(self, parent_fd: int, name: str, relative: str, result: "_ScanAccumulator", entry: os.stat_result) -> None:
         if not result.start_file():
             return
         try:
@@ -196,6 +214,15 @@ class PersistentProfileResidualScanner:
             result.error()
             return
         try:
+            opened = os.fstat(fd)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_uid != 0
+                or stat.S_IMODE(opened.st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
+                or (opened.st_dev, opened.st_ino) != (entry.st_dev, entry.st_ino)
+            ):
+                result.error()
+                return
             self._read_file(fd, relative, result)
         finally:
             try:
