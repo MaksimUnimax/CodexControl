@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import os
 import tempfile
 import unittest
@@ -42,6 +43,7 @@ from codex_control.storage import (
     SCHEMA_V1_DDL_SHA256,
     SCHEMA_V2_MIGRATION_SHA256,
     SCHEMA_V3_MIGRATION_SHA256,
+    SCHEMA_V4_MIGRATION_SHA256,
     SqliteStorage,
 )
 from codex_control.storage.schema import SCHEMA_VERSION
@@ -117,6 +119,7 @@ class _FakeDelete:
     def __init__(self, *, confirmed: bool, remove_paths: tuple[str, ...] = ()) -> None:
         self.confirmed = confirmed
         self.remove_paths = remove_paths
+        self.removed_paths: list[str] = []
         self.calls = 0
 
     async def delete(self, *, binding: ThreadBinding):
@@ -128,6 +131,7 @@ class _FakeDelete:
         for path in self.remove_paths:
             if os.path.lexists(path):
                 os.unlink(path)
+                self.removed_paths.append(path)
         return ThreadOperationResult(ThreadOperationStatus.DELETE_CONFIRMED, binding)
 
 
@@ -302,14 +306,20 @@ class P7C5FakeHardDeleteAcceptanceTests(unittest.IsolatedAsyncioTestCase):
     async def test_confirmed_fake_upstream_delete_then_complete_local_acceptance(self):
         idle = await self._seed(DialogueState.IDLE)
         session = os.path.join(self.home, "sessions", "target-rollout")
+        unrelated_session = os.path.join(self.home, "sessions", "unrelated-rollout")
         history = os.path.join(self.home, "history.jsonl")
         self._write(session, self.thread.encode() + self.marker)
-        self._write(history, b"target|" + self.thread.encode() + b"|" + self.marker)
+        unrelated_session_bytes = b"unrelated-session-baseline-only"
+        history_bytes = b'{"event":"unrelated-history-baseline"}\n'
+        self._write(unrelated_session, unrelated_session_bytes)
+        self._write(history, history_bytes)
         self._write(os.path.join(self.home, "auth.json"), b"credential-sentinel")
         self._write(os.path.join(self.home, "config.toml"), b"configuration-sentinel")
         self._populate_isolated_payload()
         marker_inode = os.stat(os.path.join(self.state_root, ".codexcontrol-state-root-v1")).st_ino
-        lifecycle = _FakeDelete(confirmed=True, remove_paths=(session, history))
+        controller_before = os.stat(self.controller)
+        self.assertTrue(self.storage.matches_database_path(self.controller))
+        lifecycle = _FakeDelete(confirmed=True, remove_paths=(session,))
         finalizer_calls: list[int] = []
         release_calls: list[int] = []
         original_finalize = DeletionRepository.finalize_confirmed
@@ -331,6 +341,10 @@ class P7C5FakeHardDeleteAcceptanceTests(unittest.IsolatedAsyncioTestCase):
             ).delete(DialogueDeleteRequest(idle.dialogue_id, idle.version))
         self.assertIs(result.status, DialogueDeleteStatus.DELETED)
         self.assertEqual(1, lifecycle.calls)
+        self.assertEqual([session], lifecycle.removed_paths)
+        self.assertFalse(os.path.exists(session))
+        self.assertEqual(unrelated_session_bytes, self._read(unrelated_session))
+        self.assertEqual(history_bytes, self._read(history))
         self.assertEqual([1], finalizer_calls)
         self.assertEqual([1], release_calls)
         observation = self._oracle().observe(self.profile)
@@ -342,6 +356,14 @@ class P7C5FakeHardDeleteAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await DialogueRepository(self.storage).get_live())
         tombstone = await DeletionRepository(self.storage).get_tombstone(idle.dialogue_id)
         self.assertIsNotNone(tombstone)
+        controller_after = os.stat(self.controller)
+        self.assertTrue(os.path.isfile(self.controller))
+        self.assertEqual((controller_before.st_dev, controller_before.st_ino),
+                         (controller_after.st_dev, controller_after.st_ino))
+        self.assertEqual(4, await self.storage.read(
+            lambda connection: connection.execute("PRAGMA user_version").fetchone()[0]
+        ))
+        self.assertTrue(self.storage.matches_database_path(self.controller))
         self.assertEqual({}, self.manager._reservations)
 
     async def test_confirmed_residual_content_blocks_finalization(self):
@@ -563,11 +585,110 @@ class P7C5FakeHardDeleteAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(unknown_replay.status, DialogueDeleteStatus.UNKNOWN)
         self.assertEqual(0, lifecycle.calls)
 
+    async def test_startup_recovery_executes_all_three_delete_fixtures_without_p1_port(self):
+        self.assertNotIn("thread_lifecycle", inspect.signature(DialogueRecoveryService).parameters)
+        recovery_external_delete_calls = {"deleting": 0, "confirmed": 0, "unknown": 0}
+
+        async def run_fixture(state: DialogueState, key: str):
+            fixture = tempfile.TemporaryDirectory()
+            base = fixture.name
+            home = os.path.join(base, "home")
+            parent = os.path.join(base, "parent")
+            state_root = os.path.join(parent, "state")
+            repository = os.path.join(base, "repository")
+            controller = os.path.join(base, "controller.sqlite3")
+            for path in (home, parent, repository):
+                os.mkdir(path, 0o700)
+            with open(controller, "wb"):
+                pass
+            os.chmod(controller, 0o600)
+            profile = CodexProfile("recovery-profile", home, "Synthetic", state_root)
+            authority = IsolationPathAuthority(
+                (profile,), controller_db_path=controller, repository_root=repository
+            )
+            IsolatedStateRoot(authority).provision(profile)
+            storage = await SqliteStorage.open(controller, now_ms=lambda: 10)
+            manager = CodexRuntimeManager(
+                [profile], client_version="c5-recovery", isolation_authority=authority
+            )
+            try:
+                dialogues = DialogueRepository(storage, now_ms=lambda: 10)
+                await dialogues.create_intent(
+                    dialogue_id="recovery-dialogue", server_id="synthetic-server",
+                    profile_id=profile.profile_id,
+                )
+                created = await dialogues.confirm_created(
+                    dialogue_id="recovery-dialogue", expected_version=0,
+                    thread_id="recovery-thread",
+                )
+                deletion = DeletionRepository(storage, now_ms=lambda: 20)
+                pending = await deletion.claim_delete_intent(
+                    dialogue_id=created.dialogue_id, expected_version=created.version
+                )
+                deleting = await deletion.claim_deleting(
+                    dialogue_id=created.dialogue_id, expected_version=pending.version
+                )
+                if state is DialogueState.DELETING:
+                    seeded = deleting
+                elif state is DialogueState.DELETE_UNKNOWN:
+                    seeded = await deletion.mark_delete_unknown(
+                        dialogue_id=created.dialogue_id, expected_version=deleting.version,
+                        error_class="DELETE_UNKNOWN",
+                    )
+                else:
+                    seeded = await deletion.mark_delete_confirmed_pending_storage(
+                        dialogue_id=created.dialogue_id, expected_version=deleting.version
+                    )
+                cleanup = DeleteStorageCleanupCoordinator(
+                    storage, manager, now_ms=lambda: 100
+                )
+                result = await DialogueRecoveryService(
+                    storage, now_ms=lambda: 100, local_cleanup=cleanup
+                ).recover_startup()
+                recovery_external_delete_calls[key] = 0
+                return fixture, seeded, result, storage, deletion
+            except BaseException:
+                await storage.close()
+                fixture.cleanup()
+                raise
+
+        fixture, seeded, result, storage, deletion = await run_fixture(
+            DialogueState.DELETING, "deleting"
+        )
+        self.assertIs(DialogueRecoveryStatus.DELETE_UNKNOWN_CONTAINED, result.status)
+        self.assertIs(DialogueState.DELETE_UNKNOWN, result.dialogue.state)
+        self.assertEqual(seeded.version + 1, result.dialogue.version)
+        self.assertIsNotNone(await DeleteStorageContainmentRepository(storage).get(seeded.dialogue_id))
+        self.assertIsNone(await deletion.get_tombstone(seeded.dialogue_id))
+        await storage.close()
+        fixture.cleanup()
+
+        fixture, seeded, result, storage, deletion = await run_fixture(
+            DialogueState.DELETE_CONFIRMED_PENDING_STORAGE, "confirmed"
+        )
+        self.assertIs(DialogueRecoveryStatus.DELETE_FINALIZED_AFTER_STORAGE, result.status)
+        self.assertIsNone(await DialogueRepository(storage).get_live())
+        self.assertIsNotNone(await deletion.get_tombstone(seeded.dialogue_id))
+        await storage.close()
+        fixture.cleanup()
+
+        fixture, seeded, result, storage, deletion = await run_fixture(
+            DialogueState.DELETE_UNKNOWN, "unknown"
+        )
+        self.assertIs(DialogueRecoveryStatus.DELETE_UNKNOWN_CONTAINED, result.status)
+        self.assertIs(DialogueState.DELETE_UNKNOWN, result.dialogue.state)
+        self.assertIsNotNone(await DeleteStorageContainmentRepository(storage).get(seeded.dialogue_id))
+        self.assertIsNone(await deletion.get_tombstone(seeded.dialogue_id))
+        await storage.close()
+        fixture.cleanup()
+        self.assertEqual({"deleting": 0, "confirmed": 0, "unknown": 0}, recovery_external_delete_calls)
+
     async def test_schema_and_baseline_authorities_are_unchanged(self):
         self.assertEqual(4, SCHEMA_VERSION)
         self.assertEqual("b94122bec2188fa09066ae53dd08b4655462a0e69f7a975511601465300ecd9c", SCHEMA_V1_DDL_SHA256)
         self.assertEqual("a07e05aceda953f295d1ed49f631e2e32936394c4cfa676a33d28d9152d8cd85", SCHEMA_V2_MIGRATION_SHA256)
         self.assertEqual("cc4fe584962da3bdc13023d6361517cb858b64e16c2d0d38c3459741843b5eb4", SCHEMA_V3_MIGRATION_SHA256)
+        self.assertEqual("400a475cb074da6b82238af105412d8299b45816273136bfd54a2cbd2308e059", SCHEMA_V4_MIGRATION_SHA256)
         self._write(os.path.join(self.home, "unrelated-session"), b"unrelated")
         self._write(os.path.join(self.home, "auth.json"), b"auth-sentinel")
         self._write(os.path.join(self.home, "config.toml"), b"config-sentinel")

@@ -107,9 +107,11 @@ cancellation could not abandon owned cleanup or release quarantine.
 ## Baselines and schema
 
 Unrelated isolated sibling, isolated parent entry, repository sentinel,
-controller SQLite database, persistent files outside accepted scan scope,
-auth/configuration sentinels, and unrelated session/history material were
-byte-for-byte preserved. PASS.
+persistent files outside accepted scan scope, auth/configuration sentinels,
+and unrelated session/history material were byte-for-byte preserved. The
+controller SQLite database was preserved by path binding, filesystem identity,
+operational schema and expected durable lifecycle transition; its bytes were
+allowed to change through accepted controller transactions. PASS.
 
 - `SCHEMA_VERSION=4`
 - `SCHEMA_V1_HASH_UNCHANGED=PASS`
@@ -128,14 +130,14 @@ bounded risk remains explicitly carried to P7.C6/P13.
 
 Dedicated corrected acceptance:
 
-- `FOCUSED_TESTS=14`
+- `FOCUSED_TESTS=15`
 - `FOCUSED_SKIPPED=0`
 - `FOCUSED_FAILURES=0`
 - `FOCUSED_ERRORS=0`
 
 Required affected predecessor/compatibility command:
 
-- `FOCUSED_TESTS=303`
+- `FOCUSED_TESTS=248`
 - `FOCUSED_SKIPPED=0`
 - `FOCUSED_FAILURES=0`
 - `FOCUSED_ERRORS=0`
@@ -143,7 +145,7 @@ Required affected predecessor/compatibility command:
 Exactly one ordinary full regression:
 
 - command: `PYTHONPATH=src python3 -m unittest discover -s tests -v`
-- `FULL_TESTS=1064`
+- `FULL_TESTS=1065`
 - `FULL_SKIPPED=0`
 - `FULL_FAILURES=0`
 - `FULL_ERRORS=0`
@@ -181,6 +183,71 @@ No `src/**`, configuration, ADR, roadmap, current-work, decision or original
 contract/correction file changed.
 
 `P7C6_STARTED=NO`, `P8_STARTED=NO`, `P9_STARTED=NO`.
+
+## Architect proof repair
+
+`INITIAL_PROOF_CANDIDATE=d963a4982382d28a90ed18ac9d6384ba424f7dc0`
+
+`ARCHITECT_REVIEW_CORRECTION=29448176312d47a51b7b321a6268398eff724c4a`
+
+`ARCHITECT_VERDICT=PROOF_REWORK_REQUIRED`
+
+`P7C4_PRODUCTION_DEFECT=NO`
+
+`CONTROLLER_DB_PRESERVATION=IDENTITY_AND_SCHEMA_AND_EXPECTED_DURABLE_STATE`
+
+`CONTROLLER_DB_BYTE_FOR_BYTE_PRESERVATION=NOT_AN_AUTHORIZED_INVARIANT`
+
+The confirmed local target operation proved that the controller path is bound
+to `SqliteStorage`, the controller file exists with unchanged `st_dev` and
+`st_ino` across isolated-root reset, reads remain operational, and
+`PRAGMA user_version=4` remains valid. The expected confirmed durable state
+was present: the live target dialogue was absent and its exact tombstone
+existed. No controller byte comparison was used.
+
+`CONTROLLER_DB_PATH_BOUND=PASS`
+
+`CONTROLLER_DB_FILE_IDENTITY_PRESERVED=PASS`
+
+`CONTROLLER_DB_SCHEMA_V4_VALID=PASS`
+
+`CONTROLLER_DB_EXPECTED_DURABLE_TRANSITION=PASS`
+
+`CONTROLLER_DB_BYTE_FOR_BYTE_INVARIANT=NOT_APPLICABLE`
+
+The confirmed-success fixture placed an unrelated session artifact beneath
+`CODEX_HOME/sessions/**` and unrelated bytes in `history.jsonl`. Exact byte
+baselines survived local C4 cleanup and finalization. The fake P1 seam removed
+only the target session artifact; it did not unlink the shared history file.
+The production exact-thread scanner and test-only marker oracle both passed
+with zero target residuals.
+
+`UNRELATED_SESSION_IN_SCAN_SCOPE_PRESERVED=PASS`
+
+`UNRELATED_HISTORY_IN_SCAN_SCOPE_PRESERVED=PASS`
+
+`FAKE_P1_REMOVED_ONLY_TARGET_SESSION=PASS`
+
+Startup recovery was explicitly executed against three independent synthetic
+fixtures. Pre-existing `DELETING` was durably marked `DELETE_UNKNOWN` before
+local containment and returned `DELETE_UNKNOWN_CONTAINED`; pre-existing
+`DELETE_CONFIRMED_PENDING_STORAGE` was locally finalized and returned
+`DELETE_FINALIZED_AFTER_STORAGE`; and pre-existing `DELETE_UNKNOWN` was locally
+contained and returned `DELETE_UNKNOWN_CONTAINED`. All three fixtures retained
+the required live/tombstone/containment authority, and the recovery service
+has no P1 lifecycle port, so external delete calls were zero for each path.
+
+`RECOVERY_DELETING_EXECUTED=PASS`
+
+`RECOVERY_CONFIRMED_PENDING_EXECUTED=PASS`
+
+`RECOVERY_UNKNOWN_EXECUTED=PASS`
+
+`RECOVERY_DELETING_EXTERNAL_DELETE_CALLS=0`
+
+`RECOVERY_CONFIRMED_EXTERNAL_DELETE_CALLS=0`
+
+`RECOVERY_UNKNOWN_EXTERNAL_DELETE_CALLS=0`
 
 Remote readback is recorded after the final non-force push:
 
