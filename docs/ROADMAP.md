@@ -3,11 +3,7 @@
 Status authority: architect only. `[DONE]` means architect-verified GitHub evidence plus required acceptance.
 
 ## P0 — Repository, architecture and governance
-- [DONE] P0.1 server-80 discovery and dedicated deploy key.
-- [DONE] P0.2 foundation.
-- [DONE] P0.3 installed Codex 0.144.6 capability baseline.
-- [DONE] P0.4 V1 architecture/security baseline.
-- [DONE] P0.5 architect/Codex execution governance.
+- [DONE] P0.1–P0.5 repository foundation, server-80 discovery, installed 0.144.6 authority, V1 architecture/security and architect/Codex governance.
 
 ## P1 — Codex app-server adapter
 - [DONE] P1.1–P1.10 exact 0.144.6 stdio protocol, runtime manager, capability gate, model/list, thread start/resume, turns, approvals, interrupt, ambiguity-safe thread/delete and adapter acceptance.
@@ -16,30 +12,20 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P2.1–P2.6b plus P2.C1/P2.C2: secure SQLite kernel, schema authorities, repositories, ingress/idempotency, turn jobs, delivery/approval, deletion/tombstones, retention and crash/restart acceptance.
 
 ## P3 — Dialogue application service
-- [DONE] P3.1 existing-dialogue turn orchestration.
-- [DONE] P3.2 lazy thread creation.
-- [DONE] P3.3 settings selection.
-- [DONE] P3.4 durable interrupt.
-- [DONE] P3.5 hard-delete orchestration/fake P3 acceptance. ADR-0043/0044 later supersede confirmed-delete storage ordering while preserving P1.9 UNKNOWN semantics.
+- [DONE] P3.1–P3.5 existing/lazy dialogue orchestration, settings, interrupt and hard-delete application semantics. ADR-0043/0044 later supersede confirmed-delete storage ordering while preserving P1.9 UNKNOWN semantics.
 
 ## P4 — Telegram private management
-- [DONE] P4.1 private auth/menu/settings.
-- [DONE] P4.2 dialogue control/two-step delete confirmation.
-- [DONE] P4.3 final private facade/approval projection.
+- [DONE] P4.1–P4.3 private auth/menu/settings, dialogue control and final private facade/approval projection.
 
 ## P5 — Telegram group routing
-- [DONE] P5.1 fleet manifest/activation routing.
-- [DONE] P5.2 serialized ordinary TEXT admission.
-- [DONE] P5.3 fleet-status/final fake P5 acceptance.
+- [DONE] P5.1–P5.3 fleet activation/routing, serialized TEXT admission and final fake fleet-status acceptance.
 
 ## P6 — Response delivery/full local orchestration
-- [DONE] P6.1 deterministic response delivery.
-- [DONE] P6.2 durable live approval operator.
-- [DONE] P6.3 final local orchestration/fake P6 acceptance. Accepted `0409ad4a0744159aad875a5ddea4deaf1181699e`.
+- [DONE] P6.1–P6.3 deterministic response delivery, durable live approval operator and final local orchestration/fake P6 acceptance. Accepted `0409ad4a0744159aad875a5ddea4deaf1181699e`.
 
 ## P7 — Real Codex acceptance and hard-delete correction lane
 
-- [REJECTED / HISTORICAL BLOCKER] **Original P7 under ADR-0042.** Exactly one official P1.9 `thread/delete` returned terminal `DELETE_UNKNOWN`; forensic commit `5aac49bd1b8a349343db52071520beed7f95592d` proved material residual. No retry/read/list/manual repair occurred. Historical thread never reused.
+- [REJECTED / HISTORICAL BLOCKER] **Original P7 under ADR-0042.** Exactly one official P1.9 `thread/delete` returned terminal `DELETE_UNKNOWN`; forensic commit `5aac49bd1b8a349343db52071520beed7f95592d` proved material residual. Historical thread is never reused.
 
 - [DONE] **P7.C1 — storage-isolation discovery.** Accepted `a9900471d0599be21b1a1834301c4421d95acb29`.
 - [DONE] **P7.C2 — schema-v3 confirmed-delete storage barrier.** Accepted `80673db644962b0cc5b1a388d64cb5902bd4f46c`.
@@ -47,25 +33,21 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] **P7.C4 — confirmed cleanup + DELETE_UNKNOWN local containment.** Accepted `df161566cab5f8fa7ccf70f94379c78a9fb02ffe`, tree `be2ea7a5eead9b2d61039a2d98ec4d2b80047526`.
 - [DONE] **P7.C5 — corrected fake hard-delete acceptance.** Accepted `946ddf7ac6f7c3539bc3f344c6edf21d6ffce528`, tree `c4d5310a2afb05fc4f2f92eea822a1ccc7a8c88c`; full regression 1065, zero failures/errors.
 
-- [ACCEPTED CORRECTION] **ADR-0045 — shared persistent CODEX_HOME.** Existing authenticated persistent `CODEX_HOME` may be concurrently shared. CodexControl owns only its own app-server child/generation, isolated state root, controller SQLite and process-local reservation; unrelated shared-home processes are not stopped.
+- [ACCEPTED CORRECTION] **ADR-0045 — shared persistent CODEX_HOME.** Existing authenticated persistent `CODEX_HOME` may be concurrently shared. CodexControl owns only its own child/generation, isolated state root, controller SQLite and process-local reservation; unrelated shared-home processes are not stopped.
 
-- [RUN 1 REJECTED / HARNESS DEFECT] **P7.C6 real Run 1.** Evidence `785a82e2e9bc392173ea1e910b490f84cfa590b2`. One real thread, one resume and three turns occurred. Turn 1/2 proved persistence; Turn 3 reached one approval request and stopped at `P7C6_APPROVAL_NOT_EXACTLY_ALLOWED`. No P1.8 interrupt, delete, thread/read or thread/list occurred. Run-1 approval result remains `RESPONSE_UNKNOWN`; old request is permanently non-retryable.
+- [RUN 1 REJECTED / HARNESS DEFECT] **P7.C6 real Run 1.** Evidence `785a82e2e9bc392173ea1e910b490f84cfa590b2`. One real thread, one resume and three turns occurred. Turn 1/2 proved persistence; Turn 3 reached one approval request and stopped at `P7C6_APPROVAL_NOT_EXACTLY_ALLOWED`. No P1.8 interrupt, delete, thread/read or thread/list occurred. Run-1 approval result remains `RESPONSE_UNKNOWN`; the old request is permanently non-retryable. Architect review established harness/recovery defects but no production defect.
 
-  Architect review established three harness/recovery defects without establishing any production defect: literal/under-bound approval matcher; declared host-level one-shot latch never materialized; failure-path ledger failed to retain Run-1 synthetic marker plaintext needed for final all-marker erasure proof.
+- [DONE / ZERO-REAL-EFFECT FORENSIC] **P7.C6 retained Turn-3 forensic.** Accepted `e6835e7eaff21ce6a452c24f3309269df67c82ba`. Exact Turn 3 is durably terminal `INTERRUPTED`; its command item is `COMPLETED`; no persisted approval request/decision/response remains; no delayed process or sentinel remains. Old Turn-3 approval remains closed.
 
-- [DONE / ZERO-REAL-EFFECT FORENSIC] **P7.C6 retained Turn-3 forensic.** Accepted commit `e6835e7eaff21ce6a452c24f3309269df67c82ba`. Exact Turn 3 is durably terminal `INTERRUPTED`; one command item is `COMPLETED`; no persisted approval request/decision/response remains; no delayed process or sentinel remains; zero scan/parse errors. The persisted command is outside the historical safe approval grammar (`OTHER/TOKEN_MISMATCH`), so the old approval can never be retroactively accepted. The retained thread is a safe candidate for a new same-thread turn after harness preparation.
+- [DONE / ZERO-REAL-EFFECT FORENSIC] **P7.C6 existing Run-1 latch forensic.** Accepted `c308c765d9915844fce97d1d1f6c933e302a75aa`. Existing `/root/.codexcontrol/p7c6-real-one-shot-ledger.json` is architect-accepted as the safe Run-1 consumed replay barrier. Accepted SHA-256: `50616410354022747284c1ce61bd02b8ecd1eb2636657eac502092fde800d55e`. It must not be overwritten or normalized. `RUN1_GLOBAL_ONE_SHOT_LATCH=ACCEPTED_EXISTING_SAFE`.
 
-- [BLOCKED AT LATCH GATE / ZERO REAL EFFECT] **P7.C6 same-thread continuation preparation.** Base preparation contract: `docs/evidence/p7c6/P7C6_SAME_THREAD_CONTINUATION_PREP_CONTRACT_2026-09-10.md`.
+- [NEXT / ZERO-REAL-EFFECT] **P7.C6 same-thread continuation preparation resumes after accepted latch.** Base preparation contract remains `docs/evidence/p7c6/P7C6_SAME_THREAD_CONTINUATION_PREP_CONTRACT_2026-09-10.md` plus architect latch acceptance `docs/evidence/p7c6/P7C6_RUN1_EXISTING_LATCH_ARCHITECT_ACCEPTANCE_2026-09-10.md`.
 
-  Preparation correctly stopped because `/root/.codexcontrol/p7c6-real-one-shot-ledger.json` already exists and must not be overwritten. Filesystem ownership/mode were safe, but its representation did not match the newly prescribed latch format. No harness/evidence change and no real effect occurred.
+  Skip only the obsolete Run-1 latch-create/replace step. Preparation must re-check the accepted latch read-only, recover exactly the three Run-1 markers into root-only recovery supplement, validate retained isolated/controller topology, build a new gated same-thread harness, implement/test strict structural approval matching and a distinct continuation latch, prove zero new-thread path, and run only gate-disabled/offline/fake regression.
 
-- [NEXT / ZERO-REAL-EFFECT] **P7.C6 existing Run-1 latch forensic.** Contract: `docs/evidence/p7c6/P7C6_RUN1_EXISTING_LATCH_FORENSIC_CONTRACT_2026-09-10.md`.
+  `P7C6_SAME_THREAD_CONTINUATION_PREP_AUTHORIZED=YES`.
 
-  This read-only forensic determines whether the existing non-empty root-owned latch is a safe Run-1 replay barrier candidate despite using an older/different representation. It may read only bounded latch metadata/content for classification, may not expose unknown raw values, and may not overwrite/delete/rename the file. It must also prove statically that the rejected Run-1 harness is blocked by the existing non-empty latch.
-
-  `P7C6_SAME_THREAD_PREP_CONTINUATION_AUTHORIZED=NO` until architect review of this forensic.
-
-  If accepted as an equivalent safe Run-1 replay barrier, preparation may resume **after** the latch gate without overwriting it. It must still recover Run-1 markers, validate retained topology, build/test the structural approval matcher and separate continuation latch, and materialize a new gated same-thread harness. Real continuation remains separately gated.
+  `P7C6_REAL_CONTINUATION_AUTHORIZED=NO` until the preparation commit receives independent architect review.
 
 ## P8 — Deployment packaging/rollback
 [BLOCKED BY P7.C6] Reopens only after architect-accepted C6.
