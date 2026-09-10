@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Awaitable, Callable, Mapping, Protocol
 from codex_control.domain import CodexProfile
 from .capabilities import (
-    SCHEMA_SHA256,
     SUPPORTED_CODEX_VERSION,
     CodexCapabilityManifest,
     StorageRuntimeCapabilities,
@@ -130,7 +129,6 @@ class CodexRuntime:
 class CodexRuntimeManager:
     def __init__(self, profiles: list[CodexProfile], *, client_version: str, executable: str = "/usr/local/bin/codex",
                  parent_environment: Mapping[str, str] | None = None, process_factory: ProcessFactory = create_codex_process,
-                 schema_sha256: str = SCHEMA_SHA256,
                  storage_capabilities: StorageRuntimeCapabilities | None = None,
                  isolation_authority: IsolationPathAuthority | None = None,
                  version_probe: CodexVersionProbe | None = None,
@@ -197,9 +195,9 @@ class CodexRuntimeManager:
                 self._state_root.validate(profile)
             except IsolationError as error:
                 raise RuntimeErrorSafe("storage_boundary_invalid", profile.profile_id) from error
-            await self._ensure_installed_authority(profile.profile_id)
             executable = Path(self._executable)
             if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK): raise RuntimeErrorSafe("executable_invalid", profile.profile_id)
+            await self._ensure_installed_authority(profile.profile_id)
             process = await self._factory(build_child_argv(str(executable), profile), build_child_environment(profile, self._parent_environment), self._stdout_line_limit)
             if process.stdin is None or process.stdout is None or process.stderr is None: raise RuntimeErrorSafe("process_streams_missing", profile.profile_id)
             transport = SubprocessStdioTransport(process.stdout, process.stdin)
@@ -232,11 +230,9 @@ class CodexRuntimeManager:
     async def _ensure_installed_authority(self, profile_id: str) -> None:
         if self._capability_failure is not None:
             raise RuntimeErrorSafe(self._capability_failure, profile_id)
-        if self._installed_manifest is not None:
-            return
         async with self._authority_lock:
-            if self._installed_manifest is not None:
-                return
+            if self._capability_failure is not None:
+                raise RuntimeErrorSafe(self._capability_failure, profile_id)
             try:
                 if self._installed_authority_probe is None:
                     manifest = await probe_supported_manifest(self._version_probe)

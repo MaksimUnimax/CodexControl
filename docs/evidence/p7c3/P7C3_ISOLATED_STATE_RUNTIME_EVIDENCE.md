@@ -238,6 +238,7 @@ Production:
 Tests:
 
 - `tests/unit/test_p7_c3_isolated_state_runtime.py`
+
 - `tests/unit/test_codex_runtime.py`
 - existing fake/application test constructors updated to provide explicit
   synthetic isolated roots.
@@ -248,3 +249,61 @@ Evidence:
 
 No architect authority, P7.C2 production/storage file, deployment file,
 credential, real acceptance artifact, or unrelated product file was added.
+
+## Second architect repair
+
+`SECOND_ARCHITECT_REVIEW=REWORK_REQUIRED`.
+`FIRST_REPAIR=a549e6f1f295a37f14a7833ede0233d94745555a`.
+
+`ARCHITECT_DEFECT_D=SUCCESSFUL_INSTALLED_AUTHORITY_CACHED_ACROSS_RUNTIME_GENERATIONS`.
+`ARCHITECT_DEFECT_E=STATE_ROOT_OPEN_AND_PROVISION_NOT_FULLY_DESCRIPTOR_ANCHORED_AGAINST_ANCESTOR_SUBSTITUTION`.
+
+Installed authority is now probed and validated for every new app-server child
+generation. A READY runtime is returned without reprobe; after complete
+shutdown, the next generation reprobes the exact installed authority. Version
+or schema drift therefore fails before the second app-server factory call.
+The last successful manifest remains available only as sanitized diagnostic
+state and never suppresses later validation. The storage capability source is
+an immutable manager-owned `StorageRuntimeCapabilities` value.
+
+`DEAD_SCHEMA_SHA256_CONSTRUCTOR_AUTHORITY=REMOVED`.
+`CALLER_SCHEMA_STRING_CAN_CREATE_AUTHORITY=NO`.
+The only production schema authority path is the installed exact-version probe,
+the version-labelled accepted manifest, and `manifest.schema_sha256`.
+
+Root, parent, and persistent-home validation now uses component-by-component
+directory-descriptor traversal from `/` with `O_DIRECTORY`, `O_NOFOLLOW`, and
+`O_CLOEXEC` where available. Provisioning uses mkdirat/openat-style
+descriptor-relative operations. Recreate retains the manager reservation and
+lock, validates the opened root and parent-entry inode binding before and after
+mutation, and clears only through descriptor-relative no-follow operations.
+Deterministic ancestor, root-leaf, and provision substitution regressions
+reject replacement without mutating the foreign tree.
+
+Second-repair focused results:
+
+```text
+FOCUSED_TESTS=128
+FOCUSED_SKIPPED=0
+FOCUSED_FAILURES=0
+FOCUSED_ERRORS=0
+PYTHONPATH=src python3 -m compileall -q src tests       PASS
+git diff --check                                        PASS
+FULL_TESTS=1008
+FULL_SKIPPED=0
+FULL_FAILURES=0
+FULL_ERRORS=0
+```
+
+The one ordinary full regression was run as:
+
+```text
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+```
+
+All installed-authority tests use injected fake manifests and all runtime
+launch tests use fake process factories. No real Codex process, app-server
+business RPC, thread/delete operation, Telegram call, credential read/copy/
+symlink, or production process mutation occurred. P7.C2 schema version,
+migration hashes, delete orchestration, and finalization files remain
+unchanged.

@@ -1,10 +1,12 @@
 import asyncio
+import inspect
 import json
 import os
 import stat
 import tempfile
 import unittest
 from dataclasses import replace
+from unittest.mock import patch
 
 from codex_control.adapters.codex.capabilities import SCHEMA_SHA256, SUPPORTED_CODEX_VERSION, StorageRuntimeCapabilities, load_manifest
 from codex_control.adapters.codex.isolation import (
@@ -215,6 +217,113 @@ class StateRootAuthorityTests(unittest.TestCase):
         ancestor_profile = CodexProfile("ancestor", self.home, "Ancestor", os.path.join(ancestor, "state"))
         with self.assertRaises(IsolationError): IsolationPathAuthority((ancestor_profile,), require_global_roots=False).validate_profile_paths(ancestor_profile, state_root_may_be_missing=True)
 
+    def test_recreate_ancestor_substitution_is_rejected_without_foreign_mutation(self):
+        anchor = os.path.join(self.parent, "anchor")
+        foreign = os.path.join(self.parent, "foreign")
+        # Build the configured tree as <anchor>/state while retaining the
+        # already-provisioned root's exact layout and inode.
+        os.mkdir(anchor, 0o700)
+        os.rename(self.root, os.path.join(anchor, "state"))
+        self.profile = CodexProfile("profile", self.home, "Profile", os.path.join(anchor, "state"))
+        self.authority = IsolationPathAuthority((self.profile,), controller_db_path=self.controller, repository_root=os.path.join(self.parent, "repo"))
+        self.roots = IsolatedStateRoot(self.authority)
+        os.mkdir(foreign, 0o700)
+        foreign_root = os.path.join(foreign, "state")
+        foreign_profile = CodexProfile("profile", self.home, "Profile", foreign_root)
+        foreign_authority = IsolationPathAuthority((foreign_profile,), controller_db_path=self.controller, repository_root=os.path.join(self.parent, "repo"), require_global_roots=True)
+        IsolatedStateRoot(foreign_authority).provision(foreign_profile)
+        sentinel = os.path.join(foreign_root, "sqlite", "sentinel")
+        with open(sentinel, "wb") as handle: handle.write(b"keep")
+        original_open = os.open
+        substituted = False
+
+        def substitute(component, flags, mode=0o777, *, dir_fd=None):
+            nonlocal substituted
+            if component == "anchor" and dir_fd is not None and not substituted:
+                substituted = True
+                saved = anchor + ".saved"
+                os.rename(anchor, saved)
+                os.symlink(foreign, anchor)
+                self._ancestor_saved = saved
+            return original_open(component, flags, mode, dir_fd=dir_fd)
+
+        with patch("codex_control.adapters.codex.isolation.os.open", side_effect=substitute):
+            manager = CodexRuntimeManager([self.profile], client_version="0.1.0-test", isolation_authority=self.authority, installed_authority_probe=fake_installed_authority)
+            async def attempt():
+                reservation = await manager.reserve("profile")
+                with self.assertRaises(IsolationError): await manager.recreate_isolated_state_root(reservation)
+                await reservation.release()
+            asyncio.run(attempt())
+        os.unlink(anchor)
+        os.rename(self._ancestor_saved, anchor)
+        self.assertTrue(substituted)
+        with open(sentinel, "rb") as handle: self.assertEqual(handle.read(), b"keep")
+        self.roots.validate(self.profile)
+
+    def test_recreate_root_leaf_substitution_is_rejected_without_foreign_mutation(self):
+        foreign = os.path.join(self.parent, "foreign-leaf")
+        os.mkdir(foreign, 0o700)
+        foreign_root = os.path.join(foreign, "state")
+        foreign_profile = CodexProfile("profile", self.home, "Profile", foreign_root)
+        foreign_authority = IsolationPathAuthority((foreign_profile,), controller_db_path=self.controller, repository_root=os.path.join(self.parent, "repo"))
+        IsolatedStateRoot(foreign_authority).provision(foreign_profile)
+        sentinel = os.path.join(foreign_root, "sqlite", "sentinel")
+        with open(sentinel, "wb") as handle: handle.write(b"keep")
+        original_open = os.open
+        substituted = False
+
+        def substitute(component, flags, mode=0o777, *, dir_fd=None):
+            nonlocal substituted
+            if component == "state" and dir_fd is not None and not substituted:
+                substituted = True
+                saved = self.root + ".saved"
+                os.rename(self.root, saved)
+                os.symlink(foreign_root, self.root)
+                self._leaf_saved = saved
+            return original_open(component, flags, mode, dir_fd=dir_fd)
+
+        with patch("codex_control.adapters.codex.isolation.os.open", side_effect=substitute):
+            manager = CodexRuntimeManager([self.profile], client_version="0.1.0-test", isolation_authority=self.authority, installed_authority_probe=fake_installed_authority)
+            async def attempt():
+                reservation = await manager.reserve("profile")
+                with self.assertRaises(IsolationError): await manager.recreate_isolated_state_root(reservation)
+                await reservation.release()
+            asyncio.run(attempt())
+        os.unlink(self.root)
+        os.rename(self._leaf_saved, self.root)
+        self.assertTrue(substituted)
+        with open(sentinel, "rb") as handle: self.assertEqual(handle.read(), b"keep")
+        self.roots.validate(self.profile)
+
+    def test_provision_ancestor_substitution_is_rejected_without_foreign_creation(self):
+        anchor = os.path.join(self.parent, "provision-anchor")
+        foreign = os.path.join(self.parent, "provision-foreign")
+        os.mkdir(anchor, 0o700); os.mkdir(foreign, 0o700)
+        root = os.path.join(anchor, "state")
+        profile = CodexProfile("provision", self.home, "Provision", root)
+        authority = IsolationPathAuthority((profile,), controller_db_path=self.controller, repository_root=os.path.join(self.parent, "repo"))
+        roots = IsolatedStateRoot(authority)
+        original_open = os.open
+        substituted = False
+
+        def substitute(component, flags, mode=0o777, *, dir_fd=None):
+            nonlocal substituted
+            if component == "provision-anchor" and dir_fd is not None and not substituted:
+                nonlocal_anchor = anchor + ".saved"
+                substituted = True
+                os.rename(anchor, nonlocal_anchor)
+                os.symlink(foreign, anchor)
+                self._provision_anchor_saved = nonlocal_anchor
+            return original_open(component, flags, mode, dir_fd=dir_fd)
+
+        with patch("codex_control.adapters.codex.isolation.os.open", side_effect=substitute):
+            with self.assertRaises(IsolationError): roots.provision(profile)
+        os.unlink(anchor)
+        os.rename(self._provision_anchor_saved, anchor)
+        self.assertTrue(substituted)
+        self.assertFalse(os.path.exists(os.path.join(foreign, "state")))
+        self.assertFalse(os.path.exists(root))
+
     def test_recreate_is_bounded_idempotent_and_preserves_parent_sibling_controller(self):
         with open(os.path.join(self.root, "sqlite", "codex.sqlite"), "wb") as handle: handle.write(b"synthetic")
         with open(os.path.join(self.root, "logs", "codex.log"), "wb") as handle: handle.write(b"synthetic")
@@ -223,7 +332,7 @@ class StateRootAuthorityTests(unittest.TestCase):
         async def recreate_twice():
             manager = CodexRuntimeManager(
                 [self.profile], client_version=SUPPORTED_CODEX_VERSION,
-                schema_sha256=SCHEMA_SHA256, isolation_authority=self.authority,
+                isolation_authority=self.authority,
                 installed_authority_probe=fake_installed_authority,
             )
             reservation = await manager.reserve("profile")
@@ -245,7 +354,7 @@ class StateRootAuthorityTests(unittest.TestCase):
         async def recreate_with_busy_runtime():
             manager = CodexRuntimeManager(
                 [self.profile], client_version=SUPPORTED_CODEX_VERSION,
-                schema_sha256=SCHEMA_SHA256, isolation_authority=self.authority,
+                isolation_authority=self.authority,
                 installed_authority_probe=fake_installed_authority,
             )
             reservation = await manager.reserve("profile")
@@ -262,7 +371,7 @@ class StateRootAuthorityTests(unittest.TestCase):
         async def recreate_with_substitution():
             manager = CodexRuntimeManager(
                 [self.profile], client_version=SUPPORTED_CODEX_VERSION,
-                schema_sha256=SCHEMA_SHA256, isolation_authority=self.authority,
+                isolation_authority=self.authority,
                 installed_authority_probe=fake_installed_authority,
             )
             reservation = await manager.reserve("profile")
@@ -341,9 +450,19 @@ class ReservationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.executable = os.path.join(self.temp.name, "codex"); open(self.executable, "wb").close(); os.chmod(self.executable, 0o755)
     async def asyncTearDown(self): self.temp.cleanup()
     def manager(self, factory, **kwargs):
-        kwargs.setdefault("client_version", SUPPORTED_CODEX_VERSION); kwargs.setdefault("schema_sha256", SCHEMA_SHA256)
+        kwargs.setdefault("client_version", SUPPORTED_CODEX_VERSION)
         kwargs.setdefault("installed_authority_probe", fake_installed_authority)
         return CodexRuntimeManager([self.profile], executable=self.executable, process_factory=factory, isolation_authority=self.authority, initialize_timeout=.05, graceful_shutdown_timeout=.01, terminate_timeout=.01, kill_reap_timeout=.01, **kwargs)
+
+    def sequenced_probe(self, *manifests):
+        calls = []
+
+        async def probe():
+            index = len(calls)
+            calls.append(index)
+            return manifests[min(index, len(manifests) - 1)]
+
+        return probe, calls
 
     async def test_reserve_blocks_acquire_and_valid_release_allows_future_acquire(self):
         factory = _FakeFactory(); manager = self.manager(factory); reservation = await manager.reserve("p")
@@ -397,6 +516,61 @@ class ReservationRuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(manager._installed_manifest)
         self.assertEqual(manager._installed_manifest.codex_cli_version, "0.144.6")
         await manager.shutdown_all()
+
+    async def test_same_ready_runtime_does_not_reprobe(self):
+        probe, calls = self.sequenced_probe(load_manifest())
+        factory = _FakeFactory(); manager = self.manager(factory, installed_authority_probe=probe)
+        first = await manager.acquire("p")
+        self.assertEqual(len(calls), 1)
+        second = await manager.acquire("p")
+        self.assertIs(second, first)
+        self.assertEqual(len(calls), 1)
+        await manager.shutdown_all()
+
+    async def test_new_generation_reprobes(self):
+        probe, calls = self.sequenced_probe(load_manifest(), load_manifest())
+        factory = _FakeFactory(); manager = self.manager(factory, installed_authority_probe=probe)
+        await manager.acquire("p")
+        await manager.shutdown_profile("p")
+        await manager.acquire("p")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(factory.calls), 2)
+        await manager.shutdown_all()
+
+    async def test_version_drift_after_success_blocks_second_generation(self):
+        probe, calls = self.sequenced_probe(load_manifest(), replace(load_manifest(), codex_cli_version="0.144.7"))
+        factory = _FakeFactory(); manager = self.manager(factory, installed_authority_probe=probe)
+        await manager.acquire("p")
+        await manager.shutdown_profile("p")
+        with self.assertRaisesRegex(RuntimeErrorSafe, "capability_mismatch"):
+            await manager.acquire("p")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(factory.calls), 1)
+        self.assertEqual(factory.processes[0].returncode is not None, True)
+
+    async def test_schema_drift_after_success_blocks_second_generation(self):
+        probe, calls = self.sequenced_probe(load_manifest(), replace(load_manifest(), schema_sha256="0" * 64))
+        factory = _FakeFactory(); manager = self.manager(factory, installed_authority_probe=probe)
+        await manager.acquire("p")
+        await manager.shutdown_profile("p")
+        with self.assertRaisesRegex(RuntimeErrorSafe, "capability_mismatch"):
+            await manager.acquire("p")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(factory.calls), 1)
+
+    async def test_storage_capability_authority_is_immutable_manager_source(self):
+        capabilities = StorageRuntimeCapabilities()
+        probe, calls = self.sequenced_probe(load_manifest(), load_manifest())
+        factory = _FakeFactory(); manager = self.manager(factory, installed_authority_probe=probe, storage_capabilities=capabilities)
+        await manager.acquire("p")
+        await manager.shutdown_profile("p")
+        await manager.acquire("p")
+        self.assertIs(manager._storage_capabilities, capabilities)
+        self.assertEqual(len(calls), 2)
+        await manager.shutdown_all()
+
+    async def test_caller_schema_string_cannot_create_authority(self):
+        self.assertNotIn("schema_sha256", inspect.signature(CodexRuntimeManager).parameters)
 
     async def test_unavailable_installed_authority_blocks_before_factory(self):
         async def unavailable(): raise RuntimeError("probe failed")

@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import stat
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 from ...domain import CodexProfile
@@ -56,37 +55,82 @@ def _is_nested_mode(mode: int) -> bool:
     return not (mode & (stat.S_IWGRP | stat.S_IWOTH))
 
 
-def _walk_existing_components(path: str) -> None:
-    path_object = Path(path)
-    current = Path(path_object.anchor or os.sep)
-    parts = path_object.parts
-    for part in parts[1:]:
-        current /= part
+def _directory_open_flags() -> int:
+    return (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+
+
+def _open_directory_chain(path: str) -> int:
+    """Open an absolute directory one component at a time from the root fd."""
+    path = canonical_path(path)
+    parent_fd: int | None = None
+    try:
         try:
-            st = os.lstat(current)
-        except FileNotFoundError:
-            continue
+            parent_fd = os.open(os.sep, _directory_open_flags())
+        except OSError:
+            raise IsolationError("path_open_failed") from None
+        try:
+            if not stat.S_ISDIR(os.fstat(parent_fd).st_mode):
+                raise IsolationError("path_not_directory")
+        except IsolationError:
+            raise
         except OSError:
             raise IsolationError("path_inspection_failed") from None
-        if stat.S_ISLNK(st.st_mode):
-            raise IsolationError("symlink_path")
+        for component in path.split(os.sep)[1:]:
+            if not component:
+                continue
+            try:
+                child_fd = os.open(component, _directory_open_flags(), dir_fd=parent_fd)
+            except FileNotFoundError:
+                raise IsolationError("path_missing") from None
+            except OSError:
+                raise IsolationError("path_open_failed") from None
+            try:
+                try:
+                    child_stat = os.fstat(child_fd)
+                except OSError:
+                    raise IsolationError("path_inspection_failed") from None
+                if not stat.S_ISDIR(child_stat.st_mode):
+                    raise IsolationError("path_not_directory")
+            except Exception:
+                os.close(child_fd)
+                raise
+            os.close(parent_fd)
+            parent_fd = child_fd
+        assert parent_fd is not None
+        return parent_fd
+    except Exception:
+        if parent_fd is not None:
+            os.close(parent_fd)
+        raise
 
 
-def _metadata_path(path: str, *, must_exist: bool, directory: bool = False) -> os.stat_result | None:
-    _walk_existing_components(path)
+def _entry_matches_fd(parent_fd: int, name: str, expected_fd: int, category: str) -> None:
     try:
-        st = os.lstat(path)
-    except FileNotFoundError:
-        if not must_exist:
-            return None
-        raise IsolationError("path_missing") from None
+        entry = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        expected = os.fstat(expected_fd)
     except OSError:
-        raise IsolationError("path_inspection_failed") from None
-    if stat.S_ISLNK(st.st_mode):
-        raise IsolationError("symlink_path")
-    if directory and not stat.S_ISDIR(st.st_mode):
-        raise IsolationError("not_directory")
-    return st
+        raise IsolationError(category) from None
+    if (entry.st_dev, entry.st_ino) != (expected.st_dev, expected.st_ino):
+        raise IsolationError(category)
+
+
+def _chain_matches_fd(path: str, expected_fd: int, category: str) -> None:
+    current_fd = _open_directory_chain(path)
+    try:
+        try:
+            current = os.fstat(current_fd)
+            expected = os.fstat(expected_fd)
+        except OSError:
+            raise IsolationError(category) from None
+        if (current.st_dev, current.st_ino) != (expected.st_dev, expected.st_ino):
+            raise IsolationError(category)
+    finally:
+        os.close(current_fd)
 
 
 @dataclass(frozen=True)
@@ -154,7 +198,7 @@ class IsolationPathAuthority:
             raise IsolationError("profile_binding_mismatch")
         return configured
 
-    def validate_profile_paths(self, profile: CodexProfile, *, state_root_may_be_missing: bool = False) -> tuple[str, str]:
+    def _profile_paths(self, profile: CodexProfile, *, state_root_may_be_missing: bool = False) -> tuple[str, str]:
         configured = self._bound_profile(profile)
         home = canonical_path(configured.codex_home)
         state_root = canonical_path(configured.isolated_state_root or "")
@@ -162,13 +206,37 @@ class IsolationPathAuthority:
             raise IsolationError("protected_path_overlap")
         if paths_overlap(home, state_root):
             raise IsolationError("profile_home_state_overlap")
-        home_stat = _metadata_path(home, must_exist=True, directory=True)
-        assert home_stat is not None
-        if not _is_root_owned(home_stat) or not _is_persistent_mode(home_stat.st_mode):
-            raise IsolationError("persistent_home_ownership")
-        state_stat = _metadata_path(state_root, must_exist=not state_root_may_be_missing, directory=True)
-        if state_stat is not None and (not _is_root_owned(state_stat) or not _is_persistent_mode(state_stat.st_mode)):
-            raise IsolationError("state_root_ownership")
+        return home, state_root
+
+    def validate_profile_paths(self, profile: CodexProfile, *, state_root_may_be_missing: bool = False) -> tuple[str, str]:
+        home, state_root = self._profile_paths(profile, state_root_may_be_missing=state_root_may_be_missing)
+        home_fd = _open_directory_chain(home)
+        try:
+            home_stat = os.fstat(home_fd)
+            if not _is_root_owned(home_stat) or not _is_persistent_mode(home_stat.st_mode):
+                raise IsolationError("persistent_home_ownership")
+        except IsolationError:
+            raise
+        except OSError:
+            raise IsolationError("path_inspection_failed") from None
+        finally:
+            os.close(home_fd)
+        try:
+            state_fd = _open_directory_chain(state_root)
+        except IsolationError as error:
+            if state_root_may_be_missing and error.category == "path_missing":
+                return home, state_root
+            raise
+        try:
+            state_stat = os.fstat(state_fd)
+            if not _is_root_owned(state_stat) or not _is_persistent_mode(state_stat.st_mode):
+                raise IsolationError("state_root_ownership")
+        except IsolationError:
+            raise
+        except OSError:
+            raise IsolationError("path_inspection_failed") from None
+        finally:
+            os.close(state_fd)
         return home, state_root
 
     def validate_all(self, *, state_root_may_be_missing: bool = False) -> None:
@@ -196,7 +264,7 @@ def _validate_tree(fd: int) -> None:
             raise IsolationError("state_entry_ownership")
         if stat.S_ISDIR(st.st_mode):
             try:
-                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                child = os.open(name, _directory_open_flags(), dir_fd=fd)
             except OSError:
                 raise IsolationError("state_entry_open_failed") from None
             try:
@@ -222,21 +290,51 @@ class IsolatedStateRoot:
     def __init__(self, authority: IsolationPathAuthority) -> None:
         self.authority = authority
 
-    def _open_root(self, profile: CodexProfile) -> tuple[int, str, str]:
-        home, root = self.authority.validate_profile_paths(profile)
+    def _open_root_with_parent(self, profile: CodexProfile) -> tuple[int, int, str, str, str]:
+        configured = self.authority._bound_profile(profile)
+        home, root = self.authority._profile_paths(configured)
+        home_fd = _open_directory_chain(home)
         try:
-            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        except OSError:
-            raise IsolationError("state_root_open_failed") from None
+            home_stat = os.fstat(home_fd)
+            if not _is_root_owned(home_stat) or not _is_persistent_mode(home_stat.st_mode):
+                raise IsolationError("persistent_home_ownership")
+        finally:
+            os.close(home_fd)
+
+        parent = os.path.dirname(root)
+        leaf = os.path.basename(root)
+        if not leaf:
+            raise IsolationError("state_root_open_failed")
+        parent_fd = _open_directory_chain(parent)
         try:
-            st = os.fstat(fd)
-            if st.st_uid != 0 or not _is_private_mode(st.st_mode, 0o700):
-                raise IsolationError("state_root_ownership")
-            self._validate_layout(fd, profile.profile_id)
+            parent_stat = os.fstat(parent_fd)
+            if not _is_root_owned(parent_stat) or not _is_persistent_mode(parent_stat.st_mode):
+                raise IsolationError("state_parent_ownership")
+            try:
+                root_fd = os.open(leaf, _directory_open_flags(), dir_fd=parent_fd)
+            except OSError:
+                raise IsolationError("state_root_open_failed") from None
+            try:
+                root_stat = os.fstat(root_fd)
+                if not stat.S_ISDIR(root_stat.st_mode):
+                    raise IsolationError("state_root_open_failed")
+                _chain_matches_fd(parent, parent_fd, "state_root_replaced")
+                _entry_matches_fd(parent_fd, leaf, root_fd, "state_root_replaced")
+                if root_stat.st_uid != 0 or not _is_private_mode(root_stat.st_mode, 0o700):
+                    raise IsolationError("state_root_ownership")
+                self._validate_layout(root_fd, configured.profile_id)
+            except Exception:
+                os.close(root_fd)
+                raise
+            return root_fd, parent_fd, home, root, leaf
         except Exception:
-            os.close(fd)
+            os.close(parent_fd)
             raise
-        return fd, home, root
+
+    def _open_root(self, profile: CodexProfile) -> tuple[int, str, str]:
+        root_fd, parent_fd, home, root, _ = self._open_root_with_parent(profile)
+        os.close(parent_fd)
+        return root_fd, home, root
 
     def _validate_layout(self, fd: int, profile_id: str) -> None:
         expected = _expected_marker(profile_id)
@@ -250,7 +348,11 @@ class IsolatedStateRoot:
         if not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_uid != 0 or not _is_private_mode(marker_stat.st_mode, 0o600):
             raise IsolationError("marker_invalid")
         try:
-            marker_fd = os.open(STATE_ROOT_MARKER, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+            marker_fd = os.open(
+                STATE_ROOT_MARKER,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                dir_fd=fd,
+            )
             try:
                 content = os.read(marker_fd, MAX_MARKER_BYTES + 1)
             finally:
@@ -263,7 +365,7 @@ class IsolatedStateRoot:
             entry = _safe_entry_stat(directory, fd)
             if not stat.S_ISDIR(entry.st_mode) or entry.st_uid != 0 or not _is_private_mode(entry.st_mode, 0o700):
                 raise IsolationError("state_directory_invalid")
-            child = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            child = os.open(directory, _directory_open_flags(), dir_fd=fd)
             try:
                 _validate_tree(child)
             finally:
@@ -274,35 +376,75 @@ class IsolatedStateRoot:
         os.close(fd)
 
     def provision(self, profile: CodexProfile) -> None:
-        _, root = self.authority.validate_profile_paths(profile, state_root_may_be_missing=True)
-        parent = os.path.dirname(root)
-        parent_stat = _metadata_path(parent, must_exist=True, directory=True)
-        assert parent_stat is not None
-        if not _is_root_owned(parent_stat) or not _is_persistent_mode(parent_stat.st_mode):
-            raise IsolationError("state_parent_ownership")
+        configured = self.authority._bound_profile(profile)
+        home, root = self.authority._profile_paths(configured, state_root_may_be_missing=True)
+        home_fd = _open_directory_chain(home)
         try:
-            os.mkdir(root, 0o700)
-        except FileExistsError:
-            self.validate(profile)
-            return
+            home_stat = os.fstat(home_fd)
+            if not _is_root_owned(home_stat) or not _is_persistent_mode(home_stat.st_mode):
+                raise IsolationError("persistent_home_ownership")
+        finally:
+            os.close(home_fd)
+        parent = os.path.dirname(root)
+        leaf = os.path.basename(root)
+        if not leaf:
+            raise IsolationError("state_root_create_failed")
+        parent_fd = _open_directory_chain(parent)
+        try:
+            parent_stat = os.fstat(parent_fd)
+            if not _is_root_owned(parent_stat) or not _is_persistent_mode(parent_stat.st_mode):
+                raise IsolationError("state_parent_ownership")
+            _chain_matches_fd(parent, parent_fd, "state_root_replaced")
+            created = False
+            try:
+                os.mkdir(leaf, 0o700, dir_fd=parent_fd)
+                created = True
+            except FileExistsError:
+                pass
+            except OSError:
+                raise IsolationError("state_root_create_failed") from None
+            try:
+                root_fd = os.open(leaf, _directory_open_flags(), dir_fd=parent_fd)
+            except OSError:
+                raise IsolationError("state_root_open_failed") from None
+            try:
+                root_stat = os.fstat(root_fd)
+                _entry_matches_fd(parent_fd, leaf, root_fd, "state_root_replaced")
+                if root_stat.st_uid != 0 or not _is_private_mode(root_stat.st_mode, 0o700):
+                    raise IsolationError("state_root_ownership")
+                if not created:
+                    self._validate_layout(root_fd, configured.profile_id)
+                    return
+                # The descriptor and its parent entry were opened from the same
+                # parent descriptor. Recheck immediately before the first write.
+                _entry_matches_fd(parent_fd, leaf, root_fd, "state_root_replaced")
+                for directory in ("sqlite", "logs"):
+                    os.mkdir(directory, 0o700, dir_fd=root_fd)
+                    child_fd = os.open(directory, _directory_open_flags(), dir_fd=root_fd)
+                    try:
+                        child_stat = os.fstat(child_fd)
+                        if child_stat.st_uid != 0 or not _is_private_mode(child_stat.st_mode, 0o700):
+                            raise IsolationError("state_directory_invalid")
+                    finally:
+                        os.close(child_fd)
+                marker_fd = os.open(
+                    STATE_ROOT_MARKER,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                    0o600,
+                    dir_fd=root_fd,
+                )
+                try:
+                    os.write(marker_fd, _expected_marker(configured.profile_id))
+                finally:
+                    os.close(marker_fd)
+                _entry_matches_fd(parent_fd, leaf, root_fd, "state_root_replaced")
+                self._validate_layout(root_fd, configured.profile_id)
+            finally:
+                os.close(root_fd)
         except OSError:
             raise IsolationError("state_root_create_failed") from None
-        try:
-            os.chmod(root, 0o700)
-            for directory in ("sqlite", "logs"):
-                os.mkdir(os.path.join(root, directory), 0o700)
-                os.chmod(os.path.join(root, directory), 0o700)
-            marker_path = os.path.join(root, STATE_ROOT_MARKER)
-            descriptor = os.open(marker_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-            try:
-                os.write(descriptor, _expected_marker(profile.profile_id))
-            finally:
-                os.close(descriptor)
-            self.validate(profile)
-        except Exception:
-            # Only this newly created, still-unvalidated root is touched.  Do not
-            # recursively remove it: leave a failed root for explicit inspection.
-            raise
+        finally:
+            os.close(parent_fd)
 
     def recreate(self, profile: CodexProfile, *, reservation: Any = None) -> None:
         """Reject raw reservation tokens; the runtime manager owns recreation."""
@@ -310,27 +452,42 @@ class IsolatedStateRoot:
 
     def _recreate_bound(self, profile: CodexProfile) -> None:
         configured = self.authority._bound_profile(profile)
-        fd, _, root = self._open_root(configured)
+        fd, parent_fd, _, root, leaf = self._open_root_with_parent(configured)
         try:
             initial = os.fstat(fd)
+            _chain_matches_fd(os.path.dirname(root), parent_fd, "state_root_replaced")
+            _entry_matches_fd(parent_fd, leaf, fd, "state_root_replaced")
             _clear_directory(fd)
             current = os.fstat(fd)
             if (initial.st_dev, initial.st_ino) != (current.st_dev, current.st_ino):
                 raise IsolationError("state_root_replaced")
+            _entry_matches_fd(parent_fd, leaf, fd, "state_root_replaced")
             for directory in ("sqlite", "logs"):
+                _entry_matches_fd(parent_fd, leaf, fd, "state_root_replaced")
                 os.mkdir(directory, 0o700, dir_fd=fd)
-            marker_fd = os.open(STATE_ROOT_MARKER, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+            _entry_matches_fd(parent_fd, leaf, fd, "state_root_replaced")
+            marker_fd = os.open(
+                STATE_ROOT_MARKER,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+                0o600,
+                dir_fd=fd,
+            )
             try:
                 os.write(marker_fd, _expected_marker(configured.profile_id))
             finally:
                 os.close(marker_fd)
+            current = os.fstat(fd)
+            if (initial.st_dev, initial.st_ino) != (current.st_dev, current.st_ino):
+                raise IsolationError("state_root_replaced")
+            _entry_matches_fd(parent_fd, leaf, fd, "state_root_replaced")
+            self._validate_layout(fd, configured.profile_id)
         except IsolationError:
             raise
         except OSError:
             raise IsolationError("state_root_recreate_failed") from None
         finally:
             os.close(fd)
-        self.validate(configured)
+            os.close(parent_fd)
 
 
 def _clear_directory(fd: int) -> None:
@@ -345,9 +502,10 @@ def _clear_directory(fd: int) -> None:
         if not _is_root_owned(st) or not _is_nested_mode(st.st_mode):
             raise IsolationError("state_entry_ownership")
         if stat.S_ISDIR(st.st_mode):
-            child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            child = os.open(name, _directory_open_flags(), dir_fd=fd)
             try:
                 _clear_directory(child)
+                _entry_matches_fd(fd, name, child, "state_root_mutation_failed")
             finally:
                 os.close(child)
             try:
