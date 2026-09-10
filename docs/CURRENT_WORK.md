@@ -38,14 +38,7 @@ ADR-0045 supersedes the earlier mistaken interpretation that the persistent `COD
 
 ## P7.C4 — COMPLETE / architect accepted
 
-Accepted lineage:
-
-- initial: `70cdf0edc3f319c0254313eabc5d3c56c2f9ef16`;
-- first repair: `fe646af1487d13571337e605641ecc86dbb1f6c7`;
-- final accepted: `df161566cab5f8fa7ccf70f94379c78a9fb02ffe`;
-- accepted tree: `be2ea7a5eead9b2d61039a2d98ec4d2b80047526`.
-
-Acceptance: `docs/evidence/p7c4/P7C4_ARCHITECT_ACCEPTANCE_2026-09-10.md`.
+Accepted final implementation: `df161566cab5f8fa7ccf70f94379c78a9fb02ffe`; accepted tree `be2ea7a5eead9b2d61039a2d98ec4d2b80047526`.
 
 C4 adds schema-v4 UNKNOWN containment metadata and composes the corrected local hard-delete lifecycle. Confirmed cleanup is `reserve -> shutdown -> quiesce -> isolated payload reset -> persistent exact-thread scan -> finalize -> release`. UNKNOWN remains official UNKNOWN, retains binding and no tombstone/finalizer, while isolated local containment may be recorded separately. Isolated reset is crash-resumable and the cleanup coordinator is bound to the actual protected controller SQLite.
 
@@ -53,23 +46,11 @@ Under ADR-0045, C4 shutdown/quiescence applies only to CodexControl-owned childr
 
 ## P7.C5 — COMPLETE / architect accepted
 
-Accepted corrected proof lineage:
-
-- corrected architect base: `44dcb874659940998734fdfe76fb8683250be05d`;
-- proof candidate: `d963a4982382d28a90ed18ac9d6384ba424f7dc0`;
-- architect proof-review correction: `29448176312d47a51b7b321a6268398eff724c4a`;
-- final accepted proof repair: `946ddf7ac6f7c3539bc3f344c6edf21d6ffce528`;
-- accepted tree: `c4d5310a2afb05fc4f2f92eea822a1ccc7a8c88c`.
-
-Acceptance: `docs/evidence/p7c5/P7C5_ARCHITECT_ACCEPTANCE_2026-09-10.md`.
-
-Historical stopped C5 proof `581a31e9a450230eed50bad6c247159898d72f7f` remains evidence of a corrected architect-contract mistake, not a production C4 defect.
+Accepted final proof: `946ddf7ac6f7c3539bc3f344c6edf21d6ffce528`; accepted tree `c4d5310a2afb05fc4f2f92eea822a1ccc7a8c88c`.
 
 C5 proves the complete fake hard-delete acceptance across accepted C2/C3/C4: production exact-thread gate, independent test-only marker oracle, full isolated state/log family cleanup, persistent residual blockers, UNKNOWN containment, both isolated-subtree crash/retry paths, concurrency/cancellation, no-P1 replay, actual controller DB identity/schema authority and unrelated session/history baseline preservation.
 
 Final executor evidence: dedicated C5 tests `15`; focused `248`; ordinary full regression `1065`; zero skipped/failures/errors. Production source changed: no. All real Codex/Telegram/credential/production-effect counters: zero.
-
-Dynamic mount/namespace mutation was intentionally not run; the bounded risk is carried to C6/P13.
 
 ## ADR-0045 — shared persistent CODEX_HOME correction
 
@@ -79,41 +60,53 @@ A configured authenticated persistent `CODEX_HOME` may be concurrently shared by
 
 Other Codex processes using the same persistent home are allowed and must not be killed/stopped/signaled merely to make the home quiet. They are a blocker only if they use or ambiguously alias the exact CodexControl-owned isolated state root/controller boundary.
 
-## Current slice
+## P7.C6 Run 1 — REAL RUN EXECUTED / REJECTED
 
-**P7.C6 — NEXT / REAL-EFFECT ONE-SHOT, WITH SHARED-HOME CORRECTION.**
+Run-1 failure/evidence commit:
 
-Base contract:
+`785a82e2e9bc392173ea1e910b490f84cfa590b2`
 
-`docs/evidence/p7c6/P7C6_ARCHITECT_EXECUTION_CONTRACT_2026-09-10.md`.
+Architect review:
 
-Binding correction with precedence:
+`docs/evidence/p7c6/P7C6_RUN1_ARCHITECT_REVIEW_2026-09-10.md`
 
-`docs/evidence/p7c6/P7C6_ARCHITECT_CONTRACT_CORRECTION_SHARED_HOME_2026-09-10.md`.
+Run 1 used `/root/.codex_second` in the accepted `SHARED_AUTHENTICATED` mode. Shared-home process presence was allowed; isolated-root/controller external users were zero; unrelated-process termination and manual persistent-home cleanup were zero.
 
-P7.C6 shall use the existing authenticated configured home `/root/.codex_second` in `SHARED_AUTHENTICATED` mode. Live unrelated Codex processes with that same `CODEX_HOME` and their open descriptors under that persistent home are not blockers by themselves.
+The single authorized real run performed one `model/list`, one new disposable thread, one runtime-generation resume and three turns. Turn 1 and Turn 2 passed their bounded persistence proof. Run 1 then stopped at the Turn-3 approval gate with `P7C6_APPROVAL_NOT_EXACTLY_ALLOWED`. No interrupt, official delete, thread/read or thread/list occurred. The raw target thread identity remains only in the root-owned retained recovery ledger.
 
-C6 must create a fresh run-owned isolated state root and separate synthetic controller DB and prove that no unrelated process uses those exact protected boundaries. It must not kill, stop, signal or request shutdown of unrelated Codex processes.
+The zero-effect forensic could not reconstruct the exact normalized approval request and recorded `C6_APPROVAL_HANDLING_RESULT=RESPONSE_UNKNOWN`; therefore the old approval request must never be answered/retried or reinterpreted.
 
-The previous C6 profile-authority/process-owner stops occurred before any authenticated business RPC and consumed none of the one-shot budget. No harness/evidence/commit was created by those stops.
+Independent architect code review establishes two C6 harness defects:
 
-C6 may still create exactly one new disposable real thread, run the bounded real T3 persistence/approval/interrupt proof, and dispatch exactly one official P1.9 `thread/delete` through the complete corrected application cleanup path.
+1. `_ExactApprovalOperator` used literal membership against three guessed command strings instead of the previously proven structural `EXACT_INNER|ONE_SHELL_WRAPPER` grammar and did not enforce exact Turn-3/cwd identity.
+2. The declared host-level `ONE_SHOT_LEDGER` is only checked and is never materialized by the harness; the actual recovery ledger is a fresh per-run file under `/tmp`.
 
-Before real business RPC, C6 must perform the corrected read-only mount/alias/protected-boundary preflight. Sharing the persistent home is allowed; use or unresolved aliasing of the C6 isolated root/controller boundary is not.
+These are acceptance-harness defects, not established P1.7/P1.8/P1.9/C3/C4/C5 production defects. Operator discipline prevented a duplicate real run.
 
-PASS requires exact real `DELETE_CONFIRMED`, complete `DELETE_CONFIRMED_PENDING_STORAGE` local cleanup to `DELETED`, zero exact target thread residual, zero known synthetic marker residual across measured dialogue-bearing persistent/isolated families, zero proof errors and green ordinary regression.
+`P7C6_PRODUCTION_DEFECT_ESTABLISHED=NO`.
 
-The persistent home is a live shared authority, so C6 does not require its entire session/history tree to remain globally stable while unrelated processes continue working. The acceptance proof is target-specific and must also prove CodexControl made zero unrelated process termination/signal effects and zero manual persistent-home cleanup effects.
+P7.C6 remains **NOT ACCEPTED**.
 
-Any `DELETE_UNKNOWN`, target residual, local confirmed-pending failure, protected-boundary alias/use conflict, production defect or inconclusive physical proof keeps P8/P9 blocked. No real C6 run is automatically retried.
+## Current slice — retained Turn-3 forensic
+
+The sole next executable action is a **zero-real-effect retained Turn-3 forensic**.
+
+Frozen contract:
+
+`docs/evidence/p7c6/P7C6_RETAINED_TURN3_FORENSIC_CONTRACT_2026-09-10.md`
+
+It may read the retained root-only recovery identity and the exact already-persisted target session/rollout artifact locally, but may perform zero Codex process/app-server starts and zero Codex business RPCs.
+
+It must determine whether Run-1 Turn 3 has a durable terminal record, whether any approval/command item remains pending/running/ambiguous, and whether any run-owned delayed process/sentinel remains. Raw IDs, prompts, responses, command content and markers must not enter Git evidence.
+
+Current authority:
+
+`P7C6_CONTINUATION_AUTHORIZED=NO`.
+
+No new thread, resume, turn, approval response, interrupt, delete, read or list is authorized until this forensic receives architect review.
 
 ## Remaining lane
 
-After independent architect acceptance of P7.C6 only:
+Only after a safe retained-Turn-3 boundary is independently established may the architect decide whether to authorize a tightly bounded same-thread continuation with a repaired harness. Any continuation must not create a new real thread and must never resend the Run-1 approval request.
 
-- P8 deployment packaging/rollback reopens;
-- P9 server-80 live Telegram acceptance reopens.
-
-## Current non-goals
-
-Do not touch the historical rejected P7 thread. Do not require persistent-home exclusivity. Do not stop unrelated Codex processes merely because they share `/root/.codex_second`. Do not create/copy/migrate a new authenticated profile. Do not copy credentials. Do not call `thread/read`/`thread/list`. Do not retry an ambiguous delete. Do not manually delete persistent session/history to manufacture a pass. Do not start P8/P9 before C6 acceptance.
+P8 and P9 remain blocked until P7.C6 is independently accepted.
