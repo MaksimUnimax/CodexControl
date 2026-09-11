@@ -13,20 +13,7 @@ Date: 2026-09-11
 
 ## P7.C6 retained-thread history
 
-Run-1 evidence: `785a82e2e9bc392173ea1e910b490f84cfa590b2`.
-
-The retained P7.C6 thread is permanently forensic-only. Accepted forensic authorities include Turn-3 evidence `e6835e7eaff21ce6a452c24f3309269df67c82ba`, Run-1 latch forensic `c308c765d9915844fce97d1d1f6c933e302a75aa`, retained-thread SHA-256 `9be5e1f196c868df772e6971186905ee81f9ba02fe9f4cf0f72f13a2e55e41f6`, and Run-1 latch SHA-256 `50616410354022747284c1ce61bd02b8ecd1eb2636657eac502092fde800d55e`.
-
-P7.C6 Repair-6 preparation is architect accepted at `76a7aa24e3cfdfb12c3314a7e01691d4a943b551`, tree `92abebdfb3390d4c58f4aefc00aa84b83841e99e`.
-
-The one-shot same-thread real continuation executed once, was consumed, and may never be rerun. Architect forensic review establishes:
-
-- model/list and retained-thread resume completed;
-- Turn-4 start confirmed and Turn-4 persisted terminal `COMPLETED` with exact sentinel proof;
-- approval bridge observed zero approval requests/responses and timed out;
-- Turn-5 was not reached;
-- official P1.9 delete was not dispatched;
-- root cause is a harness acceptance-stimulus defect, not a production lifecycle/delete defect.
+The P7.C6 retained thread is permanently forensic-only. The consumed real continuation was architect-reviewed as a harness approval-stimulus failure: Turn-4 completed with exact sentinel proof but emitted no approval request; Turn-5 and official delete were never reached.
 
 Final P7.C6 classifications:
 
@@ -40,20 +27,13 @@ Final P7.C6 classifications:
 
 `P7C6_REAL_RERUN_AUTHORIZED=NO`
 
+Accepted P7.C6 prep authority remains Repair-6 `76a7aa24e3cfdfb12c3314a7e01691d4a943b551`, tree `92abebdfb3390d4c58f4aefc00aa84b83841e99e`.
+
 ## P7.C7 approval-stimulus authority
 
-Authority evidence lineage:
+Evidence lineage `5ec38a38cef6363bb3709aefe57c0dedae5f5e13` -> `e00392fbff6894e1857eb4c8f1e1937a88ca1e96` is architect accepted as a correct fail-closed result.
 
-- `5ec38a38cef6363bb3709aefe57c0dedae5f5e13` — initial evidence;
-- `e00392fbff6894e1857eb4c8f1e1937a88ca1e96` — final count correction.
-
-Architect accepted the zero-effect result as correctly fail-closed:
-
-- exact upstream `rust-v0.144.6` release commit is `5d1fbf26c43abc65a203928b2e31561cb039e06d`;
-- internal command vector -> app-server `shlex_join` wire mapping is established;
-- approval routing is conditional;
-- future model-generated concrete command vector/wire grammar is not established offline;
-- no ALLOW matcher is authorized from persisted Run-1 command data.
+Exact upstream `rust-v0.144.6` release commit `5d1fbf26c43abc65a203928b2e31561cb039e06d` proves internal command vector -> approval event -> app-server `shlex_join` projection, but preserved/offline evidence does not establish which concrete vector a future model turn will generate.
 
 `P7C7_APPROVAL_STIMULUS_AUTHORITY=ACCEPTED_AS_NOT_ESTABLISHED`
 
@@ -61,42 +41,57 @@ Architect accepted the zero-effect result as correctly fail-closed:
 
 ## P7.C7 DENY-only approval-probe preparation
 
-Initial prep candidate:
+Initial prep candidate `e4bcdf43ba3f5c50a65f7f1085781eec41770ede` was REWORK_REQUIRED.
 
-`e4bcdf43ba3f5c50a65f7f1085781eec41770ede`
+Repair-1 candidate:
+
+`bffe4d05340545edd44d503c9a16f1128c65ca7d`
+
+Repair-1 candidate tree:
+
+`2378c6f0c2b605413cd36c8383d01ee5f0c8f887`
+
+Repair-1 evidence:
+
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_EVIDENCE_2026-09-11.md`
 
 Architect review:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_ARCHITECT_REVIEW_2026-09-11.md`
 
-The candidate preserves the central DENY-only idea and concurrent approval/terminal observation, but it is **REWORK_REQUIRED** before any real fresh thread can be authorized.
+Repair-1 useful improvements are retained: zero ALLOW paths, exact-identity wire capture when Turn authority already exists, mismatch not consuming wire authority, exact wire schema, observational sentinel classes, deterministic synthetic race classification, DENY budget surface, runtime-vs-command boundary separation, exact touch authority, exact-group synthetic signal accounting and a disabled future adapter route.
 
-Blocking harness-only defects:
+Repair-1 is still **REWORK_REQUIRED** before any real fresh thread can be authorized.
 
-- raw wire authority can be consumed by the first identity-mismatched request;
-- sentinel identity uses unsafe substring matching;
-- same-tick approval/terminal race is not deterministically classified;
-- future effect budget omits real DENY-response accounting;
-- process-group helper has silent scan errors and clamped/unaccounted signal paths;
-- command-boundary scanner would false-fail normal isolated runtime payload and under-validates exact touch sentinel semantics;
-- root-only wire record lacks exact schema/hash-consistency validation;
-- gated real probe method remains intentionally inert rather than fully materialized.
+Remaining harness-only blockers:
+
+- approval observation is armed before exact Turn authority exists, so a fast request can be DENIED but permanently miss authoritative wire capture;
+- the future real unittest still executes the real coroutine directly instead of through one dedicated parent/child process-group watchdog;
+- real inner waits and runtime shutdown are not uniformly finite/fail-safe;
+- the root-only recovery record does not durably journal effect intent/result chronology;
+- DENY response accounting occurs after the production response boundary and can miss an ambiguous wire effect; the operator response counter is not authoritative in the real path;
+- child sanitized result can claim zero process-group members from default values instead of parent measurement;
+- `/proc` PID disappearance is currently conflated with real scan error;
+- the real path does not use the proven finite approval/terminal race and can wait unbounded after the approval drain stops;
+- final command-boundary proof is ordered before guaranteed runtime/process containment.
 
 No production `src/**` defect is established.
 
-Binding Repair-1 contract:
+Binding Repair-2 contract:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR2_CONTRACT_2026-09-11.md`
 
 ## Current executable slice
 
-**P7.C7 DENY-only approval-probe prep Repair-1 — NEXT / ZERO REAL EFFECT.**
+**P7.C7 DENY-only approval-probe prep Repair-2 — NEXT / ZERO REAL EFFECT.**
 
-Repair-1 is harness/tests/evidence only. It must close the reviewed evidence-authority/race/budget/watchdog/boundary defects and materialize the complete future real probe path under a disabled gate. No fresh thread, app-server or approval response is authorized during Repair-1.
+Repair-2 is harness/tests/evidence only. It must preserve Repair-1 safety properties while materializing one faithful but disabled real execution architecture: exact Turn authority before approval dequeue, durable effect journal, truthful DENY accounting, finite inner ownership, one dedicated child/session/process group, parent-measured final group quiescence and exact parent-final result authority.
 
-`P7C7_DENY_ONLY_PROBE_PREPARATION=REWORK_REQUIRED`
+No fresh real thread, app-server, approval response or real P7.C7 latch/result is authorized during Repair-2.
 
-`P7C7_DENY_ONLY_PROBE_PREP_REPAIR1=NEXT_ZERO_REAL_EFFECT`
+`P7C7_DENY_ONLY_PROBE_PREP_REPAIR1=REWORK_REQUIRED`
+
+`P7C7_DENY_ONLY_PROBE_PREP_REPAIR2=NEXT_ZERO_REAL_EFFECT`
 
 `P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
 
