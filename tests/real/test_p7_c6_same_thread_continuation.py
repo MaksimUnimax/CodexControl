@@ -64,9 +64,9 @@ AUTHORIZATION = "AUTHORIZED_RETAINED_THREAD_T4_T5_DELETE_2026_09_10"
 EXPECTED_HEAD_ENV = "CODEXCONTROL_P7C6_CONTINUATION_EXPECTED_HEAD"
 EXPECTED_TREE_ENV = "CODEXCONTROL_P7C6_CONTINUATION_EXPECTED_TREE"
 EXPECTED_REPOSITORY = "/opt/codex-control"
-ARCHITECT_BASE_SHA = "5cc500be0087732518eb16bee0dc71dc21f786c0"
-ARCHITECT_BASE_TREE = "d8b03629a47c6803d3ac118720acb74e453d67c5"
-REVIEWED_CANDIDATE = "821be881f1e6b04d3905080191cc0f1141799923"
+ARCHITECT_BASE_SHA = "de398808cfce7d4c42da3d08109e5a166078cd34"
+ARCHITECT_BASE_TREE = "1d5166d53b80a30afe0d4b89651a53648e9702a4"
+REVIEWED_CANDIDATE = "4d98e2b6170e76534fa18274236605f77440f740"
 PROFILE_ID = "server-80-codexcontrol"
 SERVER_ID = "server-80"
 PERSISTENT_HOME = "/root/.codex_second"
@@ -114,6 +114,34 @@ class BudgetError(AssertionError):
 
 class SanitizationError(AssertionError):
     pass
+
+
+class TaskNonconvergedError(TimeoutError):
+    """A finite owner stopped observing a task without a terminal state."""
+
+    def __init__(self, owner: "OwnedTask") -> None:
+        self.owner = owner
+        super().__init__(f"{owner.name}: FINAL_NONCONVERGENCE")
+
+
+@dataclass
+class OwnedTask:
+    task: asyncio.Task[Any]
+    name: str
+    phase: str = "PRIMARY_WAIT"
+    terminalized: bool = False
+    nonconverged: bool = False
+
+    def done(self) -> bool:
+        return self.task.done()
+
+
+def _create_owned_task(awaitable: Any, name: str) -> OwnedTask:
+    return OwnedTask(asyncio.create_task(awaitable), name)
+
+
+def _as_owned_task(value: OwnedTask | asyncio.Task[Any], name: str = "owned-task") -> OwnedTask:
+    return value if isinstance(value, OwnedTask) else OwnedTask(value, name)
 
 
 def _sha256(value: str | bytes) -> str:
@@ -780,22 +808,63 @@ def _count_chunked(chunks: Iterable[bytes], needles: Sequence[bytes]) -> tuple[i
     return tuple(counts)
 
 
+@dataclass(frozen=True)
+class DescriptorScan:
+    counts: tuple[int, ...]
+    scan_errors: int
+    limited: bool
+    bytes_read: int
+    identity: tuple[int, int] | None
+
+
+def _safe_regular_metadata(value: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(value.st_mode)
+        and value.st_uid == 0
+        and value.st_gid == 0
+        and value.st_nlink == 1
+        and not stat.S_IMODE(value.st_mode) & (stat.S_IWGRP | stat.S_IWOTH)
+    )
+
+
+def _safe_path_components(root: Path, path: Path) -> bool:
+    """Require every existing pathname component up to the file to be safe."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+    cursor = root
+    try:
+        root_value = cursor.lstat()
+        if not stat.S_ISDIR(root_value.st_mode) or root_value.st_uid != 0 or root_value.st_gid != 0 or stat.S_IMODE(root_value.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
+            return False
+        for component in relative.parts[:-1]:
+            cursor /= component
+            value = cursor.lstat()
+            if not stat.S_ISDIR(value.st_mode) or value.st_uid != 0 or value.st_gid != 0 or stat.S_IMODE(value.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
+                return False
+    except OSError:
+        return False
+    return True
+
+
 def _scan_descriptor(
     path: Path, needles: Sequence[bytes], *, max_file_bytes: int, chunk_bytes: int,
     max_bytes: int | None = None,
-) -> tuple[tuple[int, ...], int, bool, int]:
-    """Read one regular file through an owned no-follow fd and revalidate its pathname."""
+) -> DescriptorScan:
+    """Read one safe regular file and return the identity verified by that read."""
+    empty = DescriptorScan((0,) * len(needles), 0, False, 0, None)
     if max_bytes is not None and (type(max_bytes) is not int or max_bytes <= 0):
-        return (0,) * len(needles), 1, False, 0
+        return replace(empty, scan_errors=1)
     try:
         before = path.lstat()
-        if not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_gid != 0 or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
-            return (0,) * len(needles), 1, False, 0
+        if not _safe_regular_metadata(before):
+            return replace(empty, scan_errors=1)
         if before.st_size > max_file_bytes:
-            return (0,) * len(needles), 0, True, 0
+            return replace(empty, limited=True)
         fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
     except OSError:
-        return (0,) * len(needles), 1, False, 0
+        return replace(empty, scan_errors=1)
     chunks: list[bytes] = []
     total = 0
     error = False
@@ -805,8 +874,8 @@ def _scan_descriptor(
         opened = os.fstat(fd)
         identity = (before.st_dev, before.st_ino)
         metadata = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid, value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
-        if metadata(opened) != metadata(before) or not stat.S_ISREG(opened.st_mode):
-            return (0,) * len(needles), 1, False, 0
+        if metadata(opened) != metadata(before) or not _safe_regular_metadata(opened):
+            return replace(empty, scan_errors=1)
         while True:
             try:
                 remaining_file = max_file_bytes - total
@@ -837,7 +906,13 @@ def _scan_descriptor(
             os.close(fd)
         except OSError:
             error = True
-    return ((0,) * len(needles) if error else _count_chunked(chunks, needles), 1 if error else 0, limited, total)
+    return DescriptorScan(
+        (0,) * len(needles) if error else _count_chunked(chunks, needles),
+        1 if error else 0,
+        limited,
+        total,
+        None if error else identity,
+    )
 
 
 def _marker_oracle(
@@ -874,17 +949,17 @@ def _marker_oracle(
             if bytes_scanned >= max_bytes:
                 limit_exceeded = True
                 break
-            found, scan_errors, file_limit, bytes_read = _scan_descriptor(
+            scan = _scan_descriptor(
                 path, needles, max_file_bytes=max_file_bytes, chunk_bytes=chunk_bytes,
                 max_bytes=max_bytes - bytes_scanned,
             )
             files_scanned += 1
-            if file_limit:
+            if scan.limited:
                 limit_exceeded = True
-            if scan_errors:
-                errors += scan_errors
-            bytes_scanned += bytes_read
-            for index, value in enumerate(found):
+            if scan.scan_errors:
+                errors += scan.scan_errors
+            bytes_scanned += scan.bytes_read
+            for index, value in enumerate(scan.counts):
                 counts[index] += value
         if limit_exceeded:
             break
@@ -935,24 +1010,28 @@ def capture_unrelated_baseline(
             if bytes_scanned >= max_bytes:
                 limited = True
                 break
-            found, scan_errors, file_limit, bytes_read = _scan_descriptor(
+            scan = _scan_descriptor(
                 path, target, max_file_bytes=max_file_bytes, chunk_bytes=chunk_bytes,
                 max_bytes=max_bytes - bytes_scanned,
             )
-            errors += scan_errors
-            limited = limited or file_limit
-            bytes_scanned += bytes_read
+            errors += scan.scan_errors
+            limited = limited or scan.limited
+            bytes_scanned += scan.bytes_read
             files_scanned += 1
-            if file_limit:
+            if scan.limited:
                 break
-            if found[0]:
+            if scan.counts[0]:
+                continue
+            if scan.scan_errors or scan.identity is None:
                 continue
             try:
-                value = path.lstat()
                 relative = path.relative_to(home).as_posix()
-                identities.append(PersistentIdentity(relative, category, value.st_dev, value.st_ino))
-            except (OSError, ValueError):
+            except ValueError:
                 errors += 1
+                continue
+            # The descriptor scanner's post-read pathname check already
+            # proved that this is the same identity whose bytes were scanned.
+            identities.append(PersistentIdentity(relative, category, *scan.identity))
         if limited:
             break
     return UnrelatedBaseline(tuple(identities), errors, limited, files_scanned, bytes_scanned)
@@ -966,6 +1045,8 @@ def reconcile_unrelated_baseline(baseline: UnrelatedBaseline, home: Path) -> dic
         for path in category_paths:
             try:
                 value = path.lstat()
+                if not _safe_path_components(home, path) or not _safe_regular_metadata(value):
+                    continue
                 current.add((path.relative_to(home).as_posix(), category, value.st_dev, value.st_ino))
             except (OSError, ValueError):
                 errors_a += 1
@@ -1091,8 +1172,51 @@ def _isolated_payload_proof(state_root: Path) -> dict[str, int]:
 
 
 def _safe_exact_file(path: Path, expected: bytes) -> bool:
-    found, errors, limited, _ = _scan_descriptor(path, (expected,), max_file_bytes=max(len(expected) + 1, 4096), chunk_bytes=4096)
-    return not errors and not limited and found == (1,)
+    """Prove exact sentinel bytes through one stable, no-follow descriptor read."""
+    if len(expected) > ORACLE_MAX_FILE_BYTES:
+        return False
+    try:
+        before = path.lstat()
+        if not _safe_regular_metadata(before) or before.st_size != len(expected):
+            return False
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return False
+    actual = bytearray()
+    stable = True
+    try:
+        opened = os.fstat(fd)
+        metadata = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid, value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        if metadata(opened) != metadata(before) or not _safe_regular_metadata(opened):
+            return False
+        while len(actual) <= len(expected):
+            chunk = os.read(fd, min(ORACLE_CHUNK_BYTES, len(expected) + 1 - len(actual)))
+            if not chunk:
+                break
+            actual.extend(chunk)
+        after = os.fstat(fd)
+        try:
+            post_path = path.lstat()
+        except OSError:
+            return False
+        stable = (
+            metadata(after) == metadata(before)
+            and metadata(post_path) == metadata(before)
+            and _safe_regular_metadata(post_path)
+        )
+    except OSError:
+        return False
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            stable = False
+    return (
+        stable
+        and before.st_size == len(expected)
+        and len(actual) == len(expected)
+        and bytes(actual) == expected
+    )
 
 
 class _PinnedCatalog:
@@ -1106,24 +1230,50 @@ class _PinnedCatalog:
         return replace(self._snapshot, runtime_generation=runtime.generation)
 
 
-async def _bounded_shutdown(manager: Any, timeout: float = 30.0) -> None:
-    task = asyncio.create_task(manager.shutdown_all())
+async def _cancel_owned_task(owner_value: OwnedTask | asyncio.Task[Any], *, timeout: float, final_timeout: float | None = None) -> None:
+    """Cancel one exact task and observe cancellation only through finite waits."""
+    owner = _as_owned_task(owner_value)
+    if owner.task.done():
+        owner.terminalized = True
+        return
+    owner.phase = "CANCELLATION_OBSERVATION"
+    owner.task.cancel()
     try:
-        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        await asyncio.wait_for(asyncio.shield(owner.task), timeout=timeout)
+    except asyncio.CancelledError:
+        owner.terminalized = True
+        return
     except asyncio.TimeoutError:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
-        raise
+        owner.phase = "FINAL_CANCELLATION_OBSERVATION"
+        owner.task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(owner.task), timeout=final_timeout if final_timeout is not None else timeout)
+        except asyncio.CancelledError:
+            owner.terminalized = True
+            return
+        except asyncio.TimeoutError as error:
+            owner.phase = "FINAL_NONCONVERGENCE"
+            owner.nonconverged = True
+            raise TaskNonconvergedError(owner) from error
+        else:
+            owner.terminalized = True
+            return
+    else:
+        owner.terminalized = True
 
 
 async def _await_owned_task(
-    task: asyncio.Task[Any], *, timeout: float, convergence_timeout: float,
+    task: OwnedTask | asyncio.Task[Any], *, timeout: float, convergence_timeout: float,
     on_timeout: callable | None = None, shutdown: callable | None = None,
 ) -> Any:
-    """Wait on one owned task, force convergence, and never redispatch it."""
+    """Wait on one owned task with finite primary, secondary and final bounds."""
+    owner = _as_owned_task(task)
     try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        value = await asyncio.wait_for(asyncio.shield(owner.task), timeout=timeout)
+        owner.terminalized = True
+        return value
     except asyncio.TimeoutError:
+        owner.phase = "PRIMARY_TIMEOUT"
         timeout_failure: BaseException | None = None
         try:
             if on_timeout is not None:
@@ -1132,31 +1282,78 @@ async def _await_owned_task(
             timeout_failure = error
         try:
             if shutdown is not None:
-                await shutdown()
+                shutdown_owner = _create_owned_task(shutdown(), f"{owner.name}-shutdown")
+                try:
+                    await asyncio.wait_for(asyncio.shield(shutdown_owner.task), timeout=convergence_timeout)
+                    shutdown_owner.terminalized = True
+                except asyncio.TimeoutError:
+                    try:
+                        await _cancel_owned_task(shutdown_owner, timeout=convergence_timeout, final_timeout=convergence_timeout)
+                    except BaseException as error:
+                        timeout_failure = timeout_failure or error
+                except asyncio.CancelledError:
+                    shutdown_owner.terminalized = True
+                except BaseException as error:
+                    shutdown_owner.terminalized = True
+                    timeout_failure = timeout_failure or error
         except BaseException as error:
             timeout_failure = timeout_failure or error
-        if timeout_failure is not None:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            raise timeout_failure
+        owner.phase = "SECONDARY_CONVERGENCE_WAIT"
         try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout=convergence_timeout)
+            value = await asyncio.wait_for(asyncio.shield(owner.task), timeout=convergence_timeout)
+            owner.terminalized = True
+            if timeout_failure is not None:
+                raise timeout_failure
+            return value
+        except asyncio.CancelledError:
+            owner.terminalized = True
+            if timeout_failure is not None:
+                raise timeout_failure
+            raise asyncio.TimeoutError from None
+        except asyncio.TimeoutError as error:
+            owner.phase = "FINAL_CANCELLATION_OBSERVATION"
+            try:
+                await _cancel_owned_task(owner, timeout=convergence_timeout, final_timeout=convergence_timeout)
+            except TaskNonconvergedError:
+                raise
+            if not owner.task.cancelled():
+                try:
+                    value = owner.task.result()
+                except BaseException:
+                    pass
+                else:
+                    if timeout_failure is None:
+                        return value
+            if timeout_failure is not None:
+                raise timeout_failure
+            raise error
         except BaseException:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            owner.terminalized = True
             raise
 
 
-async def _cancel_owned_approval(task: asyncio.Task[Any], *, timeout: float) -> None:
-    """Cancel and join the exact approval bridge task before declaring timeout."""
-    task.cancel()
+async def _cancel_owned_approval(task: OwnedTask | asyncio.Task[Any], *, timeout: float, final_timeout: float | None = None) -> None:
+    """Cancel the exact approval bridge with finite cancellation observations."""
+    await _cancel_owned_task(task, timeout=timeout, final_timeout=final_timeout)
+
+
+async def _bounded_shutdown(manager: Any, timeout: float = 30.0, final_timeout: float = 1.0) -> None:
+    """Bound runtime shutdown itself; never perform an unlimited join."""
+    owner = _create_owned_task(manager.shutdown_all(), "runtime-shutdown")
     try:
-        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        await asyncio.wait_for(asyncio.shield(owner.task), timeout=timeout)
+        owner.terminalized = True
+    except asyncio.TimeoutError as error:
+        try:
+            await _cancel_owned_task(owner, timeout=final_timeout, final_timeout=final_timeout)
+        except TaskNonconvergedError:
+            raise
+        raise error
     except asyncio.CancelledError:
-        pass
-    except asyncio.TimeoutError:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        owner.terminalized = True
+        raise
+    except BaseException:
+        owner.terminalized = True
         raise
 
 
@@ -1248,6 +1445,12 @@ async def _run_real_continuation() -> dict[str, Any]:
     forensic_retained = False
     sentinel_verified = False
     workdir_created = True
+    owned_tasks: dict[str, OwnedTask] = {}
+
+    def spawn_owned(awaitable: Any, name: str) -> OwnedTask:
+        owner = _create_owned_task(awaitable, name)
+        owned_tasks[name] = owner
+        return owner
 
     def progress(**fields: Any) -> None:
         journal.update(**fields)
@@ -1282,7 +1485,7 @@ async def _run_real_continuation() -> dict[str, Any]:
             return runtime
 
         manager.acquire = counted_acquire
-        runtime_task = asyncio.create_task(manager.acquire(PROFILE_ID))
+        runtime_task = spawn_owned(manager.acquire(PROFILE_ID), "runtime-acquire")
         runtime = await _await_owned_task(
             runtime_task, timeout=120, convergence_timeout=30,
             on_timeout=lambda: progress(RUNTIME_ACQUIRE_DISPATCH_UNCERTAIN="YES"),
@@ -1293,7 +1496,7 @@ async def _run_real_continuation() -> dict[str, Any]:
             raise AssertionError("P7C6_CAPABILITY_MISMATCH")
         catalog_adapter = CodexModelCatalogAdapter(manager)
         progress(MODEL_LIST_DISPATCH_INTENT="YES")
-        catalog_task = asyncio.create_task(catalog_adapter.get_catalog(PROFILE_ID))
+        catalog_task = spawn_owned(catalog_adapter.get_catalog(PROFILE_ID), "model-list")
         catalog = await _await_owned_task(
             catalog_task, timeout=120, convergence_timeout=30,
             on_timeout=lambda: progress(MODEL_LIST_RESULT="UNKNOWN"),
@@ -1309,7 +1512,7 @@ async def _run_real_continuation() -> dict[str, Any]:
         turn_lifecycle = CodexTurnLifecycleAdapter(manager, pinned_catalog)
         retained_binding = ThreadBinding(PROFILE_ID, retained_thread_id)
         progress(RESUME_DISPATCH_INTENT="YES")
-        resume_task = asyncio.create_task(thread_lifecycle.resume(binding=retained_binding, working_directory=TrustedWorkingDirectory(str(run_root))))
+        resume_task = spawn_owned(thread_lifecycle.resume(binding=retained_binding, working_directory=TrustedWorkingDirectory(str(run_root))), "thread-resume")
         resume = await _await_owned_task(
             resume_task, timeout=120, convergence_timeout=30,
             on_timeout=lambda: progress(RESUME_RESULT="UNKNOWN"),
@@ -1323,33 +1526,43 @@ async def _run_real_continuation() -> dict[str, Any]:
         inner = f"printf {allow_marker} > {sentinel}"
         operator = _StructuralApprovalOperator(thread_id=retained_thread_id, turn_id=turn4_id, cwd=str(workdir), inner=inner, marker=allow_marker, sentinel=str(sentinel))
         bridge = CodexApprovalBridge(profile_id=PROFILE_ID, client=runtime.client, operator=operator)
-        approval_task = asyncio.create_task(bridge.handle_next())
+        approval_task = spawn_owned(bridge.handle_next(), "turn4-approval-bridge")
         await asyncio.sleep(0)
         if approval_task.done():
             raise AssertionError("P7C6_BRIDGE_NOT_ARMED")
         progress(bridge_armed="YES", resume_dispatched="YES", model_list_calls=counters.get("model/list", 0))
         progress(TURN4_START_DISPATCH_INTENT="YES")
-        turn4_task = asyncio.create_task(turn_lifecycle.start_turn(
+        turn4_task = spawn_owned(turn_lifecycle.start_turn(
             thread_binding=retained_binding, model_id=model.model_id, reasoning_effort=model.default_reasoning_effort,
             user_text=f"Execute exactly this operation once and no additional operation: {inner}. Prompt marker: {prompt_marker}.",
             working_directory=TrustedWorkingDirectory(str(workdir)),
-        ))
-        turn4 = await _await_owned_task(
-            turn4_task, timeout=120, convergence_timeout=30,
-            on_timeout=lambda: progress(TURN4_START_RESULT="UNKNOWN"),
-            shutdown=lambda: _bounded_shutdown(manager),
-        )
+        ), "turn4-start")
+        try:
+            turn4 = await _await_owned_task(
+                turn4_task, timeout=120, convergence_timeout=30,
+                on_timeout=lambda: progress(TURN4_START_RESULT="UNKNOWN"),
+                shutdown=lambda: _bounded_shutdown(manager),
+            )
+        except BaseException:
+            forensic_retained = True
+            try:
+                await _cancel_owned_approval(approval_task, timeout=5, final_timeout=5)
+            except BaseException:
+                pass
+            raise
         progress(turn4_start_status=turn4.status.value, TURN4_START_RESULT=turn4.status.value)
         if turn4.status is not TurnStartStatus.CONFIRMED or turn4.binding is None:
+            forensic_retained = True
+            await _cancel_owned_approval(approval_task, timeout=5, final_timeout=5)
             raise AssertionError("P7C6_TURN4_START_NOT_CONFIRMED")
         turn4_id.set_result(turn4.binding.turn_id)
         progress(turn4_id_sha256=_sha256(turn4.binding.turn_id), turn4_start_dispatched="YES")
         try:
-            approval = await asyncio.wait_for(asyncio.shield(approval_task), timeout=90)
+            approval = await asyncio.wait_for(asyncio.shield(approval_task.task), timeout=90)
         except asyncio.TimeoutError:
             forensic_retained = True
             progress(approval_handling_status="TIMEOUT", failure_stage="APPROVAL_TIMEOUT", APPROVAL_RESULT="UNKNOWN")
-            await _cancel_owned_approval(approval_task, timeout=30)
+            await _cancel_owned_approval(approval_task, timeout=30, final_timeout=30)
             raise
         progress(
             approval_request_count=len(operator.requests), approval_kind=operator.requests[0].kind.value if operator.requests else None,
@@ -1367,7 +1580,7 @@ async def _run_real_continuation() -> dict[str, Any]:
             forensic_retained = approval.status is ApprovalHandlingStatus.RESPONSE_UNKNOWN
             raise AssertionError("P7C6_TURN4_APPROVAL_NOT_EXACTLY_ALLOWED")
         try:
-            terminal4_task = asyncio.create_task(turn_lifecycle.wait_turn(turn4.binding))
+            terminal4_task = spawn_owned(turn_lifecycle.wait_turn(turn4.binding), "turn4-terminal-waiter")
             terminal4 = await _await_owned_task(
                 terminal4_task, timeout=120, convergence_timeout=30,
                 on_timeout=lambda: progress(TURN4_TERMINAL_RESULT="UNKNOWN"),
@@ -1385,11 +1598,11 @@ async def _run_real_continuation() -> dict[str, Any]:
         sentinel.unlink()
 
         progress(TURN5_START_DISPATCH_INTENT="YES")
-        turn5_task = asyncio.create_task(turn_lifecycle.start_turn(
+        turn5_task = spawn_owned(turn_lifecycle.start_turn(
             thread_binding=retained_binding, model_id=model.model_id, reasoning_effort=model.default_reasoning_effort,
             user_text=f"Execute exactly `sleep 120` and no additional operation. Interrupt marker: {interrupt_marker}.",
             working_directory=TrustedWorkingDirectory(str(workdir)),
-        ))
+        ), "turn5-start")
         turn5 = await _await_owned_task(
             turn5_task, timeout=120, convergence_timeout=30,
             on_timeout=lambda: progress(TURN5_START_RESULT="UNKNOWN"),
@@ -1398,9 +1611,9 @@ async def _run_real_continuation() -> dict[str, Any]:
         progress(turn5_start_status=turn5.status.value, TURN5_START_RESULT=turn5.status.value)
         if turn5.status is not TurnStartStatus.CONFIRMED or turn5.binding is None:
             raise AssertionError("P7C6_TURN5_START_NOT_CONFIRMED")
-        terminal5_task = asyncio.create_task(turn_lifecycle.wait_turn(turn5.binding))
+        terminal5_task = spawn_owned(turn_lifecycle.wait_turn(turn5.binding), "turn5-terminal-waiter")
         try:
-            await asyncio.wait_for(asyncio.shield(terminal5_task), timeout=5)
+            await asyncio.wait_for(asyncio.shield(terminal5_task.task), timeout=5)
         except asyncio.TimeoutError:
             progress(turn5_active_before_interrupt="YES")
         except Exception:
@@ -1412,7 +1625,7 @@ async def _run_real_continuation() -> dict[str, Any]:
             raise AssertionError("P7C6_TURN5_TERMINAL_BEFORE_INTERRUPT")
         acquire_before_interrupt = manager_acquire_count
         progress(INTERRUPT_DISPATCH_INTENT="YES")
-        interrupt_task = asyncio.create_task(turn_lifecycle.interrupt_turn(turn5.binding))
+        interrupt_task = spawn_owned(turn_lifecycle.interrupt_turn(turn5.binding), "interrupt")
         try:
             interrupt = await _await_owned_task(
                 interrupt_task, timeout=90, convergence_timeout=30,
@@ -1422,6 +1635,10 @@ async def _run_real_continuation() -> dict[str, Any]:
         except BaseException:
             forensic_retained = True
             progress(interrupt_status="UNKNOWN", failure_stage="INTERRUPT_UNCERTAIN")
+            try:
+                await _bounded_shutdown(manager)
+            finally:
+                await _cancel_owned_approval(terminal5_task, timeout=5, final_timeout=5)
             raise
         acquire_after_interrupt = manager_acquire_count
         try:
@@ -1472,7 +1689,7 @@ async def _run_real_continuation() -> dict[str, Any]:
         cleanup = DeleteStorageCleanupCoordinator(storage, manager, scanner=scanner, now_ms=lambda: 5000)
         delete_service = DialogueDeleteService(storage, server_id=SERVER_ID, thread_lifecycle=observer, local_cleanup=cleanup, now_ms=lambda: 5000)
         progress(DELETE_DISPATCH_INTENT="YES")
-        delete_task = asyncio.create_task(delete_service.delete(DialogueDeleteRequest(created.dialogue_id, created.version)))
+        delete_task = spawn_owned(delete_service.delete(DialogueDeleteRequest(created.dialogue_id, created.version)), "delete-service")
         try:
             deleted = await _await_owned_task(
                 delete_task, timeout=180, convergence_timeout=30,
@@ -1524,7 +1741,10 @@ async def _run_real_continuation() -> dict[str, Any]:
             "turn_start_calls": counters.get("turn/start", 0), "approval_responses": approval_responses, "interrupt_calls": counters.get("turn/interrupt", 0), "thread_delete_calls": counters.get("thread/delete", 0),
         }
     except Exception as error:
-        progress(status="FAILURE", failure_stage=type(error).__name__)
+        progress(
+            status="FAILURE", failure_stage=type(error).__name__,
+            owned_task_states={name: {"phase": owner.phase, "terminalized": owner.terminalized, "nonconverged": owner.nonconverged} for name, owner in owned_tasks.items()},
+        )
         raise
     finally:
         if manager is not None:
@@ -1829,6 +2049,81 @@ class MarkerOracleOfflineTests(unittest.TestCase):
             self.assertGreater(result["scan_errors"], 0)
 
 
+class ExactSentinelOfflineTests(unittest.TestCase):
+    def test_exact_bytes_only_and_all_unsafe_fixtures_fail(self) -> None:
+        marker = b"C6_SYNTHETIC_ALLOW_MARKER"
+        invalid = (
+            b"prefix" + marker,
+            marker + b"suffix",
+            marker + b"\n",
+            marker + marker,
+            b"",
+            b"C6_SYNTHETIC_ALLOW_MARKEX",
+        )
+        with tempfile.TemporaryDirectory(prefix="p7c6-exact-sentinel-") as directory:
+            root = Path(directory)
+            exact = root / "exact"
+            exact.write_bytes(marker)
+            self.assertTrue(_safe_exact_file(exact, marker))
+            for index, payload in enumerate(invalid):
+                path = root / f"invalid-{index}"
+                path.write_bytes(payload)
+                self.assertFalse(_safe_exact_file(path, marker), payload)
+
+            target = root / "target"
+            target.write_bytes(marker)
+            symlink = root / "symlink"
+            symlink.symlink_to(target)
+            self.assertFalse(_safe_exact_file(symlink, marker))
+            hardlink = root / "hardlink"
+            os.link(target, hardlink)
+            self.assertFalse(_safe_exact_file(target, marker))
+            self.assertFalse(_safe_exact_file(hardlink, marker))
+
+    def test_pathname_replacement_during_read_fails(self) -> None:
+        marker = b"C6_SYNTHETIC_ALLOW_MARKER"
+        with tempfile.TemporaryDirectory(prefix="p7c6-exact-replace-") as directory:
+            root = Path(directory)
+            path = root / "sentinel"
+            replacement = root / "replacement"
+            path.write_bytes(marker)
+            replacement.write_bytes(b"replacement")
+            original_read = os.read
+            swapped = False
+
+            def replacing_read(fd: int, size: int) -> bytes:
+                nonlocal swapped
+                data = original_read(fd, size)
+                if data and not swapped:
+                    swapped = True
+                    os.replace(replacement, path)
+                return data
+
+            with mock.patch("os.read", side_effect=replacing_read):
+                self.assertFalse(_safe_exact_file(path, marker))
+            self.assertTrue(swapped)
+
+    def test_mutation_during_read_fails(self) -> None:
+        marker = b"C6_SYNTHETIC_ALLOW_MARKER"
+        with tempfile.TemporaryDirectory(prefix="p7c6-exact-mutation-") as directory:
+            path = Path(directory) / "sentinel"
+            path.write_bytes(marker)
+            original_read = os.read
+            mutated = False
+
+            def mutating_read(fd: int, size: int) -> bytes:
+                nonlocal mutated
+                data = original_read(fd, size)
+                if data and not mutated:
+                    mutated = True
+                    os.utime(path, ns=(3, 4))
+                return data
+
+            with mock.patch("os.read", side_effect=mutating_read):
+                self.assertFalse(_safe_exact_file(path, marker))
+            self.assertTrue(mutated)
+
+
 class ControllerAndBudgetOfflineTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_schema_empty_state_and_tombstone_conflict(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c6-controller-") as directory:
@@ -1990,6 +2285,96 @@ class BaselineAndSanitizationOfflineTests(unittest.TestCase):
             replacement_path.rename(original)
             self.assertFalse(reconcile_unrelated_baseline(replacement_baseline, home)["preserved"])
 
+    def test_baseline_replacement_during_scan_is_not_admitted(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-baseline-replace-") as directory:
+            home = Path(directory)
+            (home / "sessions").mkdir(mode=0o700)
+            path = home / "sessions/unrelated"
+            replacement = home / "sessions/replacement"
+            path.write_bytes(b"safe")
+            replacement.write_bytes(b"replacement")
+            original_read = os.read
+            swapped = False
+
+            def replacing_read(fd: int, size: int) -> bytes:
+                nonlocal swapped
+                data = original_read(fd, size)
+                if data and not swapped:
+                    swapped = True
+                    os.replace(replacement, path)
+                return data
+
+            with mock.patch("os.read", side_effect=replacing_read):
+                baseline = capture_unrelated_baseline(home, "TARGET")
+            self.assertTrue(swapped)
+            self.assertGreater(baseline.scan_errors, 0)
+            self.assertEqual(baseline.identities, ())
+
+    def test_postdelete_requires_safe_regular_file_authority(self) -> None:
+        def capture(home: Path) -> tuple[Path, UnrelatedBaseline]:
+            (home / "sessions").mkdir(mode=0o700)
+            path = home / "sessions/unrelated"
+            path.write_bytes(b"safe")
+            return path, capture_unrelated_baseline(home, "TARGET")
+
+        with tempfile.TemporaryDirectory(prefix="p7c6-postdelete-unchanged-") as directory:
+            home = Path(directory)
+            _, baseline = capture(home)
+            self.assertTrue(reconcile_unrelated_baseline(baseline, home)["preserved"])
+
+        with tempfile.TemporaryDirectory(prefix="p7c6-postdelete-size-") as directory:
+            home = Path(directory)
+            path, baseline = capture(home)
+            path.write_bytes(b"safe and changed")
+            self.assertTrue(reconcile_unrelated_baseline(baseline, home)["preserved"])
+
+        with tempfile.TemporaryDirectory(prefix="p7c6-postdelete-mtime-") as directory:
+            home = Path(directory)
+            path, baseline = capture(home)
+            os.utime(path, ns=(1, 2))
+            self.assertTrue(reconcile_unrelated_baseline(baseline, home)["preserved"])
+
+        with tempfile.TemporaryDirectory(prefix="p7c6-postdelete-new-") as directory:
+            home = Path(directory)
+            path, baseline = capture(home)
+            (path.parent / "new-unrelated").write_bytes(b"new")
+            self.assertTrue(reconcile_unrelated_baseline(baseline, home)["preserved"])
+
+        for mutation in ("rename", "delete", "new-inode", "hardlink", "unsafe-mode", "symlink", "special"):
+            with tempfile.TemporaryDirectory(prefix=f"p7c6-postdelete-{mutation}-") as directory:
+                home = Path(directory)
+                path, baseline = capture(home)
+                if mutation == "rename":
+                    path.rename(path.with_name("renamed"))
+                elif mutation == "delete":
+                    path.unlink()
+                elif mutation == "new-inode":
+                    replacement = path.with_name("replacement-inode")
+                    replacement.write_bytes(b"replacement")
+                    path.unlink()
+                    replacement.rename(path)
+                elif mutation == "hardlink":
+                    os.link(path, path.with_name("hardlink"))
+                elif mutation == "unsafe-mode":
+                    path.chmod(0o666)
+                elif mutation == "symlink":
+                    path.unlink()
+                    path.symlink_to(path.with_name("target"))
+                elif mutation == "special":
+                    path.unlink()
+                    os.mkfifo(path)
+                self.assertFalse(reconcile_unrelated_baseline(baseline, home)["preserved"], mutation)
+
+        if os.geteuid() == 0:
+            with tempfile.TemporaryDirectory(prefix="p7c6-postdelete-owner-") as directory:
+                home = Path(directory)
+                path, baseline = capture(home)
+                os.chown(path, 65534, 65534)
+                try:
+                    self.assertFalse(reconcile_unrelated_baseline(baseline, home)["preserved"])
+                finally:
+                    os.chown(path, 0, 0)
+
 
 class JournalAndAsyncOwnershipOfflineTests(unittest.IsolatedAsyncioTestCase):
     class FailingJournal:
@@ -2026,16 +2411,57 @@ class JournalAndAsyncOwnershipOfflineTests(unittest.IsolatedAsyncioTestCase):
             shutdowns += 1
             release.set()
 
-        task = asyncio.create_task(operation())
+        owner = _create_owned_task(operation(), "convergent-operation")
 
         def record_timeout() -> None:
             nonlocal timed_out
             timed_out = True
 
-        self.assertEqual(await _await_owned_task(task, timeout=0.001, convergence_timeout=1, on_timeout=record_timeout, shutdown=shutdown), "FINITE")
+        self.assertEqual(await _await_owned_task(owner, timeout=0.001, convergence_timeout=1, on_timeout=record_timeout, shutdown=shutdown), "FINITE")
         self.assertTrue(timed_out)
         self.assertEqual((dispatches, shutdowns), (1, 1))
-        self.assertTrue(task.done())
+        self.assertTrue(owner.task.done() and owner.terminalized)
+
+    async def test_normal_task_completes_under_primary_bound(self) -> None:
+        owner = _create_owned_task(asyncio.sleep(0, result="PRIMARY"), "primary-complete")
+        started = asyncio.get_running_loop().time()
+        self.assertEqual(await _await_owned_task(owner, timeout=1, convergence_timeout=1), "PRIMARY")
+        self.assertLess(asyncio.get_running_loop().time() - started, 0.2)
+        self.assertTrue(owner.terminalized)
+
+    async def test_task_ignoring_primary_cancel_finishes_before_final_bound(self) -> None:
+        async def operation() -> str:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.01)
+                return "FINISHED_AFTER_CANCEL"
+
+        owner = _create_owned_task(operation(), "delayed-cancel-operation")
+        self.assertEqual(await _await_owned_task(owner, timeout=0.001, convergence_timeout=0.02), "FINISHED_AFTER_CANCEL")
+        self.assertTrue(owner.task.done() and owner.terminalized)
+
+    async def test_task_refuses_all_bounds_and_helper_returns_finitely(self) -> None:
+        release = asyncio.Event()
+
+        async def operation() -> str:
+            while True:
+                try:
+                    await release.wait()
+                    return "RELEASED"
+                except asyncio.CancelledError:
+                    continue
+
+        owner = _create_owned_task(operation(), "nonconverging-operation")
+        started = asyncio.get_running_loop().time()
+        with self.assertRaises(TaskNonconvergedError) as raised:
+            await _await_owned_task(owner, timeout=0.001, convergence_timeout=0.002)
+        elapsed = asyncio.get_running_loop().time() - started
+        self.assertLess(elapsed, 0.2)
+        self.assertIs(raised.exception.owner, owner)
+        self.assertTrue(owner.nonconverged and not owner.terminalized)
+        release.set()
+        await asyncio.wait_for(asyncio.shield(owner.task), timeout=0.2)
 
     async def test_approval_timeout_cancels_exact_bridge_and_cannot_emit_late_allow(self) -> None:
         allow_emitted = []
@@ -2045,14 +2471,64 @@ class JournalAndAsyncOwnershipOfflineTests(unittest.IsolatedAsyncioTestCase):
             await gate.wait()
             allow_emitted.append("ALLOW")
 
-        task = asyncio.create_task(bridge())
+        owner = _create_owned_task(bridge(), "approval-bridge")
         with self.assertRaises(asyncio.TimeoutError):
-            await asyncio.wait_for(asyncio.shield(task), timeout=0.001)
-        await _cancel_owned_approval(task, timeout=1)
+            await asyncio.wait_for(asyncio.shield(owner.task), timeout=0.001)
+        await _cancel_owned_approval(owner, timeout=1)
         gate.set()
         await asyncio.sleep(0)
         self.assertEqual(allow_emitted, [])
-        self.assertTrue(task.done())
+        self.assertTrue(owner.task.done() and owner.terminalized)
+
+    async def test_turn4_start_failure_terminalizes_precreated_approval_bridge(self) -> None:
+        allow_emitted: list[str] = []
+        gate = asyncio.Event()
+
+        async def bridge() -> None:
+            try:
+                await gate.wait()
+                allow_emitted.append("ALLOW")
+            except asyncio.CancelledError:
+                raise
+
+        async def failing_start() -> None:
+            raise RuntimeError("TURN4_START_FAILED")
+
+        approval_owner = _create_owned_task(bridge(), "turn4-approval-bridge")
+        start_owner = _create_owned_task(failing_start(), "turn4-start")
+        with self.assertRaises(RuntimeError):
+            await _await_owned_task(start_owner, timeout=1, convergence_timeout=1)
+        await _cancel_owned_approval(approval_owner, timeout=1, final_timeout=1)
+        gate.set()
+        await asyncio.sleep(0)
+        self.assertTrue(approval_owner.task.done() and approval_owner.terminalized)
+        self.assertEqual(allow_emitted, [])
+
+    async def test_interrupt_failure_terminalizes_turn5_waiter_after_owned_shutdown(self) -> None:
+        waiter_gate = asyncio.Event()
+        shutdown_calls = 0
+
+        async def terminal_waiter() -> str:
+            await waiter_gate.wait()
+            return "TERMINAL"
+
+        async def failing_interrupt() -> None:
+            raise RuntimeError("INTERRUPT_FAILED")
+
+        class Manager:
+            async def shutdown_all(self) -> None:
+                nonlocal shutdown_calls
+                shutdown_calls += 1
+
+        terminal_owner = _create_owned_task(terminal_waiter(), "turn5-terminal-waiter")
+        interrupt_owner = _create_owned_task(failing_interrupt(), "interrupt")
+        with self.assertRaises(RuntimeError):
+            await _await_owned_task(interrupt_owner, timeout=1, convergence_timeout=1)
+        await _bounded_shutdown(Manager(), timeout=1, final_timeout=1)
+        await _cancel_owned_approval(terminal_owner, timeout=1, final_timeout=1)
+        waiter_gate.set()
+        self.assertEqual(shutdown_calls, 1)
+        self.assertTrue(terminal_owner.task.done() and terminal_owner.terminalized)
 
     async def test_delete_timeout_retains_one_owned_task_and_no_second_dispatch(self) -> None:
         release = asyncio.Event()
@@ -2061,14 +2537,35 @@ class JournalAndAsyncOwnershipOfflineTests(unittest.IsolatedAsyncioTestCase):
         async def delete() -> str:
             nonlocal calls
             calls += 1
-            await release.wait()
-            return "DELETE_UNKNOWN"
+            while True:
+                try:
+                    await release.wait()
+                    return "DELETE_UNKNOWN"
+                except asyncio.CancelledError:
+                    continue
 
-        task = asyncio.create_task(delete())
-        with self.assertRaises(asyncio.TimeoutError):
-            await _await_owned_task(task, timeout=0.001, convergence_timeout=0.001, shutdown=lambda: asyncio.sleep(0))
+        owner = _create_owned_task(delete(), "single-delete")
+        with self.assertRaises(TaskNonconvergedError):
+            await _await_owned_task(owner, timeout=0.001, convergence_timeout=0.001, shutdown=lambda: asyncio.sleep(0))
         self.assertEqual(calls, 1)
-        self.assertTrue(task.done())
+        self.assertEqual(owner.name, "single-delete")
+        self.assertTrue(owner.nonconverged and not owner.terminalized)
+        release.set()
+        self.assertEqual(await asyncio.wait_for(asyncio.shield(owner.task), timeout=0.2), "DELETE_UNKNOWN")
+
+    def test_timeout_helpers_have_no_unbounded_join_primitive(self) -> None:
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        unbounded_join_names = []
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "asyncio"
+                and node.func.attr in {"gather", "join"}
+            ):
+                unbounded_join_names.append(node.func.attr)
+        self.assertEqual(unbounded_join_names, [])
 
 
 class FailureRetentionOfflineTests(unittest.TestCase):
