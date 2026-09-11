@@ -33,20 +33,21 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [REWORK_REQUIRED / ZERO EFFECT] Prep-v2 `1c9b03108bb2493fd6547a92c807397bb4c0868c`.
 - [REWORK_REQUIRED / ZERO EFFECT] Repair-1 `821be881f1e6b04d3905080191cc0f1141799923`.
 - [REWORK_REQUIRED / ZERO EFFECT] Repair-2 `4d98e2b6170e76534fa18274236605f77440f740`.
+- [REWORK_REQUIRED / ZERO EFFECT] Repair-3 `2b38969c1c9a8232cb1c68efc953dae125e0e18c`.
 
-Repair-2 review:
+Repair-3 review:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR2_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR3_ARCHITECT_REVIEW_2026-09-11.md`
 
-Frozen Repair-3:
+Frozen Repair-4:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR3_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR4_CONTRACT_2026-09-11.md`
 
-Repair-2 closes most prior preparation defects but is not real-executable. Remaining harness-only blockers are: final unbounded joins after timeout, incomplete task terminalization on sibling failure paths, non-exact sentinel-content proof, a scan-to-baseline-identity race, and incomplete post-delete safe-file authority reconciliation.
+Repair-3 closes the previously frozen sentinel/baseline/task-helper defects but is still not the executable real authority. Final blockers are: process-level finite termination when an asyncio task remains cancellation-resistant, forensic retention on Turn-5 start nonconvergence, and immediate fail-closed runtime shutdown when Turn-4 approval-bridge cancellation itself does not converge.
 
-- [DONE / SERVER MAINTENANCE] **Conservative server-80 disk cleanup.** Reclaimed exactly `945344512` bytes (`0.880421 GiB`). P7.C6 protected state remained present, canonical project Git state was unchanged, and no real Codex effects occurred.
-- [NEXT / ZERO-REAL-EFFECT] **P7.C6 prep-v2 Repair-3.** Harness/tests/evidence only. Close the five frozen Repair-3 defects while preserving all accepted Repair-2 authorities. No `src/**` changes and no real Codex effects.
-- [BLOCKED] P7.C6 real same-thread continuation. No authorization until Repair-3 is independently accepted.
+- [DONE / SERVER MAINTENANCE] Conservative server-80 disk cleanup reclaimed `945344512` bytes (`0.880421 GiB`) without touching P7.C6 state or Git.
+- [NEXT / ZERO-REAL-EFFECT] **P7.C6 prep-v2 Repair-4.** Harness/tests/evidence only. Add process watchdog/final task authority and close the two remaining sibling-failure retention edges. No `src/**` changes and no real Codex effects.
+- [BLOCKED] P7.C6 real same-thread continuation. No authorization until Repair-4 is independently accepted.
 
 ## P8 — deployment packaging/rollback
 
