@@ -39,48 +39,59 @@ Exact upstream `rust-v0.144.6` release commit `5d1fbf26c43abc65a203928b2e31561cb
 
 ## P7.C7 DENY-only approval-probe preparation
 
-Initial prep through Repair-4 are architect-reviewed REWORK_REQUIRED harness-only candidates.
+Initial prep and Repair-1 through Repair-5 are historical REWORK_REQUIRED harness-only candidates.
 
-Repair-5 candidate:
+Repair-6 is architect accepted:
 
-`b78b9fe93423c456e4557926745f9109e3992ea8`
+`320ae3ba1265608a92ebfe82992068d4b12ebcd9`
 
-Repair-5 tree:
+Accepted Repair-6 executable tree:
 
-`d395857adabf8e19c7524566258614c4180bdd4b`
+`eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`
 
-Repair-5 evidence:
+Accepted harness blob:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR5_EVIDENCE_2026-09-11.md`
+`b2bf5f91250b8881050ce3afcbd3e86874b15e5e`
 
-Repair-5 architect review:
+Repair-6 evidence:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR5_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_EVIDENCE_2026-09-11.md`
 
-Repair-5 materially fixes the Repair-4 durable-authority defects: parent outcome facts are measured rather than optimistically defaulted; child-result discovery is factful across failure classes; child execution classes and parent outcome combinations are narrowed; and RecoveryJournal binds later appends to one retained creation identity and fails closed on replacement/unlink/mode/hardlink drift.
+Architect acceptance:
 
-Repair-5 remains **REWORK_REQUIRED** before any real fresh thread can be authorized because the normal child result still emits false zero counts for `model_list_calls`, `thread_start_calls`, and `turn_start_calls` instead of the already-authoritative `FutureProbeBudget` counts. The normal parent-final validator also accepts those zeroes because it only rejects values greater than one.
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_ARCHITECT_ACCEPTANCE_2026-09-11.md`
 
-No production `src/**` defect is established.
+Repair-6 closes the final normal-result truthfulness defect. Normal child and parent-final observational authority require exact `model/list=1`, `thread/start=1`, `turn/start=1`, valid fresh thread and Turn SHA-256 identities, zero forbidden lifecycle calls, zero ALLOW, bounded DENY accounting, owner terminalization, exact process-group authority, safe child/parent boundaries and exact accepted source authority.
 
-Binding Repair-6 contract:
+All accepted Repair-5 durable-evidence properties remain binding: measured parent outcome facts; narrow child execution classes; semantic parent outcome matrix; bounded child-result discovery; immutable RecoveryJournal creation-time device/inode; no later journal `O_CREAT`; replacement/unlink/mode/hardlink fail-closed behavior.
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_CONTRACT_2026-09-11.md`
+`P7C7_DENY_ONLY_PROBE_PREP_REPAIR6=ARCHITECT_ACCEPTED`
+
+`P7C7_PRODUCTION_DEFECT_ESTABLISHED=NO`
 
 ## Current executable slice
 
-**P7.C7 DENY-only approval-probe prep Repair-6 — NEXT / ZERO REAL EFFECT.**
+**P7.C7 one-shot real DENY-only approval probe — AUTHORIZED under exact frozen gate.**
 
-Repair-6 is limited to normal child/final effect-ledger truthfulness. It must project the authoritative budget into the durable child result, require exact `model/list=1`, `thread/start=1`, `turn/start=1` plus non-null thread/Turn hashes for normal observational authority, preserve every Repair-5 outcome/journal/process safety gate, and perform zero real effects.
+Binding execution contract:
 
-No fresh real thread, app-server, approval response or real P7.C7 latch/result/outcome authority is authorized during Repair-6.
+`docs/evidence/p7c7/P7C7_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-11.md`
 
-`P7C7_DENY_ONLY_PROBE_PREP_REPAIR5=REWORK_REQUIRED`
+The real probe must execute from the detached accepted snapshot:
 
-`P7C7_DENY_ONLY_PROBE_PREP_REPAIR6=NEXT_ZERO_REAL_EFFECT`
+- HEAD `320ae3ba1265608a92ebfe82992068d4b12ebcd9`;
+- tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`.
 
-`P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+The probe is observational only. It may create exactly one fresh disposable thread and one primary Turn, may send at most three DENY responses, and has no ALLOW/resume/interrupt/delete/read/list path.
 
-`P7C7_REAL_EXECUTION_AUTHORIZED=NO`
+Once the real invocation starts it is consumed under every outcome. No rerun is authorized.
+
+The resulting fresh thread is evidence-only until architect review. The probe result does not automatically authorize matcher construction, hard-delete execution, P8, or P9.
+
+`P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
+
+`P7C7_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
+
+`P7C7_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
 P8/P9 remain blocked until P7.C7 real acceptance is architect accepted.
