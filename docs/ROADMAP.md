@@ -41,36 +41,28 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 
 #### DENY-only approval probe preparation
 
-- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Initial prep `e4bcdf43ba3f5c50a65f7f1085781eec41770ede`.
-- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Repair-1 `bffe4d05340545edd44d503c9a16f1128c65ca7d`.
-- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Repair-2 `388b1a1bf46b56bc1734bbf2e3eb630266b822a7`.
-- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Repair-3 `6cb422b5ef6dc5ad0a63580fa052f298f940c5fc`.
-- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Repair-4 `96738658cfb59b50c541997eb4fc66a5fb9740ce`.
-- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Repair-5 `b78b9fe93423c456e4557926745f9109e3992ea8`.
-- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Repair-6 `320ae3ba1265608a92ebfe82992068d4b12ebcd9`, tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`.
-
-Repair-6 architect acceptance:
-
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_ARCHITECT_ACCEPTANCE_2026-09-11.md`
-
-Repair-6 retains all earlier safety authorities and closes the final normal effect-ledger defect: normal child and parent observational authority now require exact model/list=1, thread/start=1 and turn/start=1, valid fresh thread/Turn hashes, zero forbidden lifecycle calls and zero ALLOW.
+- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Initial prep through Repair-5.
+- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Repair-6 `320ae3ba1265608a92ebfe82992068d4b12ebcd9`, tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`, harness blob `b2bf5f91250b8881050ce3afcbd3e86874b15e5e`.
+- Repair-6 acceptance: `docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_ARCHITECT_ACCEPTANCE_2026-09-11.md`.
 
 #### One-shot real DENY-only approval probe
 
-Binding contract:
+- [CONSUMED / FORENSIC REQUIRED / NO RERUN] Executed exactly once from the accepted Repair-6 snapshot.
+- Published evidence commit: `4629cff73d981ee9c2abafa24c97ba7ca340f87c`.
+- Parent authority: global latch present; normal result absent; parent outcome present; `CHILD_NONZERO`; watchdog `PROCESS_COMPLETED`; active process-group members `0`; scan errors `0`; no TERM/KILL; one child; zero retries.
+- `REAL_COMMAND_RC=0` is not observational success; finite child-failure outcomes may return normally through the parent unittest.
+- Published evidence does not establish exact child failure stage, fresh thread/Turn existence, approval request, DENY response, wire grammar, terminal or sentinel result.
+- [NEXT / ZERO REAL EFFECT] **Consumed-probe forensic:** reconstruct recovery-journal chronology, root-only wire authority, isolated runtime evidence and offline persistent-session correlation without any new app-server RPC or process signal.
+- Architect review: `docs/evidence/p7c7/P7C7_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_ARCHITECT_REVIEW_2026-09-11.md`.
+- Forensic contract: `docs/evidence/p7c7/P7C7_CONSUMED_REAL_DENY_ONLY_APPROVAL_PROBE_FORENSIC_CONTRACT_2026-09-11.md`.
+- [BLOCKED] Matcher authority until accepted forensic/real evidence establishes safe concrete wire grammar.
+- [BLOCKED] Full fresh-thread hard-delete acceptance until probe/forensic/matcher/full harness are separately accepted and explicitly authorized.
 
-`docs/evidence/p7c7/P7C7_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-11.md`
+`P7C7_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
-- [AUTHORIZED / ONE SHOT / EXACT SNAPSHOT] Execute the observational DENY-only probe only from HEAD `320ae3ba1265608a92ebfe82992068d4b12ebcd9`, tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`.
-- [BOUND] Exactly one fresh thread and one primary Turn maximum on the normal path; model/list exactly one; DENY 0..3; ALLOW 0; resume/interrupt/delete/read/list 0.
-- [BOUND] Once started, the invocation is consumed under every outcome; no rerun.
-- [BOUND] The resulting fresh thread is evidence-only until architect review; the probe never deletes it.
-- [BLOCKED] P7.C7 matcher authority until accepted real probe evidence establishes the actual wire grammar.
-- [BLOCKED] P7.C7 full fresh-thread hard-delete acceptance until probe evidence, matcher authority, and full hard-delete harness are separately architect accepted and explicitly authorized.
+`P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO_CONSUMED`
 
-`P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
-
-`P7C7_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
+`P7C7_MATCHER_AUTHORIZED=NO`
 
 `P7C7_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
