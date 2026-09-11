@@ -39,59 +39,67 @@ Exact upstream `rust-v0.144.6` release commit `5d1fbf26c43abc65a203928b2e31561cb
 
 ## P7.C7 DENY-only approval-probe preparation
 
-Initial prep and Repair-1 through Repair-5 are historical REWORK_REQUIRED harness-only candidates.
+Repair-6 preparation is architect accepted:
 
-Repair-6 is architect accepted:
-
-`320ae3ba1265608a92ebfe82992068d4b12ebcd9`
-
-Accepted Repair-6 executable tree:
-
-`eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`
-
-Accepted harness blob:
-
-`b2bf5f91250b8881050ce3afcbd3e86874b15e5e`
-
-Repair-6 evidence:
-
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_EVIDENCE_2026-09-11.md`
+- executable commit `320ae3ba1265608a92ebfe82992068d4b12ebcd9`;
+- executable tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`;
+- harness blob `b2bf5f91250b8881050ce3afcbd3e86874b15e5e`.
 
 Architect acceptance:
 
 `docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_ARCHITECT_ACCEPTANCE_2026-09-11.md`
 
-Repair-6 closes the final normal-result truthfulness defect. Normal child and parent-final observational authority require exact `model/list=1`, `thread/start=1`, `turn/start=1`, valid fresh thread and Turn SHA-256 identities, zero forbidden lifecycle calls, zero ALLOW, bounded DENY accounting, owner terminalization, exact process-group authority, safe child/parent boundaries and exact accepted source authority.
+The accepted harness is DENY-only and has zero ALLOW/resume/interrupt/delete/read/list paths. Normal observational authority requires exact model/list=1, thread/start=1, turn/start=1, fresh thread/Turn hashes, finite runtime shutdown, safe child/parent boundary, quiescent owned process group, exact source authority, measured outcome facts and immutable recovery-journal identity.
 
-All accepted Repair-5 durable-evidence properties remain binding: measured parent outcome facts; narrow child execution classes; semantic parent outcome matrix; bounded child-result discovery; immutable RecoveryJournal creation-time device/inode; no later journal `O_CREAT`; replacement/unlink/mode/hardlink fail-closed behavior.
+## P7.C7 one-shot real DENY-only approval probe
 
-`P7C7_DENY_ONLY_PROBE_PREP_REPAIR6=ARCHITECT_ACCEPTED`
+The separately authorized real probe executed exactly once from the accepted executable snapshot. It is permanently consumed and must never be rerun.
+
+Published real evidence:
+
+`docs/evidence/p7c7/P7C7_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_EVIDENCE_2026-09-11.md`
+
+Evidence commit:
+
+`4629cff73d981ee9c2abafa24c97ba7ca340f87c`
+
+Observed parent authority:
+
+- `REAL_PROBE_ATTEMPTS=1`;
+- `REAL_COMMAND_RC=0`;
+- global one-shot latch present;
+- normal global result absent;
+- parent execution outcome present and valid;
+- `PARENT_EXECUTION_CLASS=CHILD_NONZERO`;
+- `WATCHDOG_STATUS=PROCESS_COMPLETED`;
+- `CHILD_RETURNCODE_CLASS=CHILD_NONZERO`;
+- child result absent;
+- process group active count 0, scan errors 0, no TERM/KILL;
+- one child, no retry;
+- fresh-thread existence/disposition and approval/wire observation are not yet established from published evidence.
+
+`REAL_COMMAND_RC=0` is not observation success: the parent intentionally returns finite durable failure outcomes without requiring the outer unittest itself to fail.
+
+The global latch makes this probe permanently consumed. No second P7.C7 probe is authorized.
+
+`P7C7_REAL_PROBE_RESULT=FAILURE_OR_AMBIGUITY_ARCHITECT_REVIEW_REQUIRED`
+
+`P7C7_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
 `P7C7_PRODUCTION_DEFECT_ESTABLISHED=NO`
 
 ## Current executable slice
 
-**P7.C7 one-shot real DENY-only approval probe — AUTHORIZED under exact frozen gate.**
+**P7.C7 consumed one-shot DENY-only probe zero-effect forensic — NEXT.**
 
-Binding execution contract:
+The next slice is read-only/offline forensic of the retained fresh probe root and evidence. It must reconstruct the durable recovery-journal chronology, establish the last effect/result milestone, inspect root-only wire authority only through hashes/structural classes, inspect isolated runtime evidence and correlate the fresh run with any persistent session offline without app-server `thread/read` or `thread/list`.
 
-`docs/evidence/p7c7/P7C7_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-11.md`
+No new Codex/app-server RPC, thread, Turn, approval response, resume, interrupt, delete, read/list, cleanup or process signal is authorized.
 
-The real probe must execute from the detached accepted snapshot:
+`P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO_CONSUMED`
 
-- HEAD `320ae3ba1265608a92ebfe82992068d4b12ebcd9`;
-- tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`.
-
-The probe is observational only. It may create exactly one fresh disposable thread and one primary Turn, may send at most three DENY responses, and has no ALLOW/resume/interrupt/delete/read/list path.
-
-Once the real invocation starts it is consumed under every outcome. No rerun is authorized.
-
-The resulting fresh thread is evidence-only until architect review. The probe result does not automatically authorize matcher construction, hard-delete execution, P8, or P9.
-
-`P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
-
-`P7C7_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
+`P7C7_REAL_EXECUTION_AUTHORIZED=NO`
 
 `P7C7_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
-P8/P9 remain blocked until P7.C7 real acceptance is architect accepted.
+P8/P9 remain blocked.
