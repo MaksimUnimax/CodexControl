@@ -122,19 +122,42 @@ Final P7.C8 classification:
 
 `P7C8_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
+## P7.C9 production-provisioned successor
+
+Initial zero-effect P7.C9 prep candidate:
+
+- commit `097c8809a90eaca5d7d2074b35dc5e73ae9762c1`;
+- tree `c099c3a35acde82674f70413f55121c9345c82ba`;
+- harness blob `0bccd8e80b362dd283773d6fea18a4a094018042`;
+- scope limited to the new P7.C9 harness and prep evidence;
+- reported real effects `0`.
+
+The candidate correctly uses production `IsolatedStateRoot.provision(profile)` followed by `validate(profile)` before runtime acquisition and does not manually create the state root, marker, `sqlite/`, or `logs/`. Failed provision/validate blocks downstream runtime/model/thread/Turn/approval effects, and the accepted P7.C8 acquisition/DENY/process/journal/result gates remain present.
+
+Architect review:
+
+`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_REVIEW_2026-09-11.md`
+
+Disposition: **REWORK_REQUIRED** before any real P7.C9 execution.
+
+Blocking defects:
+
+- `validate_parent_execution_outcome()` shadows `runtime_acquire_error_category` with a state-root category variable before the `RUNTIME_ACQUIRE_NOT_ESTABLISHED` consistency check, so contradictory failure evidence can evade the intended validator gate;
+- the state-root bounded seam returns `TIMEOUT` while its daemon worker may still be running and mutating the fresh state root; worker terminalization/nonconvergence is not durably represented.
+
+Binding Repair-1 contract:
+
+`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_CONTRACT_2026-09-11.md`
+
 ## Current executable slice
 
-**P7.C9 DENY-only approval-probe preparation — NEXT / ZERO REAL EFFECT.**
+**P7.C9 DENY-only approval-probe prep Repair-1 — NEXT / ZERO REAL EFFECT.**
 
-P7.C9 is a new successor, not a retry of P7.C8. It must use a new token/profile/run/global-authority namespace and preserve all accepted P7.C8 acquisition/DENY/process/journal/result safety.
+Repair-1 is limited to parent evidence fact separation and truthful bounded state-root worker ownership. Production provisioning remains mandatory and all accepted acquisition/DENY/process/journal/result gates must remain unchanged.
 
-Binding contract:
+`P7C9_DENY_ONLY_APPROVAL_PROBE_PREP=REWORK_REQUIRED`
 
-`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-11.md`
-
-The central correction is production state-root provisioning. The P7.C9 fresh run must leave `profile.isolated_state_root` absent, then invoke `IsolatedStateRoot(authority).provision(profile)` and immediately `validate(profile)` before runtime acquisition. The harness must not manually create the marker, `sqlite/`, or `logs/` layout.
-
-Any provision/validate failure must block runtime acquire and all model/list/thread/Turn/approval effects.
+`P7C9_PREP_REPAIR1=NEXT_ZERO_REAL_EFFECT`
 
 `P7C9_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
 
