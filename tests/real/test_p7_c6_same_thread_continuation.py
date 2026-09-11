@@ -16,8 +16,11 @@ import os
 import re
 import secrets
 import shlex
+import signal
 import stat
 import subprocess
+import sys
+import time
 import tempfile
 import unittest
 from dataclasses import dataclass, replace
@@ -64,9 +67,9 @@ AUTHORIZATION = "AUTHORIZED_RETAINED_THREAD_T4_T5_DELETE_2026_09_10"
 EXPECTED_HEAD_ENV = "CODEXCONTROL_P7C6_CONTINUATION_EXPECTED_HEAD"
 EXPECTED_TREE_ENV = "CODEXCONTROL_P7C6_CONTINUATION_EXPECTED_TREE"
 EXPECTED_REPOSITORY = "/opt/codex-control"
-ARCHITECT_BASE_SHA = "de398808cfce7d4c42da3d08109e5a166078cd34"
-ARCHITECT_BASE_TREE = "1d5166d53b80a30afe0d4b89651a53648e9702a4"
-REVIEWED_CANDIDATE = "4d98e2b6170e76534fa18274236605f77440f740"
+ARCHITECT_BASE_SHA = "e7368c68c37ac9499440f3d9d5856496414d0638"
+ARCHITECT_BASE_TREE = "07548cf44840b7892198d8d149b7c42a178f2920"
+REVIEWED_CANDIDATE = "2b38969c1c9a8232cb1c68efc953dae125e0e18c"
 PROFILE_ID = "server-80-codexcontrol"
 SERVER_ID = "server-80"
 PERSISTENT_HOME = "/root/.codex_second"
@@ -86,6 +89,9 @@ ORACLE_MAX_FILES = 10_000
 ORACLE_MAX_FILE_BYTES = 16 * 1024 * 1024
 ORACLE_MAX_BYTES = 64 * 1024 * 1024
 ORACLE_CHUNK_BYTES = 64 * 1024
+WATCHDOG_HARD_DEADLINE = 5.0
+WATCHDOG_TERMINATE_GRACE = 1.0
+WATCHDOG_KILL_GRACE = 1.0
 
 
 class ContinuationLatchError(Exception):
@@ -1357,6 +1363,244 @@ async def _bounded_shutdown(manager: Any, timeout: float = 30.0, final_timeout: 
         raise
 
 
+def _owned_task_states(owned_tasks: Mapping[str, OwnedTask]) -> dict[str, dict[str, bool | str]]:
+    """Return finite task state only; never serialize task objects or reprs."""
+    return {
+        name: {
+            "phase": owner.phase,
+            "terminalized": owner.terminalized,
+            "nonconverged": owner.nonconverged,
+        }
+        for name, owner in owned_tasks.items()
+    }
+
+
+def _require_all_owned_tasks_terminal(owned_tasks: Mapping[str, OwnedTask]) -> None:
+    """Make a normal PASS impossible while an owned task remains unresolved."""
+    if any(not owner.terminalized or owner.nonconverged for owner in owned_tasks.values()):
+        raise AssertionError("P7C6_SUCCESS_REQUIRES_ALL_OWNERS_TERMINAL")
+
+
+def _turn_failure_result(error: BaseException) -> str:
+    return "UNKNOWN" if isinstance(error, (asyncio.TimeoutError, TaskNonconvergedError)) else "FAILED"
+
+
+async def _turn5_start_with_retention(
+    owner_value: OwnedTask | asyncio.Task[Any], *, journal: Any, manager: Any,
+    retention: dict[str, bool], timeout: float, convergence_timeout: float,
+) -> Any:
+    """Own the Turn-5 start ambiguity edge and retain recovery state."""
+    try:
+        result = await _await_owned_task(
+            owner_value, timeout=timeout, convergence_timeout=convergence_timeout,
+            on_timeout=lambda: journal.update(TURN5_START_RESULT="UNKNOWN"),
+            shutdown=lambda: _bounded_shutdown(manager, timeout=timeout, final_timeout=convergence_timeout),
+        )
+    except BaseException as error:
+        retention["forensic_retained"] = True
+        try:
+            journal.update(TURN5_START_RESULT=_turn_failure_result(error), failure_stage="TURN5_START_UNCERTAIN")
+        finally:
+            await _bounded_shutdown(manager, timeout=timeout, final_timeout=convergence_timeout)
+        raise
+    status = getattr(getattr(result, "status", None), "value", getattr(result, "status", None))
+    if status != TurnStartStatus.CONFIRMED.value or getattr(result, "binding", None) is None:
+        retention["forensic_retained"] = True
+        error = AssertionError("P7C6_TURN5_START_NOT_CONFIRMED")
+        try:
+            journal.update(TURN5_START_RESULT="FAILED", failure_stage="TURN5_START_UNCERTAIN")
+        finally:
+            await _bounded_shutdown(manager, timeout=timeout, final_timeout=convergence_timeout)
+        raise error
+    return result
+
+
+async def _turn4_start_failure_with_approval(
+    start_error: BaseException, approval_owner: OwnedTask, *, journal: Any, manager: Any,
+    retention: dict[str, bool], timeout: float, final_timeout: float,
+) -> None:
+    """Fail closed when the pre-created Turn-4 approval bridge will not cancel."""
+    retention["forensic_retained"] = True
+    try:
+        await _cancel_owned_approval(approval_owner, timeout=timeout, final_timeout=final_timeout)
+    except BaseException as approval_error:
+        retention["forensic_retained"] = True
+        try:
+            journal.update(
+                TURN4_START_RESULT="FAILED",
+                failure_stage="APPROVAL_BRIDGE_NONCONVERGED",
+            )
+        finally:
+            await _bounded_shutdown(manager, timeout=timeout, final_timeout=final_timeout)
+        raise approval_error from start_error
+    raise start_error
+
+
+def _validate_watchdog_bounds(hard_deadline: float, terminate_grace: float, kill_grace: float) -> None:
+    if any(type(value) not in (int, float) or value <= 0 for value in (hard_deadline, terminate_grace, kill_grace)):
+        raise ValueError("PROCESS_WATCHDOG_BOUNDS_INVALID")
+
+
+def launch_dedicated_continuation_child(
+    *, mode: str, child_env: Mapping[str, str] | None = None,
+    hard_deadline: float = WATCHDOG_HARD_DEADLINE,
+    terminate_grace: float = WATCHDOG_TERMINATE_GRACE,
+    kill_grace: float = WATCHDOG_KILL_GRACE,
+) -> dict[str, Any]:
+    """Launch exactly one child and own its finite process lifetime."""
+    _validate_watchdog_bounds(hard_deadline, terminate_grace, kill_grace)
+    if mode not in {"real", "synthetic-normal", "synthetic-stubborn", "synthetic-turn4-approval"}:
+        raise ValueError("PROCESS_CHILD_MODE_INVALID")
+    environment = os.environ.copy()
+    if child_env:
+        environment.update({str(key): str(value) for key, value in child_env.items()})
+    command = [sys.executable, str(Path(__file__).resolve()), "--codexcontrol-p7c6-child", mode]
+    started = time.monotonic()
+    child = subprocess.Popen(
+        command, cwd=EXPECTED_REPOSITORY, env=environment, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+    )
+    child_process_count = 1
+    timed_out = False
+    terminated = False
+    try:
+        child.wait(timeout=hard_deadline)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            child.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=terminate_grace)
+            terminated = True
+        except subprocess.TimeoutExpired:
+            try:
+                child.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                child.wait(timeout=kill_grace)
+                terminated = True
+            except subprocess.TimeoutExpired:
+                terminated = child.poll() is not None
+    elapsed = time.monotonic() - started
+    return {
+        "status": "PROCESS_WATCHDOG_TIMEOUT" if timed_out else "PROCESS_COMPLETED",
+        "child_process_count": child_process_count,
+        "second_child_started": "NO",
+        "parent_returned_finitely": elapsed < hard_deadline + terminate_grace + kill_grace + 1.0,
+        "child_terminated": terminated or child.poll() is not None,
+        "returncode": child.returncode,
+        "elapsed_seconds": elapsed,
+    }
+
+
+def _write_synthetic_payload(payload: Mapping[str, Any]) -> None:
+    path_value = os.environ.get("CODEXCONTROL_P7C6_SYNTHETIC_RECOVERY")
+    if not isinstance(path_value, str) or not path_value:
+        raise RuntimeError("SYNTHETIC_RECOVERY_PATH_MISSING")
+    path = Path(path_value)
+    path.write_text(json.dumps(dict(payload), sort_keys=True) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _write_synthetic_child_record(status: str) -> None:
+    _write_synthetic_payload({"status": status})
+
+
+async def _synthetic_normal_child() -> None:
+    _write_synthetic_child_record("NORMAL_CHILD_COMPLETED")
+    await asyncio.sleep(0)
+
+
+async def _synthetic_cancellation_resistant_child() -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    _write_synthetic_child_record("STUBBORN_CHILD_STARTED")
+    gate = asyncio.Event()
+
+    async def cancellation_resistant_task() -> None:
+        while True:
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                continue
+
+    asyncio.create_task(cancellation_resistant_task())
+    await asyncio.sleep(120)
+
+
+async def _synthetic_turn4_approval_child() -> None:
+    """Synthetic sibling-failure child; it cannot reach any Codex adapter."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    recovery_value = os.environ.get("CODEXCONTROL_P7C6_SYNTHETIC_RECOVERY")
+    if not isinstance(recovery_value, str) or not recovery_value:
+        raise RuntimeError("SYNTHETIC_RECOVERY_PATH_MISSING")
+    journal = ContinuationRecoveryJournal.create(
+        Path(recovery_value), {"status": "TURN4_START_DISPATCHED", "TURN4_START_DISPATCHES": 1},
+    )
+    gate = asyncio.Event()
+    allow_emitted: list[str] = []
+    dispatches = 1
+    shutdowns = 0
+
+    async def approval() -> None:
+        while True:
+            try:
+                await gate.wait()
+                allow_emitted.append("ALLOW")
+                return
+            except asyncio.CancelledError:
+                continue
+
+    class Manager:
+        async def shutdown_all(self) -> None:
+            nonlocal shutdowns
+            shutdowns += 1
+
+    approval_owner = _create_owned_task(approval(), "synthetic-turn4-approval")
+    await asyncio.sleep(0)
+    try:
+        await _turn4_start_failure_with_approval(
+            RuntimeError("TURN4_START_FAILED"), approval_owner, journal=journal, manager=Manager(),
+            retention={"forensic_retained": False}, timeout=0.01, final_timeout=0.01,
+        )
+    except BaseException:
+        journal.update(
+            status="APPROVAL_BRIDGE_NONCONVERGED",
+            ALLOW_EMITTED=len(allow_emitted), TURN4_START_DISPATCHES=dispatches,
+            SECOND_TURN4_START=0, RUNTIME_SHUTDOWN_CALLS=shutdowns,
+        )
+    await asyncio.sleep(120)
+
+
+def _run_dedicated_child_coroutine(factory: callable) -> int:
+    """Run a child without asyncio.run teardown, which can await stubborn tasks."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(factory())
+    except BaseException:
+        return 1
+    finally:
+        loop.stop()
+        loop.close()
+        asyncio.set_event_loop(None)
+    return 0
+
+
+def _dedicated_child_main(mode: str) -> int:
+    if mode == "synthetic-normal":
+        return _run_dedicated_child_coroutine(_synthetic_normal_child)
+    if mode == "synthetic-stubborn":
+        return _run_dedicated_child_coroutine(_synthetic_cancellation_resistant_child)
+    if mode == "synthetic-turn4-approval":
+        return _run_dedicated_child_coroutine(_synthetic_turn4_approval_child)
+    if mode == "real":
+        return _run_dedicated_child_coroutine(_run_real_continuation)
+    return 2
+
+
 async def _journaled_effect(
     journal: Any, intent: str, result: str, operation: callable,
 ) -> Any:
@@ -1543,13 +1787,15 @@ async def _run_real_continuation() -> dict[str, Any]:
                 on_timeout=lambda: progress(TURN4_START_RESULT="UNKNOWN"),
                 shutdown=lambda: _bounded_shutdown(manager),
             )
-        except BaseException:
+        except BaseException as error:
+            retention = {"forensic_retained": False}
             forensic_retained = True
-            try:
-                await _cancel_owned_approval(approval_task, timeout=5, final_timeout=5)
-            except BaseException:
-                pass
-            raise
+            await _turn4_start_failure_with_approval(
+                error, approval_task, journal=journal, manager=manager, retention=retention,
+                timeout=5, final_timeout=5,
+            )
+            forensic_retained = retention["forensic_retained"]
+            raise AssertionError("P7C6_TURN4_START_FAILURE_HANDLER_RETURNED")
         progress(turn4_start_status=turn4.status.value, TURN4_START_RESULT=turn4.status.value)
         if turn4.status is not TurnStartStatus.CONFIRMED or turn4.binding is None:
             forensic_retained = True
@@ -1564,6 +1810,7 @@ async def _run_real_continuation() -> dict[str, Any]:
             progress(approval_handling_status="TIMEOUT", failure_stage="APPROVAL_TIMEOUT", APPROVAL_RESULT="UNKNOWN")
             await _cancel_owned_approval(approval_task, timeout=30, final_timeout=30)
             raise
+        approval_task.terminalized = True
         progress(
             approval_request_count=len(operator.requests), approval_kind=operator.requests[0].kind.value if operator.requests else None,
             thread_match=bool(operator.results and not (set(operator.results[0].mismatch_flags) & {"THREAD"})),
@@ -1603,11 +1850,16 @@ async def _run_real_continuation() -> dict[str, Any]:
             user_text=f"Execute exactly `sleep 120` and no additional operation. Interrupt marker: {interrupt_marker}.",
             working_directory=TrustedWorkingDirectory(str(workdir)),
         ), "turn5-start")
-        turn5 = await _await_owned_task(
-            turn5_task, timeout=120, convergence_timeout=30,
-            on_timeout=lambda: progress(TURN5_START_RESULT="UNKNOWN"),
-            shutdown=lambda: _bounded_shutdown(manager),
-        )
+        turn5_retention = {"forensic_retained": False}
+        try:
+            turn5 = await _turn5_start_with_retention(
+                turn5_task, journal=journal, manager=manager, retention=turn5_retention,
+                timeout=120, convergence_timeout=30,
+            )
+        except BaseException:
+            forensic_retained = turn5_retention["forensic_retained"]
+            raise
+        forensic_retained = turn5_retention["forensic_retained"]
         progress(turn5_start_status=turn5.status.value, TURN5_START_RESULT=turn5.status.value)
         if turn5.status is not TurnStartStatus.CONFIRMED or turn5.binding is None:
             raise AssertionError("P7C6_TURN5_START_NOT_CONFIRMED")
@@ -1734,6 +1986,7 @@ async def _run_real_continuation() -> dict[str, Any]:
             except Exception:
                 pass
             raise
+        _require_all_owned_tasks_terminal(owned_tasks)
         return {
             "source_sha": source["accepted_harness_sha"], "source_tree": source["accepted_harness_tree"], "retained_thread_sha256": RUN1_THREAD_SHA256,
             "official_p1_delete_status": observer.status.value, "application_delete_status": deleted.status.value,
@@ -1741,10 +1994,13 @@ async def _run_real_continuation() -> dict[str, Any]:
             "turn_start_calls": counters.get("turn/start", 0), "approval_responses": approval_responses, "interrupt_calls": counters.get("turn/interrupt", 0), "thread_delete_calls": counters.get("thread/delete", 0),
         }
     except Exception as error:
-        progress(
-            status="FAILURE", failure_stage=type(error).__name__,
-            owned_task_states={name: {"phase": owner.phase, "terminalized": owner.terminalized, "nonconverged": owner.nonconverged} for name, owner in owned_tasks.items()},
-        )
+        states = _owned_task_states(owned_tasks)
+        try:
+            progress(status="FAILURE", failure_stage=type(error).__name__, owned_task_states=states)
+        except Exception:
+            # A failed journal remains fail-closed; never replace the original
+            # operation result with a sensitive task representation.
+            pass
         raise
     finally:
         if manager is not None:
@@ -2568,6 +2824,185 @@ class JournalAndAsyncOwnershipOfflineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unbounded_join_names, [])
 
 
+class ProcessWatchdogOfflineTests(unittest.TestCase):
+    def _child_environment(self, path: Path) -> dict[str, str]:
+        return {"CODEXCONTROL_P7C6_SYNTHETIC_RECOVERY": str(path)}
+
+    def test_normal_synthetic_child_exits_normally(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-watchdog-normal-") as directory:
+            recovery = Path(directory) / "recovery.json"
+            result = launch_dedicated_continuation_child(
+                mode="synthetic-normal", child_env=self._child_environment(recovery),
+                hard_deadline=1, terminate_grace=0.1, kill_grace=0.1,
+            )
+            self.assertEqual(result["status"], "PROCESS_COMPLETED")
+            self.assertEqual(result["child_process_count"], 1)
+            self.assertEqual(result["second_child_started"], "NO")
+            self.assertTrue(result["parent_returned_finitely"])
+            self.assertEqual(json.loads(recovery.read_text(encoding="utf-8"))["status"], "NORMAL_CHILD_COMPLETED")
+
+    def test_cancellation_resistant_child_is_killed_once_and_recovery_survives(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-watchdog-stubborn-") as directory:
+            recovery = Path(directory) / "recovery.json"
+            result = launch_dedicated_continuation_child(
+                mode="synthetic-stubborn", child_env=self._child_environment(recovery),
+                hard_deadline=0.5, terminate_grace=0.05, kill_grace=0.2,
+            )
+            self.assertEqual(result["status"], "PROCESS_WATCHDOG_TIMEOUT")
+            self.assertEqual(result["child_process_count"], 1)
+            self.assertEqual(result["second_child_started"], "NO")
+            self.assertTrue(result["parent_returned_finitely"])
+            self.assertTrue(result["child_terminated"])
+            self.assertEqual(json.loads(recovery.read_text(encoding="utf-8"))["status"], "STUBBORN_CHILD_STARTED")
+
+    def test_kill_grace_is_finite_and_launcher_has_one_process_creation_site(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-watchdog-grace-") as directory:
+            recovery = Path(directory) / "recovery.json"
+            started = time.monotonic()
+            result = launch_dedicated_continuation_child(
+                mode="synthetic-stubborn", child_env=self._child_environment(recovery),
+                hard_deadline=0.2, terminate_grace=0.05, kill_grace=0.05,
+            )
+            self.assertLess(time.monotonic() - started, 2)
+            self.assertEqual(result["status"], "PROCESS_WATCHDOG_TIMEOUT")
+            self.assertTrue(result["child_terminated"])
+        source = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        launcher = next(node for node in source.body if isinstance(node, ast.FunctionDef) and node.name == "launch_dedicated_continuation_child")
+        self.assertEqual(sum(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "Popen" for node in ast.walk(launcher)), 1)
+        self.assertFalse(any(isinstance(node, (ast.For, ast.AsyncFor, ast.While)) for node in ast.walk(launcher)))
+
+    def test_synthetic_child_entrypoints_cannot_call_real_codex_adapters(self) -> None:
+        source = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        names = {"acquire", "resume", "start_turn", "interrupt_turn", "delete", "request", "respond_server_request"}
+        functions = [
+            node for node in source.body
+            if isinstance(node, ast.AsyncFunctionDef)
+            and node.name in {"_synthetic_normal_child", "_synthetic_cancellation_resistant_child", "_synthetic_turn4_approval_child"}
+        ]
+        self.assertEqual(len(functions), 3)
+        for function in functions:
+            for node in ast.walk(function):
+                if isinstance(node, ast.Attribute):
+                    self.assertNotIn(node.attr, names, function.name)
+
+
+class Repair4FailureEdgeOfflineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_turn5_nonconvergence_retains_paths_and_dispatches_once(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-turn5-uncertain-") as directory:
+            root = Path(directory)
+            journal = ContinuationRecoveryJournal.create(root / "journal.json", {"status": "TURN5_START_DISPATCHED"})
+            gate = asyncio.Event()
+            dispatches = 0
+
+            async def turn5_start() -> str:
+                nonlocal dispatches
+                dispatches += 1
+                while True:
+                    try:
+                        await gate.wait()
+                        return "CONFIRMED"
+                    except asyncio.CancelledError:
+                        continue
+
+            class Manager:
+                shutdown_calls = 0
+
+                async def shutdown_all(self) -> None:
+                    self.shutdown_calls += 1
+
+            manager = Manager()
+            owner = _create_owned_task(turn5_start(), "turn5-start")
+            retention = {"forensic_retained": False}
+            with self.assertRaises(TaskNonconvergedError):
+                await _turn5_start_with_retention(
+                    owner, journal=journal, manager=manager, retention=retention,
+                    timeout=0.01, convergence_timeout=0.01,
+                )
+            self.assertTrue(retention["forensic_retained"])
+            self.assertEqual(dispatches, 1)
+            self.assertGreaterEqual(manager.shutdown_calls, 1)
+            record = _read_private_json(root / "journal.json")
+            self.assertEqual(record["TURN5_START_RESULT"], "UNKNOWN")
+            self.assertEqual(record["failure_stage"], "TURN5_START_UNCERTAIN")
+            self.assertTrue((root / "journal.json").exists())
+            gate.set()
+            await asyncio.wait_for(asyncio.shield(owner.task), timeout=0.2)
+
+    async def test_turn4_approval_nonconvergence_shuts_runtime_and_blocks_late_allow(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-turn4-approval-uncertain-") as directory:
+            root = Path(directory)
+            journal = ContinuationRecoveryJournal.create(root / "journal.json", {"status": "TURN4_START_DISPATCHED"})
+            allow_emitted: list[str] = []
+            shutdown_gate = asyncio.Event()
+            approval_gate = asyncio.Event()
+            turn4_start_dispatches = 1
+
+            async def approval() -> None:
+                while True:
+                    try:
+                        await approval_gate.wait()
+                        if not shutdown_gate.is_set():
+                            allow_emitted.append("ALLOW")
+                        return
+                    except asyncio.CancelledError:
+                        if shutdown_gate.is_set():
+                            return
+                        continue
+
+            class Manager:
+                shutdown_calls = 0
+
+                async def shutdown_all(self) -> None:
+                    self.shutdown_calls += 1
+                    shutdown_gate.set()
+
+            manager = Manager()
+            approval_owner = _create_owned_task(approval(), "turn4-approval")
+            await asyncio.sleep(0)
+            retention = {"forensic_retained": False}
+            with self.assertRaises(TaskNonconvergedError):
+                await _turn4_start_failure_with_approval(
+                    RuntimeError("TURN4_START_FAILED"), approval_owner, journal=journal, manager=manager,
+                    retention=retention, timeout=0.01, final_timeout=0.01,
+                )
+            self.assertTrue(retention["forensic_retained"])
+            self.assertEqual(turn4_start_dispatches, 1)
+            self.assertGreaterEqual(manager.shutdown_calls, 1)
+            approval_gate.set()
+            approval_owner.task.cancel()
+            await asyncio.wait_for(asyncio.shield(approval_owner.task), timeout=0.2)
+            self.assertEqual(allow_emitted, [])
+            record = _read_private_json(root / "journal.json")
+            self.assertEqual(record["failure_stage"], "APPROVAL_BRIDGE_NONCONVERGED")
+            self.assertEqual(record["TURN4_START_RESULT"], "FAILED")
+
+    def test_turn4_process_watchdog_fixture_has_one_child_and_no_allow(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-turn4-child-") as directory:
+            recovery = Path(directory) / "journal.json"
+            result = launch_dedicated_continuation_child(
+                mode="synthetic-turn4-approval",
+                child_env={"CODEXCONTROL_P7C6_SYNTHETIC_RECOVERY": str(recovery)},
+                hard_deadline=0.5, terminate_grace=0.05, kill_grace=0.2,
+            )
+            self.assertEqual(result["status"], "PROCESS_WATCHDOG_TIMEOUT")
+            self.assertEqual(result["child_process_count"], 1)
+            self.assertEqual(result["second_child_started"], "NO")
+            self.assertTrue(result["parent_returned_finitely"] and result["child_terminated"])
+            record = _read_private_json(recovery)
+            self.assertEqual(record["ALLOW_EMITTED"], 0)
+            self.assertEqual(record["TURN4_START_DISPATCHES"], 1)
+            self.assertEqual(record["SECOND_TURN4_START"], 0)
+            self.assertGreaterEqual(record["RUNTIME_SHUTDOWN_CALLS"], 1)
+
+    async def test_success_path_rejects_nonterminal_owned_task(self) -> None:
+        owner = _create_owned_task(asyncio.sleep(0.2), "nonterminal-success-owner")
+        with self.assertRaisesRegex(AssertionError, "SUCCESS_REQUIRES_ALL_OWNERS_TERMINAL"):
+            _require_all_owned_tasks_terminal({owner.name: owner})
+        owner.task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await owner.task
+
+
 class FailureRetentionOfflineTests(unittest.TestCase):
     def test_ambiguous_approval_does_not_erase_forensic_paths(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c6-retain-approval-") as directory:
@@ -2658,9 +3093,14 @@ class ContinuationStaticGateTests(unittest.TestCase):
 class P7C6SameThreadContinuationAcceptance(unittest.IsolatedAsyncioTestCase):
     @unittest.skipUnless(os.environ.get("CODEXCONTROL_P7C6_SAME_THREAD_CONTINUATION") == AUTHORIZATION, "gated real P7.C6 same-thread continuation")
     async def test_real_same_thread_continuation(self) -> None:
-        report = await _run_real_continuation()
-        print("P7C6_CONTINUATION_SANITIZED_REPORT=" + json.dumps(report, sort_keys=True))
+        result = launch_dedicated_continuation_child(mode="real")
+        self.assertEqual(result["status"], "PROCESS_COMPLETED", result)
+        self.assertEqual(result["returncode"], 0, result)
+        self.assertEqual(result["child_process_count"], 1)
+        print("P7C6_CONTINUATION_PROCESS_RESULT=" + json.dumps(result, sort_keys=True))
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--codexcontrol-p7c6-child":
+        raise SystemExit(_dedicated_child_main(sys.argv[2]))
     unittest.main()
