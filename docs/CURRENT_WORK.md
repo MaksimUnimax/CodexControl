@@ -41,47 +41,47 @@ Exact upstream `rust-v0.144.6` release commit `5d1fbf26c43abc65a203928b2e31561cb
 
 ## P7.C7 DENY-only approval-probe preparation
 
-Initial prep `e4bcdf43ba3f5c50a65f7f1085781eec41770ede`, Repair-1 `bffe4d05340545edd44d503c9a16f1128c65ca7d`, Repair-2 `388b1a1bf46b56bc1734bbf2e3eb630266b822a7`, and Repair-3 `6cb422b5ef6dc5ad0a63580fa052f298f940c5fc` are architect-reviewed REWORK_REQUIRED harness-only candidates.
+Initial prep `e4bcdf43ba3f5c50a65f7f1085781eec41770ede`, Repair-1 `bffe4d05340545edd44d503c9a16f1128c65ca7d`, Repair-2 `388b1a1bf46b56bc1734bbf2e3eb630266b822a7`, Repair-3 `6cb422b5ef6dc5ad0a63580fa052f298f940c5fc`, and Repair-4 `96738658cfb59b50c541997eb4fc66a5fb9740ce` are architect-reviewed harness-only candidates. None authorizes real execution.
 
-Repair-3 tree:
+Repair-4 tree:
 
-`ff73a49f45ec654e6fad6c7eaa6c8667dde15789`
+`539dbc8ad624a6c5722b1d6040cca4324d43a58f`
 
-Repair-3 evidence:
+Repair-4 evidence:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR3_EVIDENCE_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR4_EVIDENCE_2026-09-11.md`
 
-Repair-3 architect review:
+Repair-4 architect review:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR3_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR4_ARCHITECT_REVIEW_2026-09-11.md`
 
-Repair-3 useful improvements are retained: dedicated parent-final writer/readback, request-observed journal before DENY response path, wire-vs-adapter stage separation, post-quiescence parent boundary recheck, exact watchdog child classification, owner-terminalization gates, exact Turn-before-dequeue, queued-request capture, DENY-only/max-three response surface, finite stage waits, durable journal, dedicated parent/child process-group ownership, exact source authority and zero forbidden lifecycle actions.
+Repair-4 useful improvements are retained: harness-owned child-result boundary authority, a 100-second real observation horizon for the frozen 30-second stimulus, a 165-second process watchdog over a 146-second internal budget, and a distinct root-only parent execution-outcome authority. All prior DENY-only, Turn-before-dequeue, queued-request capture, request-before-response journal, wire/adapter stage separation, owner terminalization, source authority and process-group ownership gates remain present.
 
-Repair-3 remains **REWORK_REQUIRED** before any real fresh thread can be authorized.
+Repair-4 remains **REWORK_REQUIRED** before any real fresh thread can be authorized.
 
-Remaining harness-only blockers:
+Remaining harness/evidence-only blockers:
 
-- parent post-quiescence boundary scanner treats the harness-generated `probe-child-result.json` as an unexpected root sibling, producing deterministic happy-path boundary drift;
-- the real observation window is 10 seconds while the frozen candidate stimulus itself requests a 30-second sleep before touch, so a healthy no-approval branch is forced into nonconvergence before terminal/sentinel observation;
-- exact parent failure classes are computed but timeout/residual/scan-error/missing-child-result outcomes are not durably materialized as a distinct root-only parent execution authority.
+- parent execution outcomes use optimistic/default facts (`global_latch_present=True`, child-result absent/invalid on early failure paths) instead of measuring the actual retained authorities;
+- the parent outcome validator permits semantically contradictory combinations and uses the broad parent execution enum for `child_returncode_class`;
+- `RecoveryJournal` does not retain creation-time `(dev, ino)` across appends, so unlink/replacement between stages can silently create/accept a new journal and lose earlier chronology.
 
 No production `src/**` defect is established.
 
-Binding Repair-4 contract:
+Binding Repair-5 contract:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR4_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR5_CONTRACT_2026-09-11.md`
 
 ## Current executable slice
 
-**P7.C7 DENY-only approval-probe prep Repair-4 — NEXT / ZERO REAL EFFECT.**
+**P7.C7 DENY-only approval-probe prep Repair-5 — NEXT / ZERO REAL EFFECT.**
 
-Repair-4 is harness/tests/evidence only. It must preserve all Repair-3 safety properties while fixing harness-owned child-result boundary authority, recalculating real observation/watchdog horizons so they dominate the actual 30-second stimulus, and adding a distinct durable parent execution-outcome authority for one-shot failure classes.
+Repair-5 is harness/tests/evidence only. It must preserve all accepted Repair-4 execution safety while making every parent outcome fact measured and internally consistent and binding the recovery journal to one immutable creation-time inode across its complete chronology.
 
-No fresh real thread, app-server, approval response or real P7.C7 latch/result/outcome authority is authorized during Repair-4.
+No fresh real thread, app-server, approval response or real P7.C7 latch/result/outcome authority is authorized during Repair-5.
 
-`P7C7_DENY_ONLY_PROBE_PREP_REPAIR3=REWORK_REQUIRED`
+`P7C7_DENY_ONLY_PROBE_PREP_REPAIR4=REWORK_REQUIRED`
 
-`P7C7_DENY_ONLY_PROBE_PREP_REPAIR4=NEXT_ZERO_REAL_EFFECT`
+`P7C7_DENY_ONLY_PROBE_PREP_REPAIR5=NEXT_ZERO_REAL_EFFECT`
 
 `P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
 
