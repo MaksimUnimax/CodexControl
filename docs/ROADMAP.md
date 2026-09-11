@@ -69,17 +69,29 @@ Architect review:
 
 ### P7.C9 production-provisioned DENY-only successor
 
-Binding prep contract:
+#### Initial preparation
 
-`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-11.md`
+- [REWORK_REQUIRED / ZERO EFFECT] Candidate `097c8809a90eaca5d7d2074b35dc5e73ae9762c1`, tree `c099c3a35acde82674f70413f55121c9345c82ba`, harness blob `0bccd8e80b362dd283773d6fea18a4a094018042`.
+- [PASS] Real path leaves state root absent and calls production `IsolatedStateRoot.provision(profile)` then `validate(profile)` before runtime acquire.
+- [PASS] No manual marker/sqlite/logs creation in the future real path.
+- [PASS] Failed provision/validate blocks runtime acquire and downstream model/list/thread/Turn/approval effects.
+- [PASS] P7.C8 acquisition/DENY/process/journal/boundary/normal-1-1-1 gates are carried forward.
 
-- [NEXT / ZERO REAL EFFECT] Create a new P7.C9 test-only probe harness with a new token/profile/run/global-authority namespace.
-- [FIX] Fresh run must leave configured isolated state root absent, then call production `IsolatedStateRoot(authority).provision(profile)` and immediately `validate(profile)` before runtime acquire.
-- [FORBIDDEN] No manual creation of `.codexcontrol-state-root-v1`, `sqlite/`, or `logs/` by the harness.
-- [BOUND] Provision/validate failure blocks runtime acquire and all downstream model/list/thread/Turn/approval effects.
-- [BOUND] Preserve accepted P7.C8 acquisition authority: 45s acquire, 12s cleanup, 1s cancel/join, exact initial/final classes, safe categories, fail-closed `NOT_ESTABLISHED`.
-- [BOUND] Preserve DENY-only, max-three DENY, ALLOW=0, one child/no retry, exact process-group ownership, immutable journal, exact normal `1/1/1`, zero resume/interrupt/delete/read/list and separate child/parent result authority.
-- [BLOCKED] Any real P7.C9 probe until zero-effect preparation is independently architect accepted and exact executable SHA/tree are frozen.
+Architect review:
+
+`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_REVIEW_2026-09-11.md`
+
+Blocking defects:
+
+- [FIX] parent outcome validator must not shadow runtime-acquire category with provision/validate category before the `RUNTIME_ACQUIRE_NOT_ESTABLISHED` fact-consistency gate;
+- [FIX] the 5s state-root operation seam must durably distinguish worker terminalization from nonconvergence; a daemon worker may not continue mutating state after a bare `TIMEOUT` classification without ownership authority.
+
+Binding Repair-1 contract:
+
+`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_CONTRACT_2026-09-11.md`
+
+- [NEXT / ZERO REAL EFFECT] **P7.C9 prep Repair-1:** repair only durable fact separation and state-root worker ownership while preserving production provisioning and all already-correct gates.
+- [BLOCKED] Any real P7.C9 probe until Repair-1 is independently architect accepted and an exact executable SHA/tree is frozen.
 - [BLOCKED] Matcher authority and hard-delete acceptance until separately authorized real evidence is accepted.
 
 `P7C9_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
