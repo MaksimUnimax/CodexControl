@@ -11,87 +11,54 @@ Date: 2026-09-11
 - P7.C1–P7.C5 are architect accepted; P7.C5 accepted proof `946ddf7ac6f7c3539bc3f344c6edf21d6ffce528`.
 - ADR-0045 remains binding: persistent authenticated `CODEX_HOME` may be shared; CodexControl owns only its own child/generation, isolated state root, controller SQLite and process-local reservation/quiescence.
 
-## P7.C6 retained-thread history
+## P7.C6 disposition
 
-The P7.C6 retained thread is permanently forensic-only. The consumed real continuation was architect-reviewed as a harness approval-stimulus failure: Turn-4 completed with exact sentinel proof but emitted no approval request; Turn-5 and official delete were never reached.
-
-Final P7.C6 classifications:
-
-`LAST_DURABLY_ESTABLISHED_STAGE=TURN4_COMPLETED_SENTINEL_PROVED`
-
-`OFFICIAL_P1_DELETE_CLASS=NOT_DISPATCHED_PROVED`
-
-`ROOT_CAUSE_CLASS=HARNESS_ACCEPTANCE_STIMULUS_DEFECT`
-
-`PRODUCTION_DEFECT_ESTABLISHED=NO`
-
-`P7C6_REAL_RERUN_AUTHORIZED=NO`
-
-Accepted P7.C6 prep authority remains Repair-6 `76a7aa24e3cfdfb12c3314a7e01691d4a943b551`, tree `92abebdfb3390d4c58f4aefc00aa84b83841e99e`.
+P7.C6 is permanently consumed and forensic-only. Architect review established that Turn-4 completed with exact sentinel proof but produced no approval request; the harness approval wait timed out before Turn-5/delete. Official P1.9 delete was not dispatched. Root cause is `HARNESS_ACCEPTANCE_STIMULUS_DEFECT`; no production lifecycle/delete defect is established. No P7.C6 rerun/resume/interrupt/delete/read/list is authorized.
 
 ## P7.C7 approval-stimulus authority
 
-Evidence lineage `5ec38a38cef6363bb3709aefe57c0dedae5f5e13` -> `e00392fbff6894e1857eb4c8f1e1937a88ca1e96` is architect accepted as a correct fail-closed result.
-
-Exact upstream `rust-v0.144.6` release commit `5d1fbf26c43abc65a203928b2e31561cb039e06d` proves internal command vector -> approval event -> app-server `shlex_join` projection, but preserved/offline evidence does not establish which concrete vector a future model turn will generate.
-
-`P7C7_APPROVAL_STIMULUS_AUTHORITY=ACCEPTED_AS_NOT_ESTABLISHED`
-
-`P7C7_MATCHER_AUTHORIZED=NO`
+The zero-effect approval-stimulus authority was architect accepted as correctly fail-closed: exact Codex `rust-v0.144.6` source proves internal command-vector -> app-server `shlex_join` projection and conditional approval routing, but preserved/offline evidence cannot establish a future model-generated concrete wire grammar. No ALLOW matcher is authorized.
 
 ## P7.C7 DENY-only approval-probe preparation
 
-Initial prep candidate `e4bcdf43ba3f5c50a65f7f1085781eec41770ede` was REWORK_REQUIRED.
+Initial prep `e4bcdf43ba3f5c50a65f7f1085781eec41770ede` and Repair-1 `bffe4d05340545edd44d503c9a16f1128c65ca7d` are REWORK_REQUIRED harness-only candidates.
 
-Repair-1 candidate:
+Repair-2 candidate:
 
-`bffe4d05340545edd44d503c9a16f1128c65ca7d`
+`388b1a1bf46b56bc1734bbf2e3eb630266b822a7`
 
-Repair-1 candidate tree:
+Repair-2 materially improves the future disabled real path: exact Turn authority precedes approval dequeue, queued-request capture is test-covered, DENY attempts are counted, a recovery journal exists, inner waits are named/finite, a dedicated parent/child watchdog exists, child/parent result schemas are separated, and `/proc` churn semantics are improved.
 
-`2378c6f0c2b605413cd36c8383d01ee5f0c8f887`
-
-Repair-1 evidence:
-
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_EVIDENCE_2026-09-11.md`
-
-Architect review:
-
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_ARCHITECT_REVIEW_2026-09-11.md`
-
-Repair-1 useful improvements are retained: zero ALLOW paths, exact-identity wire capture when Turn authority already exists, mismatch not consuming wire authority, exact wire schema, observational sentinel classes, deterministic synthetic race classification, DENY budget surface, runtime-vs-command boundary separation, exact touch authority, exact-group synthetic signal accounting and a disabled future adapter route.
-
-Repair-1 is still **REWORK_REQUIRED** before any real fresh thread can be authorized.
+Independent architect review still finds Repair-2 **REWORK_REQUIRED** before any real fresh thread can be authorized.
 
 Remaining harness-only blockers:
 
-- approval observation is armed before exact Turn authority exists, so a fast request can be DENIED but permanently miss authoritative wire capture;
-- the future real unittest still executes the real coroutine directly instead of through one dedicated parent/child process-group watchdog;
-- real inner waits and runtime shutdown are not uniformly finite/fail-safe;
-- the root-only recovery record does not durably journal effect intent/result chronology;
-- DENY response accounting occurs after the production response boundary and can miss an ambiguous wire effect; the operator response counter is not authoritative in the real path;
-- child sanitized result can claim zero process-group members from default values instead of parent measurement;
-- `/proc` PID disappearance is currently conflated with real scan error;
-- the real path does not use the proven finite approval/terminal race and can wait unbounded after the approval drain stops;
-- final command-boundary proof is ordered before guaranteed runtime/process containment.
+1. Parent final-result materialization calls the child-schema writer `write_sanitized_result(...)`; that writer exact-validates the child schema and therefore rejects the extended parent schema. A healthy real probe cannot persist its final global result.
+2. Durable approval chronology is reversed/incomplete: `APPROVAL_REQUEST_<N>_OBSERVED` is appended only after the complete race returns, although a DENY response may already have been dispatched. Request-observed authority must precede DENY dispatch intent.
+3. `MODEL_LIST_RESULT` / `THREAD_START_RESULT` / `TURN_START_RESULT` semantics are conflated between raw wire return and adapter-level validation. In particular thread/turn result rows can be duplicated and disagree after malformed/semantically rejected responses. Wire-result and adapter-result authorities must be distinct.
+4. Child-local command-boundary proof occurs before parent process-group quiescence. A surviving descendant can mutate sentinel/workdir after the child scan but before parent TERM/KILL convergence. Parent must perform a final read-only command-boundary recheck after group quiescence before publishing final authority.
+5. Parent does not preserve watchdog-timeout classification in the final result: `CHILD_RETURN_TIMEOUT` exists but timeout can be collapsed to generic `CHILD_NONZERO` if a child result exists. Final authority must state timeout/residual/scan-error classifications exactly.
+6. Child result does not require all approval/terminal owner tasks to be terminalized. `ProbeObservation.observer_joined` can be false while a child-local result is still built; nonconverged owner state must block normal child-result success or be explicitly classified.
 
 No production `src/**` defect is established.
 
-Binding Repair-2 contract:
+Binding Repair-2 architect review:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR2_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR2_ARCHITECT_REVIEW_2026-09-11.md`
+
+Binding Repair-3 contract:
+
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR3_CONTRACT_2026-09-11.md`
 
 ## Current executable slice
 
-**P7.C7 DENY-only approval-probe prep Repair-2 — NEXT / ZERO REAL EFFECT.**
+**P7.C7 DENY-only approval-probe prep Repair-3 — NEXT / ZERO REAL EFFECT.**
 
-Repair-2 is harness/tests/evidence only. It must preserve Repair-1 safety properties while materializing one faithful but disabled real execution architecture: exact Turn authority before approval dequeue, durable effect journal, truthful DENY accounting, finite inner ownership, one dedicated child/session/process group, parent-measured final group quiescence and exact parent-final result authority.
+Repair-3 is harness/tests/evidence only. It must close the six remaining execution/evidence-authority defects while preserving every accepted Repair-2 safeguard. No real P7.C7 thread, app-server, approval response or root global probe authority is authorized during Repair-3.
 
-No fresh real thread, app-server, approval response or real P7.C7 latch/result is authorized during Repair-2.
+`P7C7_DENY_ONLY_PROBE_PREP_REPAIR2=REWORK_REQUIRED`
 
-`P7C7_DENY_ONLY_PROBE_PREP_REPAIR1=REWORK_REQUIRED`
-
-`P7C7_DENY_ONLY_PROBE_PREP_REPAIR2=NEXT_ZERO_REAL_EFFECT`
+`P7C7_DENY_ONLY_PROBE_PREP_REPAIR3=NEXT_ZERO_REAL_EFFECT`
 
 `P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
 
