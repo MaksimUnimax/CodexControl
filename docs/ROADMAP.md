@@ -35,20 +35,21 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [REWORK_REQUIRED / ZERO EFFECT] Repair-2 `4d98e2b6170e76534fa18274236605f77440f740`.
 - [REWORK_REQUIRED / ZERO EFFECT] Repair-3 `2b38969c1c9a8232cb1c68efc953dae125e0e18c`.
 - [REWORK_REQUIRED / ZERO EFFECT] Repair-4 `a55a765cdfb0d51e956045a238d4ecb5a237a5fe`.
+- [REWORK_REQUIRED / ZERO EFFECT] Repair-5 `01994403110f19e323dffd693f226b18bdcb73c7`.
 
-Repair-4 review:
+Repair-5 review:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR4_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR5_ARCHITECT_REVIEW_2026-09-11.md`
 
-Binding Repair-5 contract:
+Frozen Repair-6:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR5_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR6_CONTRACT_2026-09-11.md`
 
-Repair-4 correctly adds a dedicated process watchdog and preserves the accepted lifecycle/safety gates, but its real mode inherits a five-second hard deadline while the frozen valid real workflow contains multiple legitimate bounded waits far longer than that. It would therefore false-stop a healthy run. The child also discards the safe final result dict, so parent PASS is not yet tied to structured final lifecycle statuses/counters.
+Repair-5 correctly separates real/synthetic watchdog timing and adds the bounded durable child-to-parent PASS result authority. The remaining blocker is process-tree ownership: watchdog termination currently targets only the dedicated Python child while production `codex app-server` is spawned as its descendant without a dedicated process group/session. Whole continuation-group termination must be proven before real authority.
 
 - [DONE / SERVER MAINTENANCE] Conservative server-80 disk cleanup reclaimed `945344512` bytes (`0.880421 GiB`) without touching P7.C6 state or Git.
-- [NEXT / ZERO-REAL-EFFECT] **P7.C6 prep-v2 Repair-5.** Harness/tests/evidence only. Separate real vs synthetic watchdog timing, prove the real watchdog dominates the complete internal finite-wait budget plus margin, and add a bounded sanitized child-to-parent final result authority. No `src/**` changes and no real Codex effects.
-- [BLOCKED] P7.C6 real same-thread continuation. No authorization until Repair-5 is independently accepted.
+- [NEXT / ZERO-REAL-EFFECT] **P7.C6 prep-v2 Repair-6.** Harness/tests/evidence only. Create an isolated continuation OS session/process group, terminate/kill that exact group on watchdog timeout, prove descendant/grandchild death and unrelated-process survival, and preserve all Repair-5 authorities. No `src/**` changes and no real Codex effects.
+- [BLOCKED] P7.C6 real same-thread continuation. No authorization until Repair-6 is independently accepted.
 
 ## P8 — deployment packaging/rollback
 
