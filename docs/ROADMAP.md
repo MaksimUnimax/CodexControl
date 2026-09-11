@@ -29,32 +29,47 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 
 ### P7.C6 one-shot real continuation
 
-- [CONSUMED / FAILURE OR AMBIGUITY] The one authorized real command executed exactly once and returned `RC=1`.
-- Evidence commit: `9b45d27a9d55d7d0695351ca57f71a75a4cd7971`.
-- Process-group authority/status passed and final active continuation members are zero.
-- Consumed continuation latch exists.
-- Final PASS process-result is absent.
-- Exact failure stage, effect counts and official P1.9 delete status are not yet established.
-- **NO RERUN IS AUTHORIZED.**
+- [CONSUMED / REAL ACCEPTANCE FAILURE / NO RERUN] The one authorized real command executed exactly once and returned `RC=1`.
+- One-shot evidence: `9b45d27a9d55d7d0695351ca57f71a75a4cd7971`.
+- Zero-effect consumed-run forensic: `cf716ebb6c90e09fe927bccf36fdc08c776537b3`.
+- Architect forensic review: `docs/evidence/p7c6/P7C6_CONSUMED_REAL_CONTINUATION_ARCHITECT_REVIEW_2026-09-11.md`.
+- Turn-4 start confirmed and Turn-4 actually completed with exact sentinel proof.
+- Approval bridge observed zero approval requests/responses and timed out.
+- No Turn-5 start is present.
+- Controller stayed untouched at schema/user_version `0` with no synthetic dialogue/deletion state.
+- Official P1.9 delete is `NOT_DISPATCHED_PROVED`.
+- Root cause is `HARNESS_ACCEPTANCE_STIMULUS_DEFECT`; production defect remains `NO`.
+- The retained P7.C6 thread is permanently forensic-only; no same-thread rerun, resume, interrupt, delete, read or list is authorized.
 
-Architect review:
+`P7C6_REAL_ACCEPTANCE=FAILED_HARNESS_STIMULUS`
 
-`docs/evidence/p7c6/P7C6_ONE_SHOT_REAL_CONTINUATION_ARCHITECT_REVIEW_2026-09-11.md`
+`P7C6_REAL_RERUN_AUTHORIZED=NO`
 
-Frozen forensic:
+### P7.C7 fresh disposable-thread successor
 
-`docs/evidence/p7c6/P7C6_ONE_SHOT_REAL_CONTINUATION_FORENSIC_CONTRACT_2026-09-11.md`
+P7.C7 is the successor path for the still-missing real approval + interrupt + official delete + post-delete acceptance.
 
-- [NEXT / ZERO REAL EFFECT] **Consumed one-shot forensic.** Reconcile durable journal, controller DB, exact retained target-session structure, continuation markers, physical residuals and isolated metadata/logs. No Codex/app-server/model/thread/turn/approval/interrupt/delete/read/list/Telegram effects and no retained-state mutation.
-- [BLOCKED] P7.C6 final acceptance until forensic architect review.
+No real P7.C7 thread is authorized yet.
+
+Run-1 provides a preserved empirical approval-producing observation: its bounded `sleep 30 && touch <outside-workspace-sentinel>` stimulus produced exactly one `COMMAND_EXECUTION` approval request, while retained Turn-3 forensic later reconstructed the command locally and classified its observed grammar as `OTHER / TOKEN_MISMATCH`, command SHA-256 `69da337831d6b9729c7710a063af5133cebd0a32459d428e9309d7f9caf42b0a`.
+
+Production turn-start authority uses `approvalPolicy="on-request"` and workspace-write sandboxing, so P7.C7 must first freeze a proven approval stimulus/matcher rather than assume every command generates approval.
+
+Binding contract:
+
+`docs/evidence/p7c7/P7C7_APPROVAL_STIMULUS_AUTHORITY_CONTRACT_2026-09-11.md`
+
+- [NEXT / ZERO REAL EFFECT] **P7.C7 approval-stimulus authority.** Reconstruct the approval-producing Run-1 grammar locally; explain the token mismatch; derive the narrowest safe dynamic matcher; prove broad shell forms remain denied. No production changes and no real Codex effects.
+- [BLOCKED] P7.C7 fresh-thread harness preparation until approval-stimulus authority is architect accepted.
+- [BLOCKED] P7.C7 real fresh-thread acceptance until harness preparation is separately accepted and explicitly one-shot authorized.
 
 ## P8 — deployment packaging/rollback
 
-[BLOCKED BY P7.C6 FORENSIC]
+[BLOCKED BY P7.C7 REAL ACCEPTANCE]
 
 ## P9 — server-80 live Telegram acceptance
 
-[BLOCKED BY P7.C6 FORENSIC]
+[BLOCKED BY P7.C7 REAL ACCEPTANCE]
 
 ## P10 — server-78 discovery/deployment
 
