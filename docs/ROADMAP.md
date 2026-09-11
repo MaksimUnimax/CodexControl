@@ -41,31 +41,38 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 
 #### DENY-only approval probe preparation
 
-- [REWORK_REQUIRED / ZERO EFFECT] Initial prep `e4bcdf43ba3f5c50a65f7f1085781eec41770ede`.
-- [REWORK_REQUIRED / ZERO EFFECT] Repair-1 `bffe4d05340545edd44d503c9a16f1128c65ca7d`, tree `2378c6f0c2b605413cd36c8383d01ee5f0c8f887`.
-- [REWORK_REQUIRED / ZERO EFFECT] Repair-2 `388b1a1bf46b56bc1734bbf2e3eb630266b822a7`, tree `45cfb17776d70d41cef9b1b503ffd7dbf6bed088`.
-- [REWORK_REQUIRED / ZERO EFFECT] Repair-3 `6cb422b5ef6dc5ad0a63580fa052f298f940c5fc`, tree `ff73a49f45ec654e6fad6c7eaa6c8667dde15789`.
-- [REWORK_REQUIRED / ZERO EFFECT] Repair-4 `96738658cfb59b50c541997eb4fc66a5fb9740ce`, tree `539dbc8ad624a6c5722b1d6040cca4324d43a58f`.
-- [REWORK_REQUIRED / ZERO EFFECT] Repair-5 `b78b9fe93423c456e4557926745f9109e3992ea8`, tree `d395857adabf8e19c7524566258614c4180bdd4b`.
+- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Initial prep `e4bcdf43ba3f5c50a65f7f1085781eec41770ede`.
+- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Repair-1 `bffe4d05340545edd44d503c9a16f1128c65ca7d`.
+- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Repair-2 `388b1a1bf46b56bc1734bbf2e3eb630266b822a7`.
+- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Repair-3 `6cb422b5ef6dc5ad0a63580fa052f298f940c5fc`.
+- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Repair-4 `96738658cfb59b50c541997eb4fc66a5fb9740ce`.
+- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Repair-5 `b78b9fe93423c456e4557926745f9109e3992ea8`.
+- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Repair-6 `320ae3ba1265608a92ebfe82992068d4b12ebcd9`, tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`.
 
-Repair-5 architect review:
+Repair-6 architect acceptance:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR5_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_ARCHITECT_ACCEPTANCE_2026-09-11.md`
 
-Repair-5 closes its targeted measured-outcome and immutable-journal defects. The remaining deterministic blocker is normal durable effect-ledger truthfulness: the child result writes zero for model/list, thread/start and turn/start even though the authoritative budget has one of each, and the normal parent validator allows those zeroes.
+Repair-6 retains all earlier safety authorities and closes the final normal effect-ledger defect: normal child and parent observational authority now require exact model/list=1, thread/start=1 and turn/start=1, valid fresh thread/Turn hashes, zero forbidden lifecycle calls and zero ALLOW.
 
-Binding Repair-6:
+#### One-shot real DENY-only approval probe
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_CONTRACT_2026-09-11.md`
+Binding contract:
 
-- [NEXT / ZERO REAL EFFECT] **Repair-6:** project actual `FutureProbeBudget` lifecycle counts into the normal child result; require exact `model/list=1`, `thread/start=1`, `turn/start=1` and valid fresh thread/Turn hashes for normal child/final authority; preserve all Repair-5 outcome/journal/process safety.
-- [BLOCKED] One-shot real P7.C7 DENY-only approval probe until Repair-6 is independently architect accepted and exact executable source/tree are frozen.
-- [BLOCKED] P7.C7 matcher authority until accepted real probe evidence establishes safe concrete wire grammar.
-- [BLOCKED] P7.C7 full fresh-thread hard-delete acceptance until probe/matcher/full harness are separately accepted and explicitly authorized.
+`docs/evidence/p7c7/P7C7_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-11.md`
 
-`P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+- [AUTHORIZED / ONE SHOT / EXACT SNAPSHOT] Execute the observational DENY-only probe only from HEAD `320ae3ba1265608a92ebfe82992068d4b12ebcd9`, tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`.
+- [BOUND] Exactly one fresh thread and one primary Turn maximum on the normal path; model/list exactly one; DENY 0..3; ALLOW 0; resume/interrupt/delete/read/list 0.
+- [BOUND] Once started, the invocation is consumed under every outcome; no rerun.
+- [BOUND] The resulting fresh thread is evidence-only until architect review; the probe never deletes it.
+- [BLOCKED] P7.C7 matcher authority until accepted real probe evidence establishes the actual wire grammar.
+- [BLOCKED] P7.C7 full fresh-thread hard-delete acceptance until probe evidence, matcher authority, and full hard-delete harness are separately architect accepted and explicitly authorized.
 
-`P7C7_REAL_EXECUTION_AUTHORIZED=NO`
+`P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
+
+`P7C7_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
+
+`P7C7_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
 ## P8 — deployment packaging/rollback
 
