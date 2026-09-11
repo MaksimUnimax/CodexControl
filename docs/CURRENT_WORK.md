@@ -13,7 +13,7 @@ Date: 2026-09-11
 
 ## P7.C6 retained-thread history
 
-The P7.C6 retained thread is permanently forensic-only. The consumed real continuation was architect-reviewed as a harness approval-stimulus failure: Turn-4 completed with exact sentinel proof but emitted no approval request; Turn-5 and official delete were never reached.
+P7.C6 is permanently consumed and forensic-only.
 
 `LAST_DURABLY_ESTABLISHED_STAGE=TURN4_COMPLETED_SENTINEL_PROVED`
 
@@ -25,81 +25,104 @@ The P7.C6 retained thread is permanently forensic-only. The consumed real contin
 
 `P7C6_REAL_RERUN_AUTHORIZED=NO`
 
-Accepted P7.C6 prep authority remains Repair-6 `76a7aa24e3cfdfb12c3314a7e01691d4a943b551`, tree `92abebdfb3390d4c58f4aefc00aa84b83841e99e`.
-
 ## P7.C7 approval-stimulus authority
 
-Evidence lineage `5ec38a38cef6363bb3709aefe57c0dedae5f5e13` -> `e00392fbff6894e1857eb4c8f1e1937a88ca1e96` is architect accepted as a correct fail-closed result.
-
-Exact upstream `rust-v0.144.6` release commit `5d1fbf26c43abc65a203928b2e31561cb039e06d` proves internal command vector -> approval event -> app-server `shlex_join` projection, but preserved/offline evidence does not establish which concrete vector a future model turn will generate.
+Exact upstream `rust-v0.144.6` release commit `5d1fbf26c43abc65a203928b2e31561cb039e06d` proves the internal command-vector -> app-server `shlex_join` mapping, but offline evidence did not establish the future concrete model-generated wire grammar.
 
 `P7C7_APPROVAL_STIMULUS_AUTHORITY=ACCEPTED_AS_NOT_ESTABLISHED`
 
 `P7C7_MATCHER_AUTHORIZED=NO`
 
-## P7.C7 DENY-only approval-probe preparation
+## P7.C7 DENY-only approval probe
 
-Repair-6 preparation is architect accepted:
+Repair-6 preparation was architect accepted:
 
 - executable commit `320ae3ba1265608a92ebfe82992068d4b12ebcd9`;
-- executable tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`;
+- tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`;
 - harness blob `b2bf5f91250b8881050ce3afcbd3e86874b15e5e`.
 
-Architect acceptance:
+The one-shot P7.C7 real probe executed exactly once and is permanently consumed. Real evidence commit: `4629cff73d981ee9c2abafa24c97ba7ca340f87c`.
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_ARCHITECT_ACCEPTANCE_2026-09-11.md`
+Consumed-probe forensic evidence commit:
 
-The accepted harness is DENY-only and has zero ALLOW/resume/interrupt/delete/read/list paths. Normal observational authority requires exact model/list=1, thread/start=1, turn/start=1, fresh thread/Turn hashes, finite runtime shutdown, safe child/parent boundary, quiescent owned process group, exact source authority, measured outcome facts and immutable recovery-journal identity.
+`e589eec3c215d192df48a8e252e74dc13c768327`
 
-## P7.C7 one-shot real DENY-only approval probe
+Forensic evidence establishes:
 
-The separately authorized real probe executed exactly once from the accepted executable snapshot. It is permanently consumed and must never be rerun.
+- unique retained P7.C7 run root;
+- global latch present;
+- normal result absent;
+- parent outcome `CHILD_NONZERO` with clean process-group convergence;
+- recovery journal has five valid records;
+- `RUNTIME_ACQUIRE_RESULT=NONCONVERGED`;
+- no model/list stage recorded;
+- no fresh thread or Turn;
+- approval path not reached;
+- no wire authority;
+- workdir empty and sentinel absent;
+- production defect not established.
 
-Published real evidence:
+Final factual classifications:
 
-`docs/evidence/p7c7/P7C7_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_EVIDENCE_2026-09-11.md`
+`JOURNAL_LAST_DURABLE_MILESTONE=RUNTIME_ACQUIRE_RESULT`
 
-Evidence commit:
+`JOURNAL_LAST_DURABLE_RESULT=NONCONVERGED`
 
-`4629cff73d981ee9c2abafa24c97ba7ca340f87c`
+`LAST_DURABLY_ESTABLISHED_STAGE=RUNTIME_ACQUIRE_INTENT`
 
-Observed parent authority:
+`FAILURE_CLASS=RUNTIME_ACQUIRE_FAILURE`
 
-- `REAL_PROBE_ATTEMPTS=1`;
-- `REAL_COMMAND_RC=0`;
-- global one-shot latch present;
-- normal global result absent;
-- parent execution outcome present and valid;
-- `PARENT_EXECUTION_CLASS=CHILD_NONZERO`;
-- `WATCHDOG_STATUS=PROCESS_COMPLETED`;
-- `CHILD_RETURNCODE_CLASS=CHILD_NONZERO`;
-- child result absent;
-- process group active count 0, scan errors 0, no TERM/KILL;
-- one child, no retry;
-- fresh-thread existence/disposition and approval/wire observation are not yet established from published evidence.
+`P7C7_FRESH_THREAD_DISPOSITION=NO_FRESH_THREAD_PROVED`
 
-`REAL_COMMAND_RC=0` is not observation success: the parent intentionally returns finite durable failure outcomes without requiring the outer unittest itself to fail.
+`P7C7_APPROVAL_DISPOSITION=APPROVAL_NOT_REACHED_PROVED`
 
-The global latch makes this probe permanently consumed. No second P7.C7 probe is authorized.
+`P7C7_RUNTIME_ACQUIRE_ROOT_CAUSE=NOT_ESTABLISHED`
 
-`P7C7_REAL_PROBE_RESULT=FAILURE_OR_AMBIGUITY_ARCHITECT_REVIEW_REQUIRED`
+`PRODUCTION_DEFECT_ESTABLISHED=NO`
+
+Architect forensic review:
+
+`docs/evidence/p7c7/P7C7_CONSUMED_REAL_DENY_ONLY_APPROVAL_PROBE_FORENSIC_ARCHITECT_REVIEW_2026-09-11.md`
+
+The architect review also establishes a P7.C7 harness defect: the probe used a 5-second outer timeout around the complete runtime acquire path even though production has a 15-second initialize bound and version probing contains separate 3-second spawn/output/wait bounds. The generic helper also collapsed timeout and arbitrary exception into one `NONCONVERGED` durable result, preventing exact root-cause reconstruction.
+
+`P7C7_HARNESS_OBSERVABILITY_DEFECT_ESTABLISHED=YES`
+
+The executor forensic evidence incorrectly stated that the architect review and forensic contract files were absent from base `4b650ed5b43be62acf8aad86d790a817cf72854c`; independent GitHub readback proves both files were present. This is an executor governance/readback defect and does not alter the accepted runtime findings.
 
 `P7C7_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
-`P7C7_PRODUCTION_DEFECT_ESTABLISHED=NO`
-
-## Current executable slice
-
-**P7.C7 consumed one-shot DENY-only probe zero-effect forensic — NEXT.**
-
-The next slice is read-only/offline forensic of the retained fresh probe root and evidence. It must reconstruct the durable recovery-journal chronology, establish the last effect/result milestone, inspect root-only wire authority only through hashes/structural classes, inspect isolated runtime evidence and correlate the fresh run with any persistent session offline without app-server `thread/read` or `thread/list`.
-
-No new Codex/app-server RPC, thread, Turn, approval response, resume, interrupt, delete, read/list, cleanup or process signal is authorized.
-
 `P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO_CONSUMED`
-
-`P7C7_REAL_EXECUTION_AUTHORIZED=NO`
 
 `P7C7_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
-P8/P9 remain blocked.
+## Current executable slice
+
+**P7.C8 DENY-only approval-probe preparation — NEXT / ZERO REAL EFFECT.**
+
+P7.C8 is a new successor, not a retry of P7.C7. It must use a new auth token, fresh profile/run namespace and new global latch/result/outcome paths. The preparation must preserve all accepted P7.C7 DENY-only/process/journal/outcome safety while fixing runtime-acquire observability and timeout authority.
+
+Binding contract:
+
+`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-11.md`
+
+Preparation target runtime authority:
+
+- acquire timeout 45s;
+- failed-acquire cleanup timeout 12s;
+- candidate sleep 30s;
+- observation timeout 100s;
+- normal internal budget 186s;
+- watchdog margin 15s;
+- hard watchdog 205s;
+- timeout and safe runtime exception must remain distinct durable outcomes;
+- `RuntimeErrorSafe.category` may be retained as the safe categorized error authority;
+- no P7.C8 real effect is authorized in preparation.
+
+`P7C8_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+
+`P7C8_REAL_EXECUTION_AUTHORIZED=NO`
+
+`P7C8_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
+
+P8/P9 remain blocked until real P7 acceptance is architect accepted.
