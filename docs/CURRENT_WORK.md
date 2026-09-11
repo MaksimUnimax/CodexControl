@@ -30,55 +30,48 @@ Accepted retained recovery authorities:
 
 - Prep-v2 inert candidate: `1c9b03108bb2493fd6547a92c807397bb4c0868c` — REWORK_REQUIRED.
 - Repair-1 candidate: `821be881f1e6b04d3905080191cc0f1141799923` — REWORK_REQUIRED.
-- Repair-2 candidate: `4d98e2b6170e76534fa18274236605f77440f740` — **REWORK_REQUIRED** after independent architect review.
+- Repair-2 candidate: `4d98e2b6170e76534fa18274236605f77440f740` — REWORK_REQUIRED.
+- Repair-3 candidate: `2b38969c1c9a8232cb1c68efc953dae125e0e18c` — **REWORK_REQUIRED** after independent architect review.
 
-Repair-2 architect review:
+Repair-3 architect review:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR2_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR3_ARCHITECT_REVIEW_2026-09-11.md`
 
-Frozen Repair-3 contract:
+Frozen Repair-4 contract:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR3_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR4_CONTRACT_2026-09-11.md`
 
-Repair-2 successfully preserves/implements many required acceptance guards, including exact source authority, corrected topology nesting, local path preflight, fail-closed principal journal updates, actual controller path/schema/live-state validation, bounded target marker scanning, bounded unrelated baseline, exact path/device/inode reconciliation, unknown-RPC rejection, strict 13-ALLOW structural matcher, official delete observation, no intended new-thread path and success-only sanitization.
+Repair-3 correctly closes the prior helper-level Repair-3 defects: bounded primary/secondary/final observations, explicit owned-task modeling, exact Turn-4 sentinel bytes, descriptor-coupled unrelated baseline identity, and safe-file post-delete reconciliation. It preserves the earlier source authority, topology/local-path gates, fail-closed journal updates, controller proof, bounded marker oracle, structural matcher, dynamic budget, no-new-thread path, official delete observer, DELETE_UNKNOWN no-retry semantics and success-only sanitization.
 
-It is still **not** accepted for real execution because review found remaining harness-only defects:
+It is still not accepted as the one-shot real executable because independent review found three final harness-only failure-edge defects:
 
-1. final timeout/cancellation helpers still use unbounded joins after their last timeout, so a supposedly finite one-shot continuation can hang indefinitely;
-2. not every spawned task is explicitly terminalized on every sibling-failure edge, notably the Turn-4 approval bridge when Turn-4 start fails and the Turn-5 terminal waiter when interrupt fails;
-3. Turn-4 sentinel “exact content” currently proves one marker occurrence, not exact byte-for-byte equality;
-4. unrelated baseline capture has a scan-to-recorded-inode race between target-absence scanning and the later pathname identity capture;
-5. post-delete unrelated reconciliation checks path/device/inode but does not revalidate the full safe regular-file owner/mode/link envelope.
+1. a FINAL_NONCONVERGENCE raises finitely but intentionally leaves the underlying cancellation-resistant asyncio task alive; the owner map is local to the real coroutine, so the full test process/event-loop teardown can still hang or allow the already-dispatched task to continue later;
+2. Turn-5 start nonconvergence is not wrapped in an ambiguity handler that sets `forensic_retained`, so outer cleanup may remove the workdir while a still-live Turn-5 start task can later converge;
+3. Turn-4 start failure swallows approval-bridge cancellation nonconvergence; a cancellation-resistant bridge therefore lacks an immediate runtime-shutdown/process-terminal authority strong enough to exclude a late ALLOW.
 
-No production `src/**` change is authorized or required by these findings.
+These are acceptance-harness defects only. No production `src/**` change is authorized or required.
 
-`P7C6_CONTINUATION_PREP_V2_REPAIR2=REWORK_REQUIRED`
+`P7C6_CONTINUATION_PREP_V2_REPAIR3=REWORK_REQUIRED`
 
 `P7C6_REAL_CONTINUATION_AUTHORIZED=NO`
 
 ## Disk maintenance — COMPLETE / SAFE
 
-Owner-requested server-80 conservative cleanup is complete.
-
-- Exact disk bytes reclaimed: `945344512` (`0.880421 GiB`).
-- P7.C6 protected state presence check: `PASS`.
-- Canonical repository HEAD remained `4d98e2b6170e76534fa18274236605f77440f740` during cleanup.
-- No Docker, journal, apt, general `/tmp`, Git clone, global `__pycache__`, archive or Codex-state cleanup occurred.
-- No real Codex effects occurred.
-
-The temporary disk-maintenance pause is closed.
+Owner-requested server-80 conservative cleanup completed safely before Repair-3. Exactly `945344512` bytes (`0.880421 GiB`) were reclaimed. P7.C6 protected state remained present, Git remained unchanged during cleanup, and no real Codex effects occurred.
 
 ## Current executable slice
 
-**P7.C6 same-thread continuation prep-v2 Repair-3 — NEXT / ZERO REAL EFFECT.**
+**P7.C6 same-thread continuation prep-v2 Repair-4 — NEXT / ZERO REAL EFFECT.**
 
 Binding contract:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR3_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR4_CONTRACT_2026-09-11.md`
 
-Repair-3 may modify only the gated acceptance harness/tests/evidence. It must close the five remaining harness-only defects while preserving all accepted Repair-2 authorities. No production `src/**` change and no real Codex/app-server/business RPC effect is authorized.
+Repair-4 is the final harness failure-edge repair: add process-level hard watchdog authority for cancellation-resistant tasks, retain forensic state on ambiguous Turn-5 start, and fail closed on nonconverging Turn-4 approval cancellation. Preserve all accepted Repair-3/Repair-2 authorities.
 
-`P7C6_REPAIR3_AUTHORIZED=YES`
+No production `src/**` change and no real Codex/app-server/business RPC effect is authorized.
+
+`P7C6_REPAIR4_AUTHORIZED=YES`
 
 `P7C6_REAL_CONTINUATION_AUTHORIZED=NO`
 
