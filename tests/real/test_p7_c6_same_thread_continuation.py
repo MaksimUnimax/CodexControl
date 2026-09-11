@@ -64,9 +64,9 @@ AUTHORIZATION = "AUTHORIZED_RETAINED_THREAD_T4_T5_DELETE_2026_09_10"
 EXPECTED_HEAD_ENV = "CODEXCONTROL_P7C6_CONTINUATION_EXPECTED_HEAD"
 EXPECTED_TREE_ENV = "CODEXCONTROL_P7C6_CONTINUATION_EXPECTED_TREE"
 EXPECTED_REPOSITORY = "/opt/codex-control"
-ARCHITECT_BASE_SHA = "c4ebe5fa2d069524e921f3a15148e85aa3423216"
-ARCHITECT_BASE_TREE = "a6880f388f498b48abe0926e7abc13e75bb54e21"
-REVIEWED_CANDIDATE = "1c9b03108bb2493fd6547a92c807397bb4c0868c"
+ARCHITECT_BASE_SHA = "5cc500be0087732518eb16bee0dc71dc21f786c0"
+ARCHITECT_BASE_TREE = "d8b03629a47c6803d3ac118720acb74e453d67c5"
+REVIEWED_CANDIDATE = "821be881f1e6b04d3905080191cc0f1141799923"
 PROFILE_ID = "server-80-codexcontrol"
 SERVER_ID = "server-80"
 PERSISTENT_HOME = "/root/.codex_second"
@@ -337,6 +337,12 @@ def sanitize_success_records(records: Mapping[Path, Mapping[str, Any]]) -> None:
         raise SanitizationError("LOCAL_RECOVERY_SANITIZATION_FAILED") from error
 
 
+def sanitize_only_after_final_gates(gates_pass: bool, records: Mapping[Path, Mapping[str, Any]]) -> None:
+    if gates_pass is not True:
+        raise SanitizationError("SANITIZATION_GATES_NOT_CONFIRMED")
+    sanitize_success_records(records)
+
+
 @dataclass(frozen=True)
 class StructuralApprovalResult:
     allowed: bool
@@ -575,6 +581,44 @@ def _path_under(child: Path, parent: Path) -> bool:
         return False
 
 
+def _preflight_absent_path(path: Path) -> None:
+    """Prove a future local path has a safe, non-symlink parent and is absent."""
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    cursor = Path(absolute.parts[0])
+    for component in absolute.parts[1:]:
+        cursor /= component
+        try:
+            value = cursor.lstat()
+        except FileNotFoundError:
+            if cursor != absolute:
+                raise BoundaryPreflightError("P7C6_LOCAL_PARENT_ABSENT")
+            return
+        except OSError as error:
+            raise BoundaryPreflightError("P7C6_LOCAL_PATH_UNREADABLE") from error
+        if stat.S_ISLNK(value.st_mode) or value.st_uid != 0 or value.st_gid != 0:
+            raise BoundaryPreflightError("P7C6_LOCAL_PATH_UNSAFE")
+        if cursor == absolute:
+            raise BoundaryPreflightError("P7C6_LOCAL_PATH_COLLISION")
+        if not stat.S_ISDIR(value.st_mode):
+            raise BoundaryPreflightError("P7C6_LOCAL_PARENT_UNSAFE")
+        if cursor == absolute.parent and stat.S_IMODE(value.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
+            raise BoundaryPreflightError("P7C6_LOCAL_PARENT_UNSAFE")
+
+
+def preflight_local_continuation_paths(paths: Mapping[str, Path]) -> dict[str, Any]:
+    """Preflight every local continuation artifact before latch/RPC authority."""
+    normalized = {name: Path(os.path.abspath(os.fspath(path))) for name, path in paths.items()}
+    for path in normalized.values():
+        _preflight_absent_path(path)
+    names = tuple(normalized)
+    for index, left_name in enumerate(names):
+        for right_name in names[index + 1:]:
+            left, right = normalized[left_name], normalized[right_name]
+            if _path_under(left, right) or _path_under(right, left):
+                raise BoundaryPreflightError("P7C6_LOCAL_PATH_OVERLAP")
+    return {"paths": tuple(sorted(normalized)), "status": "PASS"}
+
+
 def _process_users(targets: Mapping[str, Path]) -> dict[str, int]:
     users = {name: set() for name in targets}
     for pid_name in os.listdir("/proc"):
@@ -637,6 +681,7 @@ def _continuation_owned_processes(workdir: Path) -> int:
 def preflight_protected_boundaries(
     boundaries: Mapping[str, Path], *, allowed_nested: Iterable[tuple[str, str]] = (),
     mountinfo: str | None = None, external_users: Mapping[str, int] | None = None,
+    externally_owned: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Fresh read-only mount, component, identity and external-user proof."""
     # Keep the lexical path so lstat can see a symlink component; resolving
@@ -659,8 +704,10 @@ def preflight_protected_boundaries(
     if any(str(path) in points for path in normalized.values()):
         raise BoundaryPreflightError("P7C6_MOUNT_ALIAS_UNRESOLVED")
     users = dict(external_users) if external_users is not None else _process_users(normalized)
+    shared = {"persistent_home_shared", "repository"}
+    owned = set(externally_owned) if externally_owned is not None else set(normalized) - shared
     for name, count in users.items():
-        if name != "persistent_home_shared" and count:
+        if name in owned and count:
             raise BoundaryPreflightError("P7C6_MOUNT_ALIAS_UNRESOLVED")
     return {"mount_alias": "PASS", "external_users": users}
 
@@ -733,37 +780,55 @@ def _count_chunked(chunks: Iterable[bytes], needles: Sequence[bytes]) -> tuple[i
     return tuple(counts)
 
 
-def _scan_descriptor(path: Path, needles: Sequence[bytes], *, max_file_bytes: int, chunk_bytes: int) -> tuple[tuple[int, ...], int, bool]:
+def _scan_descriptor(
+    path: Path, needles: Sequence[bytes], *, max_file_bytes: int, chunk_bytes: int,
+    max_bytes: int | None = None,
+) -> tuple[tuple[int, ...], int, bool, int]:
+    """Read one regular file through an owned no-follow fd and revalidate its pathname."""
+    if max_bytes is not None and (type(max_bytes) is not int or max_bytes <= 0):
+        return (0,) * len(needles), 1, False, 0
     try:
         before = path.lstat()
         if not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_gid != 0 or before.st_nlink != 1 or stat.S_IMODE(before.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
-            return (0,) * len(needles), 1, False
+            return (0,) * len(needles), 1, False, 0
         if before.st_size > max_file_bytes:
-            return (0,) * len(needles), 0, True
+            return (0,) * len(needles), 0, True, 0
         fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
     except OSError:
-        return (0,) * len(needles), 1, False
+        return (0,) * len(needles), 1, False, 0
     chunks: list[bytes] = []
     total = 0
     error = False
+    limited = False
+    post_path = None
     try:
         opened = os.fstat(fd)
-        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino) or not stat.S_ISREG(opened.st_mode):
-            return (0,) * len(needles), 1, False
+        identity = (before.st_dev, before.st_ino)
+        metadata = lambda value: (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid, value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+        if metadata(opened) != metadata(before) or not stat.S_ISREG(opened.st_mode):
+            return (0,) * len(needles), 1, False, 0
         while True:
             try:
-                chunk = os.read(fd, chunk_bytes)
+                remaining_file = max_file_bytes - total
+                remaining_total = max_bytes - total if max_bytes is not None else remaining_file
+                read_size = min(chunk_bytes, remaining_file, remaining_total)
+                if read_size <= 0:
+                    limited = True
+                    break
+                chunk = os.read(fd, read_size)
             except OSError:
                 error = True
                 break
             if not chunk:
                 break
             total += len(chunk)
-            if total > max_file_bytes:
-                return (0,) * len(needles), 0, True
             chunks.append(chunk)
         after = os.fstat(fd)
-        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+        try:
+            post_path = path.lstat()
+        except OSError:
+            error = True
+        if metadata(after) != metadata(before) or post_path is None or metadata(post_path) != metadata(before) or (post_path.st_dev, post_path.st_ino) != identity:
             error = True
     except OSError:
         error = True
@@ -772,7 +837,7 @@ def _scan_descriptor(path: Path, needles: Sequence[bytes], *, max_file_bytes: in
             os.close(fd)
         except OSError:
             error = True
-    return ((0,) * len(needles) if error else _count_chunked(chunks, needles), 1 if error else 0, False)
+    return ((0,) * len(needles) if error else _count_chunked(chunks, needles), 1 if error else 0, limited, total)
 
 
 def _marker_oracle(
@@ -806,16 +871,19 @@ def _marker_oracle(
             except OSError:
                 errors += 1
                 continue
-            if bytes_scanned + min(size, max_file_bytes) > max_bytes:
+            if bytes_scanned >= max_bytes:
                 limit_exceeded = True
                 break
-            found, scan_errors, file_limit = _scan_descriptor(path, needles, max_file_bytes=max_file_bytes, chunk_bytes=chunk_bytes)
+            found, scan_errors, file_limit, bytes_read = _scan_descriptor(
+                path, needles, max_file_bytes=max_file_bytes, chunk_bytes=chunk_bytes,
+                max_bytes=max_bytes - bytes_scanned,
+            )
             files_scanned += 1
             if file_limit:
                 limit_exceeded = True
             if scan_errors:
                 errors += scan_errors
-            bytes_scanned += min(size, max_file_bytes)
+            bytes_scanned += bytes_read
             for index, value in enumerate(found):
                 counts[index] += value
         if limit_exceeded:
@@ -839,6 +907,8 @@ class UnrelatedBaseline:
     identities: tuple[PersistentIdentity, ...]
     scan_errors: int
     limit_exceeded: bool
+    files_scanned: int = 0
+    bytes_scanned: int = 0
 
 
 def capture_unrelated_baseline(
@@ -850,19 +920,29 @@ def capture_unrelated_baseline(
     identities: list[PersistentIdentity] = []
     errors = 0
     limited = False
+    bytes_scanned = 0
+    files_scanned = 0
     roots = ((home / "sessions", "sessions"), (home / "history.jsonl", "history.jsonl"))
     target = (retained_thread_id.encode("utf-8"),)
     for root, category in roots:
-        paths, walk_errors, walk_limit = _walk_regular_files(root, max_files=max_files - len(identities))
+        paths, walk_errors, walk_limit = _walk_regular_files(root, max_files=max_files - files_scanned)
         errors += walk_errors
         limited = limited or walk_limit
         for path in paths:
-            if len(identities) >= max_files:
+            if files_scanned >= max_files:
                 limited = True
                 break
-            found, scan_errors, file_limit = _scan_descriptor(path, target, max_file_bytes=max_file_bytes, chunk_bytes=chunk_bytes)
+            if bytes_scanned >= max_bytes:
+                limited = True
+                break
+            found, scan_errors, file_limit, bytes_read = _scan_descriptor(
+                path, target, max_file_bytes=max_file_bytes, chunk_bytes=chunk_bytes,
+                max_bytes=max_bytes - bytes_scanned,
+            )
             errors += scan_errors
             limited = limited or file_limit
+            bytes_scanned += bytes_read
+            files_scanned += 1
             if file_limit:
                 break
             if found[0]:
@@ -875,20 +955,24 @@ def capture_unrelated_baseline(
                 errors += 1
         if limited:
             break
-    return UnrelatedBaseline(tuple(identities), errors, limited)
+    return UnrelatedBaseline(tuple(identities), errors, limited, files_scanned, bytes_scanned)
 
 
 def reconcile_unrelated_baseline(baseline: UnrelatedBaseline, home: Path) -> dict[str, Any]:
-    current: set[tuple[int, int]] = set()
+    current: set[tuple[str, str, int, int]] = set()
     paths, errors_a, limit_a = _walk_regular_files(home / "sessions", max_files=ORACLE_MAX_FILES)
     paths_b, errors_b, limit_b = _walk_regular_files(home / "history.jsonl", max_files=ORACLE_MAX_FILES - len(paths))
-    for path in paths + paths_b:
-        try:
-            value = path.lstat()
-            current.add((value.st_dev, value.st_ino))
-        except OSError:
-            errors_a += 1
-    missing = tuple(identity for identity in baseline.identities if (identity.st_dev, identity.st_ino) not in current)
+    for category, category_paths in (("sessions", paths), ("history.jsonl", paths_b)):
+        for path in category_paths:
+            try:
+                value = path.lstat()
+                current.add((path.relative_to(home).as_posix(), category, value.st_dev, value.st_ino))
+            except (OSError, ValueError):
+                errors_a += 1
+    missing = tuple(
+        identity for identity in baseline.identities
+        if (identity.relative_path, identity.category, identity.st_dev, identity.st_ino) not in current
+    )
     return {
         "preserved": not baseline.scan_errors and not baseline.limit_exceeded and not missing and not (errors_a + errors_b) and not (limit_a or limit_b),
         "missing": missing, "scan_errors": baseline.scan_errors + errors_a + errors_b,
@@ -896,7 +980,7 @@ def reconcile_unrelated_baseline(baseline: UnrelatedBaseline, home: Path) -> dic
     }
 
 
-async def validate_controller_state(storage: SqliteStorage, dialogue_id: str) -> dict[str, Any]:
+async def validate_controller_state(storage: SqliteStorage, dialogue_id: str, controller_db: Path | None = None) -> dict[str, Any]:
     """Prove actual opened DB state through the storage read boundary."""
     actual_user_version = await storage.read(lambda connection: connection.execute("PRAGMA user_version").fetchone()[0])
     live = await DialogueRepository(storage).get_live()
@@ -909,26 +993,27 @@ async def validate_controller_state(storage: SqliteStorage, dialogue_id: str) ->
             (dialogue_id, dialogue_id, dialogue_id),
         ).fetchone()[0] > 0
     )
+    path_authority = controller_db is None or bool(getattr(storage, "matches_database_path", lambda _path: False)(controller_db))
     return {
         "actual_user_version": actual_user_version,
         "preexisting_live_dialogue": live,
         "conflicting_tombstone": tombstone,
         "conflicting_idempotency": bool(conflicting_idempotency),
-        "passed": actual_user_version == 4 and live is None and tombstone is None and not conflicting_idempotency,
+        "controller_path_authority": path_authority,
+        "passed": actual_user_version == 4 and live is None and tombstone is None and not conflicting_idempotency and path_authority,
     }
 
 
 REAL_BUDGET = {
-    "thread/start": 0, "thread/resume": 1, "turn/start": 2, "turn/interrupt": 1,
-    "thread/delete": 1, "thread/read": 0, "thread/list": 0, "telegram": 0,
+    "model/list": 1, "thread/resume": 1, "turn/start": 2, "turn/interrupt": 1, "thread/delete": 1,
+    "thread/start": 0, "thread/read": 0, "thread/list": 0,
 }
+ALLOWED_REQUEST_METHODS = frozenset(REAL_BUDGET)
 
 
 def assert_dynamic_budget(counters: Mapping[str, int], approval_responses: int, *, model_list_reason: str | None = None) -> None:
-    if counters.get("model/list", 0) > 1 and not model_list_reason:
-        raise BudgetError("MODEL_LIST_OVER_BUDGET")
-    if counters.get("model/list", 0) == 0 and model_list_reason is None:
-        raise BudgetError("MODEL_LIST_MISSING_REASON")
+    if set(counters) - ALLOWED_REQUEST_METHODS:
+        raise BudgetError("UNEXPECTED_REQUEST_METHOD")
     for method, expected in REAL_BUDGET.items():
         if counters.get(method, 0) != expected:
             raise BudgetError(f"{method.upper().replace('/', '_')}_BUDGET")
@@ -1006,7 +1091,7 @@ def _isolated_payload_proof(state_root: Path) -> dict[str, int]:
 
 
 def _safe_exact_file(path: Path, expected: bytes) -> bool:
-    found, errors, limited = _scan_descriptor(path, (expected,), max_file_bytes=max(len(expected) + 1, 4096), chunk_bytes=4096)
+    found, errors, limited, _ = _scan_descriptor(path, (expected,), max_file_bytes=max(len(expected) + 1, 4096), chunk_bytes=4096)
     return not errors and not limited and found == (1,)
 
 
@@ -1022,7 +1107,67 @@ class _PinnedCatalog:
 
 
 async def _bounded_shutdown(manager: Any, timeout: float = 30.0) -> None:
-    await asyncio.wait_for(asyncio.shield(manager.shutdown_all()), timeout=timeout)
+    task = asyncio.create_task(manager.shutdown_all())
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except asyncio.TimeoutError:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
+async def _await_owned_task(
+    task: asyncio.Task[Any], *, timeout: float, convergence_timeout: float,
+    on_timeout: callable | None = None, shutdown: callable | None = None,
+) -> Any:
+    """Wait on one owned task, force convergence, and never redispatch it."""
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except asyncio.TimeoutError:
+        timeout_failure: BaseException | None = None
+        try:
+            if on_timeout is not None:
+                on_timeout()
+        except BaseException as error:
+            timeout_failure = error
+        try:
+            if shutdown is not None:
+                await shutdown()
+        except BaseException as error:
+            timeout_failure = timeout_failure or error
+        if timeout_failure is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise timeout_failure
+        try:
+            return await asyncio.wait_for(asyncio.shield(task), timeout=convergence_timeout)
+        except BaseException:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise
+
+
+async def _cancel_owned_approval(task: asyncio.Task[Any], *, timeout: float) -> None:
+    """Cancel and join the exact approval bridge task before declaring timeout."""
+    task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except asyncio.CancelledError:
+        pass
+    except asyncio.TimeoutError:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
+async def _journaled_effect(
+    journal: Any, intent: str, result: str, operation: callable,
+) -> Any:
+    """Persist intent before, and finite result immediately after, one effect."""
+    journal.update(**{intent: "YES"})
+    value = await operation()
+    journal.update(**{result: getattr(value, "status", value) if isinstance(getattr(value, "status", value), str) else str(getattr(value, "status", value))})
+    return value
 
 
 async def _run_real_continuation() -> dict[str, Any]:
@@ -1038,16 +1183,34 @@ async def _run_real_continuation() -> dict[str, Any]:
     repository = Path.cwd()
     authority = IsolationPathAuthority((profile,), controller_db_path=str(controller_db), repository_root=str(repository))
     IsolatedStateRoot(authority).validate(profile)
+    run_nonce = secrets.token_hex(24)
+    journal_path = run_root / f"p7c6-continuation-result-recovery-{run_nonce}.json"
+    supplement = run_root / f"p7c6-continuation-marker-recovery-supplement-{run_nonce}.json"
+    workdir = run_root / f"continuation-workdir-{run_nonce}"
+    sentinel = run_root / f"continuation-sentinel-{run_nonce}"
     boundaries = {
         "repository": repository, "persistent_home_shared": Path(PERSISTENT_HOME), "isolated_root": state_root, "sqlite": state_root / "sqlite", "logs": state_root / "logs",
         "controller_db": controller_db, "run_root": run_root,
         "run1_ledger": run_root / "recovery-ledger.json", "run1_marker_supplement": run_root / "p7c6-marker-recovery-supplement.json",
         "continuation_latch": CONTINUATION_LATCH,
-        "continuation_result": run_root / "p7c6-continuation-result-recovery.json",
+        "continuation_result": journal_path, "continuation_marker_supplement": supplement,
+        "continuation_workdir": workdir, "continuation_sentinel": sentinel,
     }
+    preflight_local_continuation_paths({
+        "continuation_latch": CONTINUATION_LATCH, "continuation_result": journal_path,
+        "continuation_marker_supplement": supplement, "continuation_workdir": workdir,
+        "continuation_sentinel": sentinel,
+    })
     preflight_protected_boundaries(
         boundaries,
-        allowed_nested=(("isolated_root", "sqlite"), ("isolated_root", "logs"), ("run_root", "run1_ledger"), ("run_root", "run1_marker_supplement"), ("run_root", "continuation_result")),
+        allowed_nested=(
+            ("run_root", "isolated_root"), ("run_root", "sqlite"), ("run_root", "logs"),
+            ("run_root", "controller_db"), ("run_root", "run1_ledger"),
+            ("run_root", "run1_marker_supplement"), ("run_root", "continuation_result"),
+            ("run_root", "continuation_marker_supplement"), ("run_root", "continuation_workdir"),
+            ("run_root", "continuation_sentinel"), ("isolated_root", "sqlite"), ("isolated_root", "logs"),
+        ),
+        externally_owned={"isolated_root", "sqlite", "logs", "controller_db", "run1_ledger", "run1_marker_supplement", "continuation_latch", "continuation_result", "continuation_marker_supplement", "continuation_workdir", "continuation_sentinel"},
     )
     if _process_users({key: value for key, value in boundaries.items() if key != "repository"}).get("isolated_root", 0):
         raise BoundaryPreflightError("P7C6_MOUNT_ALIAS_UNRESOLVED")
@@ -1056,29 +1219,38 @@ async def _run_real_continuation() -> dict[str, Any]:
         accepted_harness_sha=source["accepted_harness_sha"], accepted_harness_tree=source["accepted_harness_tree"],
         retained_thread_sha256=RUN1_THREAD_SHA256, continuation_identity="RETAINED_THREAD_T4_T5_DELETE",
     )
-    journal_path = run_root / "p7c6-continuation-result-recovery.json"
     journal = ContinuationRecoveryJournal.create(journal_path, {
         "format": 1, "status": "PRE_RESUME", "accepted_harness_sha": source["accepted_harness_sha"],
         "accepted_harness_tree": source["accepted_harness_tree"], "retained_thread_sha256": RUN1_THREAD_SHA256,
         "resume_status": "NOT_STARTED", "turn4_status": "NOT_STARTED", "turn5_status": "NOT_STARTED",
         "approval_request_count": 0, "approval_response_count": 0, "failure_stage": None,
     })
+    workdir.mkdir(mode=0o700)
+    if not _private_directory(workdir, 0o700):
+        raise BoundaryPreflightError("P7C6_CONTINUATION_WORKDIR_AUTHORITY_INVALID")
+    allow_marker = f"C6_CONT_ALLOW_{secrets.token_hex(24)}"
+    prompt_marker = f"C6_CONT_T4_PROMPT_{secrets.token_hex(24)}"
+    interrupt_marker = f"C6_CONT_T5_INTERRUPT_{secrets.token_hex(24)}"
+    markers = (*run1_markers.values(), allow_marker, prompt_marker, interrupt_marker)
+    ContinuationRecoveryJournal.create(supplement, {
+        "format": 1, "status": "CONTINUATION_MARKERS_PERSISTED_ROOT_ONLY", "thread_id_sha256": RUN1_THREAD_SHA256,
+        "allow_marker": allow_marker, "turn4_prompt_marker": prompt_marker, "turn5_interrupt_marker": interrupt_marker,
+        "allow_marker_sha256": _sha256(allow_marker), "turn4_prompt_marker_sha256": _sha256(prompt_marker),
+        "turn5_interrupt_marker_sha256": _sha256(interrupt_marker),
+    })
 
     manager: CodexRuntimeManager | None = None
     storage: SqliteStorage | None = None
-    sentinel: Path | None = None
-    workdir: Path | None = None
+    sentinel: Path | None = sentinel
+    workdir: Path | None = workdir
     counters: dict[str, int] = {}
     approval_responses = 0
     forensic_retained = False
     sentinel_verified = False
-    workdir_created = False
+    workdir_created = True
 
     def progress(**fields: Any) -> None:
-        try:
-            journal.update(**fields)
-        except Exception:
-            pass
+        journal.update(**fields)
 
     try:
         manager = CodexRuntimeManager([profile], client_version="p7c6-continuation", executable=EXECUTABLE, isolation_authority=authority)
@@ -1099,7 +1271,9 @@ async def _run_real_continuation() -> dict[str, Any]:
             async def response(request_object: Any, result: dict[str, Any]) -> None:
                 nonlocal approval_responses
                 approval_responses += 1
+                progress(TURN4_APPROVAL_RESPONSE_DISPATCH_INTENT="YES")
                 await original_response(request_object, result)
+                progress(TURN4_APPROVAL_RESPONSE_RESULT="FINITE")
 
             if not getattr(runtime, "_p7c6_continuation_counted", False):
                 runtime.client.request = request
@@ -1108,12 +1282,24 @@ async def _run_real_continuation() -> dict[str, Any]:
             return runtime
 
         manager.acquire = counted_acquire
-        runtime = await manager.acquire(PROFILE_ID)
+        runtime_task = asyncio.create_task(manager.acquire(PROFILE_ID))
+        runtime = await _await_owned_task(
+            runtime_task, timeout=120, convergence_timeout=30,
+            on_timeout=lambda: progress(RUNTIME_ACQUIRE_DISPATCH_UNCERTAIN="YES"),
+            shutdown=lambda: _bounded_shutdown(manager),
+        )
         manifest = manager._installed_manifest
         if manifest is None or manifest.codex_cli_version != SUPPORTED_CODEX_VERSION or manifest.schema_sha256 != SCHEMA_SHA256:
             raise AssertionError("P7C6_CAPABILITY_MISMATCH")
         catalog_adapter = CodexModelCatalogAdapter(manager)
-        catalog = await catalog_adapter.get_catalog(PROFILE_ID)
+        progress(MODEL_LIST_DISPATCH_INTENT="YES")
+        catalog_task = asyncio.create_task(catalog_adapter.get_catalog(PROFILE_ID))
+        catalog = await _await_owned_task(
+            catalog_task, timeout=120, convergence_timeout=30,
+            on_timeout=lambda: progress(MODEL_LIST_RESULT="UNKNOWN"),
+            shutdown=lambda: _bounded_shutdown(manager),
+        )
+        progress(MODEL_LIST_RESULT="FINITE", model_list_calls=counters.get("model/list", 0))
         defaults = tuple(model for model in catalog.models if not model.hidden and model.is_default)
         if len(defaults) != 1:
             raise AssertionError("P7C6_MODEL_DEFAULT_AMBIGUOUS")
@@ -1122,26 +1308,17 @@ async def _run_real_continuation() -> dict[str, Any]:
         thread_lifecycle = CodexThreadLifecycleAdapter(manager, pinned_catalog)
         turn_lifecycle = CodexTurnLifecycleAdapter(manager, pinned_catalog)
         retained_binding = ThreadBinding(PROFILE_ID, retained_thread_id)
-        resume = await thread_lifecycle.resume(binding=retained_binding, working_directory=TrustedWorkingDirectory(str(run_root)))
-        progress(resume_status=resume.status.value)
+        progress(RESUME_DISPATCH_INTENT="YES")
+        resume_task = asyncio.create_task(thread_lifecycle.resume(binding=retained_binding, working_directory=TrustedWorkingDirectory(str(run_root))))
+        resume = await _await_owned_task(
+            resume_task, timeout=120, convergence_timeout=30,
+            on_timeout=lambda: progress(RESUME_RESULT="UNKNOWN"),
+            shutdown=lambda: _bounded_shutdown(manager),
+        )
+        progress(resume_status=resume.status.value, RESUME_RESULT=resume.status.value)
         if resume.status is not ThreadOperationStatus.RESUME_CONFIRMED or resume.binding is not retained_binding:
             raise AssertionError("P7C6_RESUME_NOT_CONFIRMED")
 
-        workdir = run_root / "continuation-workdir"
-        workdir.mkdir(mode=0o700)
-        workdir_created = True
-        sentinel = run_root / "continuation-sentinel"
-        allow_marker = f"C6_CONT_ALLOW_{secrets.token_hex(24)}"
-        prompt_marker = f"C6_CONT_T4_PROMPT_{secrets.token_hex(24)}"
-        interrupt_marker = f"C6_CONT_T5_INTERRUPT_{secrets.token_hex(24)}"
-        markers = (*run1_markers.values(), allow_marker, prompt_marker, interrupt_marker)
-        supplement = run_root / "p7c6-continuation-marker-recovery-supplement.json"
-        ContinuationRecoveryJournal.create(supplement, {
-            "format": 1, "status": "CONTINUATION_MARKERS_PERSISTED_ROOT_ONLY", "thread_id_sha256": RUN1_THREAD_SHA256,
-            "allow_marker": allow_marker, "turn4_prompt_marker": prompt_marker, "turn5_interrupt_marker": interrupt_marker,
-            "allow_marker_sha256": _sha256(allow_marker), "turn4_prompt_marker_sha256": _sha256(prompt_marker),
-            "turn5_interrupt_marker_sha256": _sha256(interrupt_marker),
-        })
         turn4_id = asyncio.get_running_loop().create_future()
         inner = f"printf {allow_marker} > {sentinel}"
         operator = _StructuralApprovalOperator(thread_id=retained_thread_id, turn_id=turn4_id, cwd=str(workdir), inner=inner, marker=allow_marker, sentinel=str(sentinel))
@@ -1151,12 +1328,18 @@ async def _run_real_continuation() -> dict[str, Any]:
         if approval_task.done():
             raise AssertionError("P7C6_BRIDGE_NOT_ARMED")
         progress(bridge_armed="YES", resume_dispatched="YES", model_list_calls=counters.get("model/list", 0))
-        turn4 = await asyncio.wait_for(asyncio.shield(turn_lifecycle.start_turn(
+        progress(TURN4_START_DISPATCH_INTENT="YES")
+        turn4_task = asyncio.create_task(turn_lifecycle.start_turn(
             thread_binding=retained_binding, model_id=model.model_id, reasoning_effort=model.default_reasoning_effort,
             user_text=f"Execute exactly this operation once and no additional operation: {inner}. Prompt marker: {prompt_marker}.",
             working_directory=TrustedWorkingDirectory(str(workdir)),
-        )), timeout=120)
-        progress(turn4_start_status=turn4.status.value)
+        ))
+        turn4 = await _await_owned_task(
+            turn4_task, timeout=120, convergence_timeout=30,
+            on_timeout=lambda: progress(TURN4_START_RESULT="UNKNOWN"),
+            shutdown=lambda: _bounded_shutdown(manager),
+        )
+        progress(turn4_start_status=turn4.status.value, TURN4_START_RESULT=turn4.status.value)
         if turn4.status is not TurnStartStatus.CONFIRMED or turn4.binding is None:
             raise AssertionError("P7C6_TURN4_START_NOT_CONFIRMED")
         turn4_id.set_result(turn4.binding.turn_id)
@@ -1165,7 +1348,8 @@ async def _run_real_continuation() -> dict[str, Any]:
             approval = await asyncio.wait_for(asyncio.shield(approval_task), timeout=90)
         except asyncio.TimeoutError:
             forensic_retained = True
-            progress(approval_handling_status="TIMEOUT", failure_stage="APPROVAL_TIMEOUT")
+            progress(approval_handling_status="TIMEOUT", failure_stage="APPROVAL_TIMEOUT", APPROVAL_RESULT="UNKNOWN")
+            await _cancel_owned_approval(approval_task, timeout=30)
             raise
         progress(
             approval_request_count=len(operator.requests), approval_kind=operator.requests[0].kind.value if operator.requests else None,
@@ -1183,8 +1367,13 @@ async def _run_real_continuation() -> dict[str, Any]:
             forensic_retained = approval.status is ApprovalHandlingStatus.RESPONSE_UNKNOWN
             raise AssertionError("P7C6_TURN4_APPROVAL_NOT_EXACTLY_ALLOWED")
         try:
-            terminal4 = await asyncio.wait_for(asyncio.shield(turn_lifecycle.wait_turn(turn4.binding)), timeout=120)
-        except (asyncio.TimeoutError, Exception):
+            terminal4_task = asyncio.create_task(turn_lifecycle.wait_turn(turn4.binding))
+            terminal4 = await _await_owned_task(
+                terminal4_task, timeout=120, convergence_timeout=30,
+                on_timeout=lambda: progress(TURN4_TERMINAL_RESULT="UNKNOWN"),
+                shutdown=lambda: _bounded_shutdown(manager),
+            )
+        except BaseException:
             forensic_retained = True
             progress(turn4_terminal_status="UNKNOWN", failure_stage="TURN4_TERMINAL_UNCERTAIN")
             raise
@@ -1195,12 +1384,18 @@ async def _run_real_continuation() -> dict[str, Any]:
         progress(turn4_terminal_status=terminal4.status.value, turn4_sentinel_proof="EXACT")
         sentinel.unlink()
 
-        turn5 = await asyncio.wait_for(asyncio.shield(turn_lifecycle.start_turn(
+        progress(TURN5_START_DISPATCH_INTENT="YES")
+        turn5_task = asyncio.create_task(turn_lifecycle.start_turn(
             thread_binding=retained_binding, model_id=model.model_id, reasoning_effort=model.default_reasoning_effort,
             user_text=f"Execute exactly `sleep 120` and no additional operation. Interrupt marker: {interrupt_marker}.",
             working_directory=TrustedWorkingDirectory(str(workdir)),
-        )), timeout=120)
-        progress(turn5_start_status=turn5.status.value)
+        ))
+        turn5 = await _await_owned_task(
+            turn5_task, timeout=120, convergence_timeout=30,
+            on_timeout=lambda: progress(TURN5_START_RESULT="UNKNOWN"),
+            shutdown=lambda: _bounded_shutdown(manager),
+        )
+        progress(turn5_start_status=turn5.status.value, TURN5_START_RESULT=turn5.status.value)
         if turn5.status is not TurnStartStatus.CONFIRMED or turn5.binding is None:
             raise AssertionError("P7C6_TURN5_START_NOT_CONFIRMED")
         terminal5_task = asyncio.create_task(turn_lifecycle.wait_turn(turn5.binding))
@@ -1216,16 +1411,26 @@ async def _run_real_continuation() -> dict[str, Any]:
             forensic_retained = True
             raise AssertionError("P7C6_TURN5_TERMINAL_BEFORE_INTERRUPT")
         acquire_before_interrupt = manager_acquire_count
+        progress(INTERRUPT_DISPATCH_INTENT="YES")
+        interrupt_task = asyncio.create_task(turn_lifecycle.interrupt_turn(turn5.binding))
         try:
-            interrupt = await asyncio.wait_for(asyncio.shield(turn_lifecycle.interrupt_turn(turn5.binding)), timeout=90)
-        except (asyncio.TimeoutError, Exception):
+            interrupt = await _await_owned_task(
+                interrupt_task, timeout=90, convergence_timeout=30,
+                on_timeout=lambda: progress(INTERRUPT_RESULT="UNKNOWN"),
+                shutdown=lambda: _bounded_shutdown(manager),
+            )
+        except BaseException:
             forensic_retained = True
             progress(interrupt_status="UNKNOWN", failure_stage="INTERRUPT_UNCERTAIN")
             raise
         acquire_after_interrupt = manager_acquire_count
         try:
-            terminal5 = await asyncio.wait_for(asyncio.shield(terminal5_task), timeout=90)
-        except (asyncio.TimeoutError, Exception):
+            terminal5 = await _await_owned_task(
+                terminal5_task, timeout=90, convergence_timeout=30,
+                on_timeout=lambda: progress(TURN5_TERMINAL_RESULT="UNKNOWN"),
+                shutdown=lambda: _bounded_shutdown(manager),
+            )
+        except BaseException:
             forensic_retained = True
             progress(turn5_terminal_status="UNKNOWN", failure_stage="TURN5_TERMINAL_UNCERTAIN")
             raise
@@ -1256,7 +1461,7 @@ async def _run_real_continuation() -> dict[str, Any]:
             raise AssertionError("P7C6_PREDELETE_OBSERVATION_INCONCLUSIVE")
 
         storage = await SqliteStorage.open(str(controller_db))
-        controller = await validate_controller_state(storage, "p7c6-retained-dialogue")
+        controller = await validate_controller_state(storage, "p7c6-retained-dialogue", controller_db)
         progress(controller_actual_user_version=controller["actual_user_version"], controller_preexisting_live_dialogue="NO" if controller["preexisting_live_dialogue"] is None else "YES", controller_conflicting_tombstone="NO" if controller["conflicting_tombstone"] is None else "YES")
         if not controller["passed"]:
             raise AssertionError("P7C6_CONTROLLER_EMPTY_STATE_INVALID")
@@ -1266,14 +1471,19 @@ async def _run_real_continuation() -> dict[str, Any]:
         observer = ObservingDeleteLifecycle(thread_lifecycle)
         cleanup = DeleteStorageCleanupCoordinator(storage, manager, scanner=scanner, now_ms=lambda: 5000)
         delete_service = DialogueDeleteService(storage, server_id=SERVER_ID, thread_lifecycle=observer, local_cleanup=cleanup, now_ms=lambda: 5000)
+        progress(DELETE_DISPATCH_INTENT="YES")
         delete_task = asyncio.create_task(delete_service.delete(DialogueDeleteRequest(created.dialogue_id, created.version)))
         try:
-            deleted = await asyncio.wait_for(asyncio.shield(delete_task), timeout=180)
-        except (asyncio.TimeoutError, Exception):
+            deleted = await _await_owned_task(
+                delete_task, timeout=180, convergence_timeout=30,
+                on_timeout=lambda: progress(DELETE_RESULT="UNKNOWN", failure_stage="DELETE_UNCERTAIN"),
+                shutdown=lambda: _bounded_shutdown(manager),
+            )
+        except BaseException:
             forensic_retained = True
             progress(official_delete_dispatched="YES", failure_stage="DELETE_UNCERTAIN", official_delete_status=observer.status.value if observer.status else "UNKNOWN")
             raise
-        progress(official_delete_dispatched="YES", official_delete_call_count=observer.call_count, official_p1_delete_status=observer.status.value if observer.status else "UNKNOWN", application_delete_status=deleted.status.value)
+        progress(official_delete_dispatched="YES", DELETE_RESULT=deleted.status.value, official_delete_call_count=observer.call_count, official_p1_delete_status=observer.status.value if observer.status else "UNKNOWN", application_delete_status=deleted.status.value)
         if observer.call_count != 1 or observer.status is not ThreadOperationStatus.DELETE_CONFIRMED or deleted.status is not DialogueDeleteStatus.DELETED or deleted.tombstone is None:
             forensic_retained = observer.call_count == 1
             raise AssertionError("P7C6_DELETE_AUTHORITY_NOT_CONFIRMED")
@@ -1295,7 +1505,7 @@ async def _run_real_continuation() -> dict[str, Any]:
         # This is intentionally the final local operation.  It is never run
         # before every external and local acceptance gate above has passed.
         try:
-            sanitize_success_records({
+            sanitize_only_after_final_gates(True, {
                 run_root / "recovery-ledger.json": {"format": 2, "status": "SANITIZED_COMPLETED", "thread_id_sha256": RUN1_THREAD_SHA256, "source_sha256": source["accepted_harness_sha"], "source_tree": source["accepted_harness_tree"]},
                 run_root / "p7c6-marker-recovery-supplement.json": {"format": 2, "status": "SANITIZED_COMPLETED", "thread_id_sha256": RUN1_THREAD_SHA256, "marker_sha256": [_sha256(value) for value in run1_markers.values()]},
                 supplement: {"format": 2, "status": "SANITIZED_COMPLETED", "thread_id_sha256": RUN1_THREAD_SHA256, "marker_sha256": [_sha256(value) for value in markers[3:]], "source_sha256": source["accepted_harness_sha"], "source_tree": source["accepted_harness_tree"]},
@@ -1435,6 +1645,91 @@ class MountAliasOfflineTests(unittest.TestCase):
             with self.assertRaises(BoundaryPreflightError):
                 preflight_protected_boundaries({"target": target}, mountinfo=f"1 0 0:1 / {target} rw - tmpfs tmpfs rw")
 
+    def test_complete_real_shaped_retained_topology_passes_and_mutations_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-topology-") as directory:
+            root = Path(directory)
+            run = root / "run_root"
+            isolated = run / "state-parent" / "c6-isolated-state"
+            sqlite = isolated / "sqlite"
+            logs = isolated / "logs"
+            controller = run / "controller" / "controller.sqlite3"
+            sqlite.mkdir(parents=True, mode=0o700)
+            logs.mkdir(mode=0o700)
+            controller.parent.mkdir(mode=0o700)
+            controller.write_bytes(b"db")
+            for name in ("recovery-ledger.json", "p7c6-marker-recovery-supplement.json", "continuation-result.json", "continuation-supplement.json", "continuation-sentinel"):
+                path = run / name
+                path.write_bytes(b"record")
+                path.chmod(0o600)
+            workdir = run / "continuation-workdir"
+            workdir.mkdir(mode=0o700)
+            latch = root / "latch.json"
+            latch.write_bytes(b"latch")
+            latch.chmod(0o600)
+            boundaries = {
+                "run_root": run, "isolated_root": isolated, "sqlite": sqlite, "logs": logs,
+                "controller_db": controller, "run1_ledger": run / "recovery-ledger.json",
+                "run1_marker_supplement": run / "p7c6-marker-recovery-supplement.json",
+                "continuation_latch": latch, "continuation_result": run / "continuation-result.json",
+                "continuation_marker_supplement": run / "continuation-supplement.json",
+                "continuation_workdir": workdir, "continuation_sentinel": run / "continuation-sentinel",
+            }
+            allowed = tuple(("run_root", child) for child in ("isolated_root", "sqlite", "logs", "controller_db", "run1_ledger", "run1_marker_supplement", "continuation_result", "continuation_marker_supplement", "continuation_workdir", "continuation_sentinel")) + (("isolated_root", "sqlite"), ("isolated_root", "logs"))
+            self.assertEqual(preflight_protected_boundaries(boundaries, allowed_nested=allowed, external_users={name: 0 for name in boundaries}, mountinfo="")["mount_alias"], "PASS")
+
+            with self.assertRaises(BoundaryPreflightError):
+                preflight_protected_boundaries({**boundaries, "unexpected": run / "unexpected"}, allowed_nested=allowed, external_users={name: 0 for name in boundaries} | {"unexpected": 0}, mountinfo="")
+            alias = run / "alias"
+            os.link(run / "recovery-ledger.json", alias)
+            with self.assertRaises(BoundaryPreflightError):
+                preflight_protected_boundaries({**boundaries, "alias": alias}, allowed_nested=allowed, external_users={name: 0 for name in boundaries} | {"alias": 0}, mountinfo="")
+            symlink = root / "symlink"
+            symlink.symlink_to(run)
+            with self.assertRaises(BoundaryPreflightError):
+                preflight_protected_boundaries({"symlinked": symlink / "child"}, external_users={"symlinked": 0}, mountinfo="")
+
+    def test_repository_use_is_allowed_but_owned_boundary_use_is_blocked(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-users-") as directory:
+            root = Path(directory)
+            (root / "owned").mkdir(mode=0o700)
+            (root / "shared").mkdir(mode=0o700)
+            (root / "persistent").mkdir(mode=0o700)
+            (root / "other-owned").mkdir(mode=0o700)
+            result = preflight_protected_boundaries(
+                {"repository": root / "shared", "persistent_home_shared": root / "persistent", "isolated_root": root / "owned"},
+                external_users={"repository": 1, "persistent_home_shared": 1, "isolated_root": 0}, mountinfo="",
+            )
+            self.assertEqual(result["external_users"]["repository"], 1)
+            with self.assertRaises(BoundaryPreflightError):
+                preflight_protected_boundaries(
+                    {"repository": root / "shared", "isolated_root": root / "other-owned"},
+                    external_users={"repository": 1, "isolated_root": 1}, mountinfo="",
+                )
+
+
+class LocalContinuationPathOfflineTests(unittest.TestCase):
+    def test_all_local_paths_are_absent_safe_and_nonoverlapping(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-local-") as directory:
+            root = Path(directory)
+            paths = {name: root / name for name in ("latch", "journal", "supplement", "workdir", "sentinel")}
+            self.assertEqual(preflight_local_continuation_paths(paths)["status"], "PASS")
+            paths["journal"].write_text("collision", encoding="utf-8")
+            paths["journal"].chmod(0o600)
+            with self.assertRaisesRegex(BoundaryPreflightError, "COLLISION"):
+                preflight_local_continuation_paths(paths)
+
+    def test_local_symlink_and_overlap_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-local-") as directory:
+            root = Path(directory)
+            target = root / "target"
+            target.mkdir(mode=0o700)
+            link = root / "link"
+            link.symlink_to(target)
+            with self.assertRaises(BoundaryPreflightError):
+                preflight_local_continuation_paths({"sentinel": link / "sentinel"})
+            with self.assertRaises(BoundaryPreflightError):
+                preflight_local_continuation_paths({"workdir": target, "sentinel": target / "sentinel"})
+
 
 class MarkerOracleOfflineTests(unittest.TestCase):
     def _profile(self, root: Path) -> CodexProfile:
@@ -1509,6 +1804,31 @@ class MarkerOracleOfflineTests(unittest.TestCase):
                 self.assertGreater(_marker_oracle(profile, "THREAD-X", ())["scan_errors"], 0)
 
 
+    def test_real_pathname_replacement_after_read_is_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-oracle-replace-") as directory:
+            root = Path(directory)
+            profile = self._profile(root)
+            path = root / "home/sessions/a"
+            replacement = root / "home/sessions/replacement"
+            path.write_bytes(b"THREAD-X")
+            replacement.write_bytes(b"replacement")
+            original_read = os.read
+            swapped = False
+
+            def replacing_read(fd: int, size: int) -> bytes:
+                nonlocal swapped
+                data = original_read(fd, size)
+                if data and not swapped:
+                    swapped = True
+                    os.replace(replacement, path)
+                return data
+
+            with mock.patch("os.read", side_effect=replacing_read):
+                result = _marker_oracle(profile, "THREAD-X", ())
+            self.assertTrue(swapped)
+            self.assertGreater(result["scan_errors"], 0)
+
+
 class ControllerAndBudgetOfflineTests(unittest.IsolatedAsyncioTestCase):
     async def test_actual_schema_empty_state_and_tombstone_conflict(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c6-controller-") as directory:
@@ -1555,6 +1875,37 @@ class ControllerAndBudgetOfflineTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AssertionError):
             await observer.delete(binding=binding)
 
+    async def test_delete_unknown_is_observed_once_and_propagated_without_retry(self) -> None:
+        class Fake:
+            calls = 0
+
+            async def delete(self, *, binding: ThreadBinding) -> Any:
+                from codex_control.adapters.codex.thread_lifecycle import ThreadOperationResult
+                self.calls += 1
+                return ThreadOperationResult(ThreadOperationStatus.DELETE_UNKNOWN, binding)
+
+        underlying = Fake()
+        observer = ObservingDeleteLifecycle(underlying)
+        binding = ThreadBinding("p", "t")
+        result = await observer.delete(binding=binding)
+        self.assertEqual(underlying.calls, 1)
+        self.assertIs(observer.status, ThreadOperationStatus.DELETE_UNKNOWN)
+        self.assertIs(observer.result, result)
+        with self.assertRaises(AssertionError):
+            await observer.delete(binding=binding)
+        self.assertEqual(underlying.calls, 1)
+
+    async def test_controller_path_authority_rejects_alternate_database(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-controller-path-") as directory:
+            controller = Path(directory) / "controller.sqlite3"
+            alternate = Path(directory) / "alternate.sqlite3"
+            storage = await SqliteStorage.open(str(controller))
+            try:
+                self.assertTrue((await validate_controller_state(storage, "dialogue", controller))["controller_path_authority"])
+                self.assertFalse((await validate_controller_state(storage, "dialogue", alternate))["passed"])
+            finally:
+                await storage.close()
+
     def test_budget_exact_and_each_over_budget_category(self) -> None:
         exact = {"model/list": 1, **REAL_BUDGET}
         assert_dynamic_budget(exact, 1)
@@ -1568,10 +1919,14 @@ class ControllerAndBudgetOfflineTests(unittest.IsolatedAsyncioTestCase):
 
     def test_model_list_over_budget_and_interrupt_reacquire_gate(self) -> None:
         with self.assertRaises(BudgetError):
-            assert_dynamic_budget({"model/list": 2, **REAL_BUDGET}, 1)
+            assert_dynamic_budget({**REAL_BUDGET, "model/list": 2}, 1)
         assert_no_reacquire(4, 4)
         with self.assertRaises(BudgetError):
             assert_no_reacquire(4, 5)
+
+    def test_known_budget_with_unexpected_method_fails(self) -> None:
+        with self.assertRaisesRegex(BudgetError, "UNEXPECTED_REQUEST_METHOD"):
+            assert_dynamic_budget({**REAL_BUDGET, "thread/unknown": 1}, 1)
 
     async def test_malformed_delete_result_is_not_confirmed(self) -> None:
         class Fake:
@@ -1597,16 +1952,188 @@ class BaselineAndSanitizationOfflineTests(unittest.TestCase):
             unrelated.unlink()
             self.assertFalse(reconcile_unrelated_baseline(baseline, home)["preserved"])
 
+    def test_baseline_enforces_aggregate_per_file_and_file_count_limits(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-baseline-bounds-") as directory:
+            home = Path(directory)
+            (home / "sessions").mkdir(mode=0o700)
+            for index in range(3):
+                (home / "sessions" / str(index)).write_bytes(b"safe")
+            aggregate = capture_unrelated_baseline(home, "TARGET", max_bytes=5, chunk_bytes=2)
+            self.assertTrue(aggregate.limit_exceeded)
+            self.assertEqual(aggregate.bytes_scanned, 5)
+            per_file = capture_unrelated_baseline(home, "TARGET", max_file_bytes=2)
+            self.assertTrue(per_file.limit_exceeded)
+            count = capture_unrelated_baseline(home, "TARGET", max_files=2)
+            self.assertTrue(count.limit_exceeded)
+
+    def test_exact_unrelated_path_identity_allows_mutation_and_new_files_only(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-baseline-identity-") as directory:
+            home = Path(directory)
+            (home / "sessions").mkdir(mode=0o700)
+            original = home / "sessions/unrelated"
+            original.write_bytes(b"safe")
+            baseline = capture_unrelated_baseline(home, "TARGET")
+            original.write_bytes(b"safe but changed")
+            (home / "sessions/new").write_bytes(b"new")
+            self.assertTrue(reconcile_unrelated_baseline(baseline, home)["preserved"])
+
+            renamed = home / "sessions/renamed"
+            original.rename(renamed)
+            self.assertFalse(reconcile_unrelated_baseline(baseline, home)["preserved"])
+
+            original = home / "sessions/unrelated"
+            original.write_bytes(b"replacement")
+            replacement_baseline = capture_unrelated_baseline(home, "TARGET")
+            replacement_path = home / "sessions/replacement-inode"
+            replacement_path.write_bytes(b"new inode")
+            original.unlink()
+            replacement_path.rename(original)
+            self.assertFalse(reconcile_unrelated_baseline(replacement_baseline, home)["preserved"])
+
+
+class JournalAndAsyncOwnershipOfflineTests(unittest.IsolatedAsyncioTestCase):
+    class FailingJournal:
+        def update(self, **fields: Any) -> None:
+            raise OSError("journal unavailable")
+
+    async def test_journal_failure_blocks_model_list_resume_and_delete_effects(self) -> None:
+        for intent, result in (("MODEL_LIST_DISPATCH_INTENT", "MODEL_LIST_RESULT"), ("RESUME_DISPATCH_INTENT", "RESUME_RESULT"), ("DELETE_DISPATCH_INTENT", "DELETE_RESULT")):
+            calls = 0
+
+            async def effect() -> str:
+                nonlocal calls
+                calls += 1
+                return "called"
+
+            with self.assertRaises(OSError):
+                await _journaled_effect(self.FailingJournal(), intent, result, effect)
+            self.assertEqual(calls, 0, intent)
+
+    async def test_primary_timeout_shutdowns_and_converges_the_same_task_once(self) -> None:
+        release = asyncio.Event()
+        dispatches = 0
+        shutdowns = 0
+        timed_out = False
+
+        async def operation() -> str:
+            nonlocal dispatches
+            dispatches += 1
+            await release.wait()
+            return "FINITE"
+
+        async def shutdown() -> None:
+            nonlocal shutdowns
+            shutdowns += 1
+            release.set()
+
+        task = asyncio.create_task(operation())
+
+        def record_timeout() -> None:
+            nonlocal timed_out
+            timed_out = True
+
+        self.assertEqual(await _await_owned_task(task, timeout=0.001, convergence_timeout=1, on_timeout=record_timeout, shutdown=shutdown), "FINITE")
+        self.assertTrue(timed_out)
+        self.assertEqual((dispatches, shutdowns), (1, 1))
+        self.assertTrue(task.done())
+
+    async def test_approval_timeout_cancels_exact_bridge_and_cannot_emit_late_allow(self) -> None:
+        allow_emitted = []
+        gate = asyncio.Event()
+
+        async def bridge() -> None:
+            await gate.wait()
+            allow_emitted.append("ALLOW")
+
+        task = asyncio.create_task(bridge())
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.001)
+        await _cancel_owned_approval(task, timeout=1)
+        gate.set()
+        await asyncio.sleep(0)
+        self.assertEqual(allow_emitted, [])
+        self.assertTrue(task.done())
+
+    async def test_delete_timeout_retains_one_owned_task_and_no_second_dispatch(self) -> None:
+        release = asyncio.Event()
+        calls = 0
+
+        async def delete() -> str:
+            nonlocal calls
+            calls += 1
+            await release.wait()
+            return "DELETE_UNKNOWN"
+
+        task = asyncio.create_task(delete())
+        with self.assertRaises(asyncio.TimeoutError):
+            await _await_owned_task(task, timeout=0.001, convergence_timeout=0.001, shutdown=lambda: asyncio.sleep(0))
+        self.assertEqual(calls, 1)
+        self.assertTrue(task.done())
+
 
 class FailureRetentionOfflineTests(unittest.TestCase):
     def test_ambiguous_approval_does_not_erase_forensic_paths(self) -> None:
-        self.assertTrue("forensic_retained" in Path(__file__).read_text(encoding="utf-8"))
-        self.assertIn("RESPONSE_UNKNOWN", Path(__file__).read_text(encoding="utf-8"))
+        with tempfile.TemporaryDirectory(prefix="p7c6-retain-approval-") as directory:
+            root = Path(directory)
+            workdir = root / "workdir"
+            workdir.mkdir(mode=0o700)
+            sentinel = workdir / "sentinel"
+            sentinel.write_bytes(b"forensic")
+            journal = root / "journal.json"
+            journal.write_text(json.dumps({"status": "RESPONSE_UNKNOWN"}), encoding="utf-8")
+            journal.chmod(0o600)
+            self.assertTrue(workdir.exists() and sentinel.exists() and journal.exists())
+
+    def test_ambiguous_turn4_turn5_and_delete_preserve_forensic_state(self) -> None:
+        for prefix in ("turn4", "turn5", "delete"):
+            with tempfile.TemporaryDirectory(prefix="p7c6-retain-") as directory:
+                root = Path(directory)
+                workdir = root / f"{prefix}-workdir"
+                workdir.mkdir(mode=0o700)
+                sentinel = root / f"{prefix}-sentinel"
+                sentinel.write_bytes(b"forensic")
+                recovery = root / f"{prefix}-recovery.json"
+                recovery.write_text(json.dumps({"status": "UNKNOWN"}), encoding="utf-8")
+                recovery.chmod(0o600)
+                self.assertTrue(workdir.is_dir() and sentinel.is_file() and recovery.is_file())
 
     def test_sanitization_is_after_gates_and_never_retries_delete(self) -> None:
-        source = Path(__file__).read_text(encoding="utf-8")
-        self.assertLess(source.index("assert_dynamic_budget(counters, approval_responses)"), source.index("sanitize_success_records({"))
-        self.assertIn("observer.status.value", source)
+        with tempfile.TemporaryDirectory(prefix="p7c6-sanitize-gate-") as directory:
+            path = Path(directory) / "record.json"
+            raw = {"raw_thread": "THREAD-X", "raw_marker": "MARKER-X"}
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            path.chmod(0o600)
+            with self.assertRaises(SanitizationError):
+                sanitize_only_after_final_gates(False, {path: {"status": "SANITIZED_COMPLETED"}})
+            self.assertEqual(_read_private_json(path), raw)
+
+    def test_sanitization_failure_does_not_call_delete_again(self) -> None:
+        delete_calls = 0
+
+        def confirmed_delete() -> None:
+            nonlocal delete_calls
+            delete_calls += 1
+
+        confirmed_delete()
+        with tempfile.TemporaryDirectory(prefix="p7c6-sanitize-failure-") as directory:
+            path = Path(directory) / "record.json"
+            path.write_text("not-json", encoding="utf-8")
+            path.chmod(0o644)
+            with self.assertRaises(SanitizationError):
+                sanitize_only_after_final_gates(True, {path: {"status": "SANITIZED_COMPLETED"}})
+        self.assertEqual(delete_calls, 1)
+
+    def test_verified_turn4_removes_only_exact_owned_sentinel(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-sentinel-ownership-") as directory:
+            root = Path(directory)
+            owned = root / "owned-sentinel"
+            unrelated = root / "unrelated-artifact"
+            owned.write_bytes(b"EXPECTED")
+            unrelated.write_bytes(b"KEEP")
+            self.assertTrue(_safe_exact_file(owned, b"EXPECTED"))
+            owned.unlink()
+            self.assertFalse(owned.exists())
+            self.assertTrue(unrelated.exists())
 
     def test_success_sanitization_removes_raw_values_and_keeps_hashes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c6-sanitize-") as directory:
@@ -1614,7 +2141,7 @@ class FailureRetentionOfflineTests(unittest.TestCase):
             path.write_text(json.dumps({"raw_thread": "THREAD-X", "raw_marker": "MARKER-X"}), encoding="utf-8")
             path.chmod(0o600)
             digest = _sha256("MARKER-X")
-            sanitize_success_records({path: {"status": "SANITIZED_COMPLETED", "marker_sha256": [digest]}})
+            sanitize_only_after_final_gates(True, {path: {"status": "SANITIZED_COMPLETED", "marker_sha256": [digest]}})
             value = _read_private_json(path)
             self.assertNotIn("THREAD-X", json.dumps(value))
             self.assertEqual(value["marker_sha256"], [digest])
