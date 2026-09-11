@@ -51,8 +51,8 @@ from codex_control.domain import CodexProfile
 from codex_control.adapters.codex.protocol import InboundServerRequest
 
 
-ARCHITECT_BASE_SHA = "9d3fcc959794f6c7f5461b5d7d60dc55bc2658df"
-ARCHITECT_BASE_TREE = "f271545b08a0a3be41d346a00d0242c368f81057"
+ARCHITECT_BASE_SHA = "2b6e514f419e263af62530232f8220cd4079f953"
+ARCHITECT_BASE_TREE = "6d774ecf66e38f82b1b5ac530205919c2850780f"
 AUTHORIZED_ENV = "AUTHORIZED_P7C8_DENY_ONLY_APPROVAL_PROBE_2026_09_11"
 EXPECTED_HEAD_ENV = "CODEXCONTROL_P7C8_PROBE_EXPECTED_HEAD"
 EXPECTED_TREE_ENV = "CODEXCONTROL_P7C8_PROBE_EXPECTED_TREE"
@@ -89,7 +89,7 @@ PROBE_RUNTIME_SHUTDOWN_TIMEOUT = 5.0
 PROBE_CHILD_RESULT_TIMEOUT = 2.0
 PROBE_TERM_GRACE_SECONDS = 2.0
 PROBE_KILL_GRACE_SECONDS = 2.0
-PROBE_INTERNAL_WORST_CASE_SECONDS = sum((
+NORMAL_PATH_INTERNAL_WORST_CASE_SECONDS = sum((
     PROBE_RUNTIME_ACQUIRE_TIMEOUT,
     PROBE_MODEL_LIST_TIMEOUT,
     PROBE_THREAD_START_TIMEOUT,
@@ -101,13 +101,29 @@ PROBE_INTERNAL_WORST_CASE_SECONDS = sum((
     PROBE_TERM_GRACE_SECONDS,
     PROBE_KILL_GRACE_SECONDS,
 ))
+P7C8_RUNTIME_ACQUIRE_CLEANUP_CANCEL_JOIN_SECONDS = 1.0
+FAILED_ACQUIRE_INTERNAL_WORST_CASE_SECONDS = sum((
+    PROBE_RUNTIME_ACQUIRE_TIMEOUT,
+    12.0,
+    P7C8_RUNTIME_ACQUIRE_CLEANUP_CANCEL_JOIN_SECONDS,
+    PROBE_CHILD_RESULT_TIMEOUT,
+    PROBE_TERM_GRACE_SECONDS,
+    PROBE_KILL_GRACE_SECONDS,
+))
+PROBE_INTERNAL_WORST_CASE_SECONDS = NORMAL_PATH_INTERNAL_WORST_CASE_SECONDS
 PROBE_WATCHDOG_MARGIN_SECONDS = 15.0
 PROBE_WATCHDOG_HARD_DEADLINE = 205.0
 
 # P7.C8 frozen real-mode authorities.  Synthetic tests may inject smaller values.
 PROFILE_ID = "p7c8-fresh-probe"
-SAFE_RUNTIME_CATEGORIES = frozenset({"capability_mismatch", "storage_boundary_invalid", "initialize_timeout", "executable_invalid"})
+SAFE_RUNTIME_CATEGORIES = frozenset({
+    "capability_mismatch", "manager_shutting_down", "unknown_profile", "profile_reserved",
+    "profile_stopping", "unresolved_process", "storage_boundary_invalid", "executable_invalid",
+    "process_streams_missing", "initialize_failed", "initialize_timeout", "startup_failed",
+    "kill_reap_timeout",
+})
 SAFE_CATEGORY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED = "SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED"
 P7C8_RUNTIME_ACQUIRE_TIMEOUT_SECONDS = PROBE_RUNTIME_ACQUIRE_TIMEOUT
 P7C8_RUNTIME_ACQUIRE_CLEANUP_TIMEOUT_SECONDS = 12.0
 P7C8_KNOWN_NAMED_STARTUP_BOUND_SECONDS = 24.0
@@ -172,7 +188,8 @@ PARENT_OUTCOME_KEYS = frozenset({
     "boundary_drift_class", "group_active_count", "group_zombie_count", "group_scan_errors",
     "term_group_signal_count", "kill_group_signal_count", "one_child_count", "second_child_started",
     "retry_count", "global_latch_present", "normal_final_result_present", "child_result_discovery_class",
-    "runtime_acquire_result", "runtime_acquire_error_category", "runtime_acquire_cleanup_result",
+    "runtime_acquire_initial_result", "runtime_acquire_result", "runtime_acquire_error_category",
+    "runtime_acquire_cleanup_result", "runtime_acquire_cleanup_error_category",
 })
 CHILD_RESULT_DISCOVERY_CLASSES = frozenset({
     "CHILD_RESULT_DISCOVERY_CONFIRMED",
@@ -469,8 +486,100 @@ class RecoveryJournal:
         self._append(record)
 
 
+RECOVERY_JOURNAL_FIELDS = frozenset({
+    "event", "result", "source_sha", "source_tree", "attempt", "request_count", "status", "class",
+    "kind", "thread_match", "turn_match", "cwd_match", "wire_hash", "wire_command_sha256", "category",
+    "sentinel_reference_class",
+})
+MAX_RECOVERY_JOURNAL_BYTES = 256 * 1024
+MAX_RECOVERY_JOURNAL_RECORDS = 512
+
+
+def _journal_metadata(value: os.stat_result) -> tuple[int, int, int, int, int, int, int, int, int]:
+    return (
+        value.st_dev, value.st_ino, value.st_size, value.st_mode, value.st_uid, value.st_gid,
+        value.st_nlink, value.st_mtime_ns, value.st_ctime_ns,
+    )
+
+
+def _json_object_without_duplicate_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("JOURNAL_DUPLICATE_FIELD")
+        value[key] = item
+    return value
+
+
+def _validate_recovery_journal_record(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) - RECOVERY_JOURNAL_FIELDS:
+        raise ValueError("JOURNAL_SCHEMA_INVALID")
+    event = value.get("event")
+    if not isinstance(event, str) or re.fullmatch(r"[A-Z0-9_]+", event) is None:
+        raise ValueError("JOURNAL_EVENT_INVALID")
+    if not all(RecoveryJournal._safe(item) for item in value.values()):
+        raise ValueError("JOURNAL_VALUE_UNSAFE")
+    return value
+
+
+def read_authoritative_recovery_journal(
+    path: Path, *, maximum: int = MAX_RECOVERY_JOURNAL_BYTES,
+    maximum_records: int = MAX_RECOVERY_JOURNAL_RECORDS,
+) -> list[dict[str, Any]]:
+    """Read acquisition evidence through a bounded, stable, no-follow fd."""
+    if not _private_regular(path):
+        raise ValueError("JOURNAL_AUTHORITY_INVALID")
+    before_path = path.lstat()
+    if before_path.st_size > maximum:
+        raise ValueError("JOURNAL_OVERSIZE")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(str(path), flags)
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        before_fd = os.fstat(fd)
+        if _journal_metadata(before_fd) != _journal_metadata(before_path):
+            raise ValueError("JOURNAL_IDENTITY_CHANGED")
+        while True:
+            chunk = os.read(fd, min(8192, maximum - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > maximum:
+                raise ValueError("JOURNAL_OVERSIZE")
+            chunks.append(chunk)
+        after_fd = os.fstat(fd)
+        after_path = path.lstat()
+        if (
+            _journal_metadata(after_fd) != _journal_metadata(before_fd)
+            or _journal_metadata(after_path) != _journal_metadata(before_path)
+        ):
+            raise ValueError("JOURNAL_IDENTITY_CHANGED")
+    finally:
+        os.close(fd)
+    try:
+        text = b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError("JOURNAL_UTF8_INVALID") from error
+    lines = text.splitlines()
+    if not lines or len(lines) > maximum_records or any(not line for line in lines):
+        raise ValueError("JOURNAL_RECORD_COUNT_INVALID")
+    records: list[dict[str, Any]] = []
+    for line in lines:
+        try:
+            record = json.loads(
+                line, object_pairs_hook=_json_object_without_duplicate_fields,
+                parse_constant=lambda value: (_ for _ in ()).throw(ValueError("JOURNAL_CONSTANT_INVALID")),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise ValueError("JOURNAL_JSON_INVALID") from error
+        records.append(_validate_recovery_journal_record(record))
+    return records
+
+
 def read_journal_records(path: Path) -> list[dict[str, Any]]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    """Compatibility name; all journal reads use the authoritative reader."""
+    return read_authoritative_recovery_journal(path)
 
 
 def record_synthetic_wire_adapter_result(
@@ -1312,10 +1421,19 @@ async def future_real_deny_only_approval_probe(run_parent: Path | None = None) -
             journal.result("RUNTIME_ACQUIRE", result_name)
             if acquire_observation.error_category is not None:
                 journal._append({"event": "RUNTIME_ACQUIRE_ERROR_CATEGORY", "result": acquire_observation.error_category})
-            await acquire_observer.contain(manager, profile.profile_id, acquire_owner, acquire_observation, journal)
+            acquire_observation = await acquire_observer.contain(
+                manager, profile.profile_id, acquire_owner, acquire_observation, journal,
+            )
+            journal.result("RUNTIME_ACQUIRE_FINAL", {
+                RuntimeAcquireClass.TIMEOUT: "TIMEOUT",
+                RuntimeAcquireClass.SAFE_EXCEPTION: "SAFE_EXCEPTION",
+                RuntimeAcquireClass.UNEXPECTED_EXCEPTION: "UNEXPECTED_EXCEPTION",
+                RuntimeAcquireClass.CANCELLATION_NONCONVERGENT: "CANCELLATION_NONCONVERGENT",
+            }[acquire_observation.result])
             raise RuntimeError("RUNTIME_ACQUIRE_FAILED")
         runtime = await acquire_owner
         journal.result("RUNTIME_ACQUIRE", "CONFIRMED")
+        journal.result("RUNTIME_ACQUIRE_FINAL", "CONFIRMED")
         original_request = runtime.client.request
         original_response = runtime.client.respond_server_request
 
@@ -1844,9 +1962,11 @@ def make_parent_execution_outcome(
     global_latch_present: bool,
     normal_final_result_present: bool,
     child_result_discovery_class: str,
-    runtime_acquire_result: str = "RUNTIME_ACQUIRE_CONFIRMED",
+    runtime_acquire_initial_result: str | None = None,
+    runtime_acquire_result: str = "RUNTIME_ACQUIRE_NOT_ESTABLISHED",
     runtime_acquire_error_category: str | None = None,
     runtime_acquire_cleanup_result: str | None = None,
+    runtime_acquire_cleanup_error_category: str | None = None,
 ) -> dict[str, Any]:
     """Build the distinct, sanitized parent execution-outcome authority."""
     value = {
@@ -1871,9 +1991,11 @@ def make_parent_execution_outcome(
         "global_latch_present": global_latch_present,
         "normal_final_result_present": normal_final_result_present,
         "child_result_discovery_class": child_result_discovery_class,
+        "runtime_acquire_initial_result": runtime_acquire_initial_result,
         "runtime_acquire_result": runtime_acquire_result,
         "runtime_acquire_error_category": runtime_acquire_error_category,
         "runtime_acquire_cleanup_result": runtime_acquire_cleanup_result,
+        "runtime_acquire_cleanup_error_category": runtime_acquire_cleanup_error_category,
     }
     validate_parent_execution_outcome(value)
     return value
@@ -1904,18 +2026,41 @@ def validate_parent_execution_outcome(value: Mapping[str, Any]) -> None:
         raise AssertionError("PARENT_OUTCOME_DRIFT_INVALID")
     if value["child_result_discovery_class"] not in CHILD_RESULT_DISCOVERY_CLASSES:
         raise AssertionError("PARENT_OUTCOME_DISCOVERY_INVALID")
-    if value["runtime_acquire_result"] not in {
+    if value["runtime_acquire_initial_result"] is not None and value["runtime_acquire_initial_result"] not in {
         RuntimeAcquireClass.CONFIRMED, RuntimeAcquireClass.TIMEOUT, RuntimeAcquireClass.SAFE_EXCEPTION,
         RuntimeAcquireClass.UNEXPECTED_EXCEPTION, RuntimeAcquireClass.CANCELLATION_NONCONVERGENT,
     }:
+        raise AssertionError("PARENT_OUTCOME_INITIAL_ACQUIRE_INVALID")
+    if value["runtime_acquire_result"] not in {
+        RuntimeAcquireClass.CONFIRMED, RuntimeAcquireClass.TIMEOUT, RuntimeAcquireClass.SAFE_EXCEPTION,
+        RuntimeAcquireClass.UNEXPECTED_EXCEPTION, RuntimeAcquireClass.CANCELLATION_NONCONVERGENT,
+        "RUNTIME_ACQUIRE_NOT_ESTABLISHED",
+    }:
         raise AssertionError("PARENT_OUTCOME_ACQUIRE_INVALID")
     category = value["runtime_acquire_error_category"]
-    if category is not None and (category not in SAFE_RUNTIME_CATEGORIES or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", category) is None):
+    if category is not None and category != SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED and (
+        category not in SAFE_RUNTIME_CATEGORIES or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", category) is None
+    ):
         raise AssertionError("PARENT_OUTCOME_ACQUIRE_CATEGORY_INVALID")
     if value["runtime_acquire_result"] != RuntimeAcquireClass.SAFE_EXCEPTION and category is not None:
         raise AssertionError("PARENT_OUTCOME_ACQUIRE_CATEGORY_UNEXPECTED")
     if value["runtime_acquire_cleanup_result"] not in {None, "CONFIRMED", "SAFE_EXCEPTION", "TIMEOUT", "NONCONVERGENT"}:
         raise AssertionError("PARENT_OUTCOME_CLEANUP_INVALID")
+    cleanup_category = value["runtime_acquire_cleanup_error_category"]
+    if cleanup_category is not None and cleanup_category != SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED and (
+        cleanup_category not in SAFE_RUNTIME_CATEGORIES
+        or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", cleanup_category) is None
+    ):
+        raise AssertionError("PARENT_OUTCOME_CLEANUP_CATEGORY_INVALID")
+    if value["runtime_acquire_cleanup_result"] != "SAFE_EXCEPTION" and cleanup_category is not None:
+        raise AssertionError("PARENT_OUTCOME_CLEANUP_CATEGORY_UNEXPECTED")
+    if value["runtime_acquire_result"] == "RUNTIME_ACQUIRE_NOT_ESTABLISHED" and (
+        value["runtime_acquire_initial_result"] is not None
+        or category is not None
+        or value["runtime_acquire_cleanup_result"] is not None
+        or cleanup_category is not None
+    ):
+        raise AssertionError("PARENT_OUTCOME_NOT_ESTABLISHED_FACTS_INVALID")
     if value["child_result_valid"] and value["child_result_discovery_class"] != "CHILD_RESULT_DISCOVERY_CONFIRMED":
         raise AssertionError("PARENT_OUTCOME_DISCOVERY_FACTS_INVALID")
     if value["child_result_present"] and not value["child_result_valid"]:
@@ -1952,8 +2097,11 @@ def validate_parent_execution_outcome(value: Mapping[str, Any]) -> None:
             value["parent_boundary_class"] == "BOUNDARY_ONLY_EXPECTED_MUTATION",
             value["boundary_drift_class"] == BOUNDARY_DRIFT_NONE,
             value["child_result_discovery_class"] == "CHILD_RESULT_DISCOVERY_CONFIRMED",
+            value["runtime_acquire_initial_result"] == RuntimeAcquireClass.CONFIRMED,
             value["runtime_acquire_result"] == RuntimeAcquireClass.CONFIRMED,
             value["runtime_acquire_error_category"] is None,
+            value["runtime_acquire_cleanup_result"] is None,
+            value["runtime_acquire_cleanup_error_category"] is None,
         )
         if not all(required):
             raise AssertionError("PARENT_OUTCOME_SUCCESS_FACTS_INVALID")
@@ -2281,28 +2429,12 @@ def run_future_real_probe_parent() -> dict[str, Any]:
         tuple(watchdog["final_active_members"]), tuple(watchdog["final_zombie_members"]), watchdog["final_scan_errors"],
     )
     discovery = discover_child_result(child_parent)
-
-    def acquisition_authority() -> tuple[str, str | None, str | None]:
-        """Read only sanitized acquisition facts from the child journal."""
-        if discovery.run is None:
-            return RuntimeAcquireClass.CONFIRMED, None, None
-        try:
-            records = read_journal_records(discovery.run.probe_recovery)
-        except (OSError, ValueError, json.JSONDecodeError):
-            return RuntimeAcquireClass.CANCELLATION_NONCONVERGENT, None, "NONCONVERGENT"
-        result_map = {
-            "CONFIRMED": RuntimeAcquireClass.CONFIRMED,
-            "TIMEOUT": RuntimeAcquireClass.TIMEOUT,
-            "SAFE_EXCEPTION": RuntimeAcquireClass.SAFE_EXCEPTION,
-            "UNEXPECTED_EXCEPTION": RuntimeAcquireClass.UNEXPECTED_EXCEPTION,
-            "CANCELLATION_NONCONVERGENT": RuntimeAcquireClass.CANCELLATION_NONCONVERGENT,
-        }
-        result = next((result_map[record["result"]] for record in reversed(records) if record.get("event") == "RUNTIME_ACQUIRE_RESULT" and record.get("result") in result_map), RuntimeAcquireClass.CONFIRMED)
-        category = next((record.get("result") for record in records if record.get("event") == "RUNTIME_ACQUIRE_ERROR_CATEGORY" and record.get("result") in SAFE_RUNTIME_CATEGORIES), None)
-        cleanup = next((record.get("result") for record in reversed(records) if record.get("event") == "RUNTIME_ACQUIRE_CLEANUP_RESULT" and record.get("result") in {"CONFIRMED", "SAFE_EXCEPTION", "TIMEOUT", "NONCONVERGENT"}), None)
-        return result, category, cleanup
-
-    runtime_acquire_result, runtime_acquire_error_category, runtime_acquire_cleanup_result = acquisition_authority()
+    acquisition = recover_parent_acquisition_authority(discovery)
+    runtime_acquire_initial_result = acquisition.initial_result
+    runtime_acquire_result = acquisition.final_result
+    runtime_acquire_error_category = acquisition.error_category
+    runtime_acquire_cleanup_result = acquisition.cleanup_result
+    runtime_acquire_cleanup_error_category = acquisition.cleanup_error_category
 
     def persist_failure(execution_class: str, *, child_result_present: bool = discovery.present,
                         child_result_valid: bool = discovery.valid,
@@ -2326,9 +2458,11 @@ def run_future_real_probe_parent() -> dict[str, Any]:
             global_latch_present=latch_present,
             normal_final_result_present=normal_result_present,
             child_result_discovery_class=child_result_discovery_class,
+            runtime_acquire_initial_result=runtime_acquire_initial_result,
             runtime_acquire_result=runtime_acquire_result,
             runtime_acquire_error_category=runtime_acquire_error_category,
             runtime_acquire_cleanup_result=runtime_acquire_cleanup_result,
+            runtime_acquire_cleanup_error_category=runtime_acquire_cleanup_error_category,
         )
         # Exactly one exclusive persistence attempt.  A persistence failure
         # is returned as a finite failure without retrying the probe.
@@ -2364,6 +2498,12 @@ def run_future_real_probe_parent() -> dict[str, Any]:
             child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
         )
     if parent_boundary["classification"] != "BOUNDARY_ONLY_EXPECTED_MUTATION":
+        return persist_failure(
+            "PARENT_BOUNDARY_INVALID_OR_DRIFTED", child_result_present=True, child_result_valid=True,
+            parent_boundary_class=parent_boundary["classification"],
+            child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
+        )
+    if runtime_acquire_result != RuntimeAcquireClass.CONFIRMED:
         return persist_failure(
             "PARENT_BOUNDARY_INVALID_OR_DRIFTED", child_result_present=True, child_result_valid=True,
             parent_boundary_class=parent_boundary["classification"],
@@ -2407,6 +2547,11 @@ def run_future_real_probe_parent() -> dict[str, Any]:
             global_latch_present=global_latch_present,
             normal_final_result_present=normal_final_result_present,
             child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
+            runtime_acquire_initial_result=runtime_acquire_initial_result,
+            runtime_acquire_result=runtime_acquire_result,
+            runtime_acquire_error_category=runtime_acquire_error_category,
+            runtime_acquire_cleanup_result=runtime_acquire_cleanup_result,
+            runtime_acquire_cleanup_error_category=runtime_acquire_cleanup_error_category,
         )
         write_parent_execution_outcome(REAL_PROBE_OUTCOME, confirmed)
     except Exception as error:
@@ -2439,12 +2584,23 @@ class AcquireObservation:
     raw_error_persisted: bool = False
 
 
+def _safe_runtime_category(category: Any) -> str:
+    if isinstance(category, str) and category in SAFE_RUNTIME_CATEGORIES and SAFE_CATEGORY_RE.fullmatch(category):
+        return category
+    return SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED
+
+
 class RuntimeAcquireObserver:
     """Dedicated observer; it never uses the legacy generic await helper."""
 
-    def __init__(self, *, timeout: float = P7C8_RUNTIME_ACQUIRE_TIMEOUT_SECONDS, cleanup_timeout: float = P7C8_RUNTIME_ACQUIRE_CLEANUP_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self, *, timeout: float = P7C8_RUNTIME_ACQUIRE_TIMEOUT_SECONDS,
+        cleanup_timeout: float = P7C8_RUNTIME_ACQUIRE_CLEANUP_TIMEOUT_SECONDS,
+        cleanup_cancel_join: float = P7C8_RUNTIME_ACQUIRE_CLEANUP_CANCEL_JOIN_SECONDS,
+    ) -> None:
         self.timeout = timeout
         self.cleanup_timeout = cleanup_timeout
+        self.cleanup_cancel_join = cleanup_cancel_join
 
     async def observe(self, manager: Any, profile_id: str) -> tuple[AcquireObservation, asyncio.Task[Any]]:
         owner = asyncio.create_task(manager.acquire(profile_id))
@@ -2454,7 +2610,7 @@ class RuntimeAcquireObserver:
         except asyncio.TimeoutError:
             return AcquireObservation(RuntimeAcquireClass.TIMEOUT, acquire_owner_terminalized=owner.done()), owner
         except RuntimeErrorSafe as error:
-            return AcquireObservation(RuntimeAcquireClass.SAFE_EXCEPTION, error_category=error.category), owner
+            return AcquireObservation(RuntimeAcquireClass.SAFE_EXCEPTION, error_category=_safe_runtime_category(error.category)), owner
         except asyncio.CancelledError:
             return AcquireObservation(RuntimeAcquireClass.CANCELLATION_NONCONVERGENT, acquire_owner_terminalized=owner.done()), owner
         except Exception:
@@ -2468,22 +2624,30 @@ class RuntimeAcquireObserver:
             journal.assert_continuity()
         cleanup_result = CleanupClass.CONFIRMED
         cleanup_category: str | None = None
+        cleanup_task: asyncio.Task[Any] | None = None
         try:
             cleanup_task = asyncio.create_task(manager.shutdown_profile(profile_id))
             cleanup = await asyncio.wait_for(asyncio.shield(cleanup_task), self.cleanup_timeout)
             if isinstance(cleanup, RuntimeErrorSafe):
-                cleanup_result, cleanup_category = CleanupClass.SAFE_EXCEPTION, cleanup.category
+                cleanup_result, cleanup_category = CleanupClass.SAFE_EXCEPTION, _safe_runtime_category(cleanup.category)
         except RuntimeErrorSafe as error:
-            cleanup_result, cleanup_category = CleanupClass.SAFE_EXCEPTION, error.category
+            cleanup_result, cleanup_category = CleanupClass.SAFE_EXCEPTION, _safe_runtime_category(error.category)
         except asyncio.TimeoutError:
-            cleanup_result = CleanupClass.NONCONVERGENT if getattr(manager, "cleanup_nonconvergent", False) else CleanupClass.TIMEOUT
-            cleanup_task.cancel()
-            await asyncio.gather(cleanup_task, return_exceptions=True)
+            cleanup_result = CleanupClass.TIMEOUT
+            if cleanup_task is None:
+                cleanup_result = CleanupClass.NONCONVERGENT
+            else:
+                # This is the sole cancellation of the sole cleanup task.
+                cleanup_task.cancel()
+                if not await _bounded_task_join(cleanup_task, self.cleanup_cancel_join, cancel=False):
+                    cleanup_result = CleanupClass.NONCONVERGENT
         except Exception:
             cleanup_result = CleanupClass.NONCONVERGENT
         if journal is not None:
-            journal.result("RUNTIME_ACQUIRE_CLEANUP", cleanup_result, **({"category": cleanup_category} if cleanup_category else {}))
-        joined = await _join_task(owner, min(self.cleanup_timeout, 0.25))
+            journal.result("RUNTIME_ACQUIRE_CLEANUP", cleanup_result)
+            if cleanup_category is not None:
+                journal._append({"event": "RUNTIME_ACQUIRE_CLEANUP_ERROR_CATEGORY", "result": cleanup_category})
+        joined = await _join_task(owner, self.cleanup_cancel_join)
         result = observation.result
         if not joined:
             result = RuntimeAcquireClass.CANCELLATION_NONCONVERGENT
@@ -2493,7 +2657,11 @@ class RuntimeAcquireObserver:
 
 
 async def _join_task(task: asyncio.Task[Any], timeout: float) -> bool:
-    if not task.done():
+    return await _bounded_task_join(task, timeout, cancel=True)
+
+
+async def _bounded_task_join(task: asyncio.Task[Any], timeout: float, *, cancel: bool) -> bool:
+    if cancel and not task.done():
         task.cancel()
     try:
         await asyncio.wait_for(asyncio.shield(task), timeout)
@@ -2502,6 +2670,106 @@ async def _join_task(task: asyncio.Task[Any], timeout: float) -> bool:
     except BaseException:
         return True
     return True
+
+
+@dataclass(frozen=True)
+class ParentAcquisitionAuthority:
+    initial_result: str | None
+    final_result: str
+    error_category: str | None = None
+    cleanup_result: str | None = None
+    cleanup_error_category: str | None = None
+
+
+def _not_established_acquisition() -> ParentAcquisitionAuthority:
+    return ParentAcquisitionAuthority(None, "RUNTIME_ACQUIRE_NOT_ESTABLISHED")
+
+
+def recover_parent_acquisition_authority(discovery: ChildResultDiscovery) -> ParentAcquisitionAuthority:
+    """Reconstruct acquisition facts fail-closed from one validated journal."""
+    if discovery.run is None:
+        return _not_established_acquisition()
+    try:
+        records = read_authoritative_recovery_journal(discovery.run.probe_recovery)
+    except (OSError, ValueError):
+        return _not_established_acquisition()
+
+    def event_records(name: str) -> list[dict[str, Any]]:
+        return [record for record in records if record.get("event") == name]
+
+    source = event_records("SOURCE_GATE")
+    latch = event_records("GLOBAL_LATCH_RESERVED")
+    intent = event_records("RUNTIME_ACQUIRE_INTENT")
+    initial = event_records("RUNTIME_ACQUIRE_RESULT")
+    final = event_records("RUNTIME_ACQUIRE_FINAL_RESULT")
+    if not (len(source) == len(latch) == len(intent) == len(initial) == len(final) == 1):
+        return _not_established_acquisition()
+    initial_values = {
+        "CONFIRMED": RuntimeAcquireClass.CONFIRMED,
+        "TIMEOUT": RuntimeAcquireClass.TIMEOUT,
+        "SAFE_EXCEPTION": RuntimeAcquireClass.SAFE_EXCEPTION,
+        "UNEXPECTED_EXCEPTION": RuntimeAcquireClass.UNEXPECTED_EXCEPTION,
+        "CANCELLATION_NONCONVERGENT": RuntimeAcquireClass.CANCELLATION_NONCONVERGENT,
+    }
+    final_values = dict(initial_values)
+    if initial[0].get("result") not in initial_values or final[0].get("result") not in final_values:
+        return _not_established_acquisition()
+    initial_result = initial_values[initial[0]["result"]]
+    final_result = final_values[final[0]["result"]]
+    positions = {id(record): index for index, record in enumerate(records)}
+    if not (
+        positions[id(source[0])] < positions[id(latch[0])] < positions[id(intent[0])] < positions[id(initial[0])] < positions[id(final[0])]
+    ):
+        return _not_established_acquisition()
+    if source[0].get("result") != "PASS" or latch[0].get("result") != "YES" or intent[0].get("status") != "PENDING":
+        return _not_established_acquisition()
+
+    acquire_categories = event_records("RUNTIME_ACQUIRE_ERROR_CATEGORY")
+    cleanup_intents = event_records("RUNTIME_ACQUIRE_CLEANUP_INTENT")
+    cleanup_results = event_records("RUNTIME_ACQUIRE_CLEANUP_RESULT")
+    cleanup_categories = event_records("RUNTIME_ACQUIRE_CLEANUP_ERROR_CATEGORY")
+    if len(acquire_categories) > 1 or len(cleanup_intents) > 1 or len(cleanup_results) > 1 or len(cleanup_categories) > 1:
+        return _not_established_acquisition()
+    error_category = acquire_categories[0].get("result") if acquire_categories else None
+    if error_category is not None and (
+        initial_result != RuntimeAcquireClass.SAFE_EXCEPTION
+        or (error_category != SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED and error_category not in SAFE_RUNTIME_CATEGORIES)
+        or (error_category != SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED and SAFE_CATEGORY_RE.fullmatch(error_category) is None)
+    ):
+        return _not_established_acquisition()
+    if acquire_categories and not positions[id(acquire_categories[0])] > positions[id(initial[0])]:
+        return _not_established_acquisition()
+
+    if initial_result == RuntimeAcquireClass.CONFIRMED:
+        if final_result != RuntimeAcquireClass.CONFIRMED or cleanup_intents or cleanup_results or cleanup_categories or acquire_categories:
+            return _not_established_acquisition()
+        return ParentAcquisitionAuthority(initial_result, final_result)
+
+    if len(cleanup_intents) != 1 or len(cleanup_results) != 1:
+        return _not_established_acquisition()
+    cleanup_values = {"CONFIRMED", "SAFE_EXCEPTION", "TIMEOUT", "NONCONVERGENT"}
+    cleanup_value = cleanup_results[0].get("result")
+    if cleanup_value not in cleanup_values:
+        return _not_established_acquisition()
+    if not (
+        positions[id(initial[0])] < positions[id(cleanup_intents[0])] < positions[id(cleanup_results[0])] < positions[id(final[0])]
+    ):
+        return _not_established_acquisition()
+    cleanup_category = cleanup_categories[0].get("result") if cleanup_categories else None
+    if cleanup_category is not None and (
+        cleanup_value != "SAFE_EXCEPTION"
+        or (cleanup_category != SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED and cleanup_category not in SAFE_RUNTIME_CATEGORIES)
+        or (cleanup_category != SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED and SAFE_CATEGORY_RE.fullmatch(cleanup_category) is None)
+        or not positions[id(cleanup_categories[0])] > positions[id(cleanup_results[0])]
+    ):
+        return _not_established_acquisition()
+    if final_result == RuntimeAcquireClass.CONFIRMED:
+        return _not_established_acquisition()
+    if final_result not in {initial_result, RuntimeAcquireClass.CANCELLATION_NONCONVERGENT}:
+        return _not_established_acquisition()
+    if cleanup_value == CleanupClass.NONCONVERGENT and final_result != RuntimeAcquireClass.CANCELLATION_NONCONVERGENT:
+        return _not_established_acquisition()
+    return ParentAcquisitionAuthority(initial_result, final_result, error_category, cleanup_value, cleanup_category)
 
 
 class SyntheticAcquireManager:
@@ -2513,6 +2781,7 @@ class SyntheticAcquireManager:
         self.shutdown_calls = 0
         self.cleanup_fixture: str | None = None
         self.cleanup_nonconvergent = False
+        self.cleanup_task: asyncio.Task[Any] | None = None
         self.downstream = {name: 0 for name in ("model/list", "thread/start", "turn/start", "approval")}
         self.release = asyncio.Event()
 
@@ -2541,6 +2810,7 @@ class SyntheticAcquireManager:
 
     async def shutdown_profile(self, profile_id: str) -> Any:
         self.shutdown_calls += 1
+        self.cleanup_task = asyncio.current_task()
         fixture = self.cleanup_fixture or self.fixture
         if fixture == "cleanup_safe":
             raise RuntimeErrorSafe("storage_boundary_invalid", profile_id)
@@ -2548,7 +2818,13 @@ class SyntheticAcquireManager:
             await asyncio.sleep(10)
         if fixture == "cleanup_nonconvergent":
             self.cleanup_nonconvergent = True
-            await self.release.wait()
+            while not self.release.is_set():
+                try:
+                    await self.release.wait()
+                except asyncio.CancelledError:
+                    # Test-only cancellation-resistant cleanup fixture.  The
+                    # external release event is the only way it terminalizes.
+                    continue
         if self.startup_task is not None and not self.startup_task.done():
             self.startup_task.cancel()
             await asyncio.gather(self.startup_task, return_exceptions=True)
@@ -2556,13 +2832,17 @@ class SyntheticAcquireManager:
 
 
 def safe_runtime_parent_outcome(observation: AcquireObservation, *, normal_final_result_present: bool = False) -> dict[str, Any]:
-    category = observation.error_category if observation.error_category in SAFE_RUNTIME_CATEGORIES else None
-    if category is not None and not SAFE_CATEGORY_RE.fullmatch(category):
-        category = None
+    category = observation.error_category
+    if category is not None and category != SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED and (
+        category not in SAFE_RUNTIME_CATEGORIES or SAFE_CATEGORY_RE.fullmatch(category) is None
+    ):
+        category = SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED
     return {
+        "runtime_acquire_initial_result": observation.result,
         "runtime_acquire_result": observation.result,
         "runtime_acquire_error_category": category,
         "runtime_acquire_cleanup_result": observation.cleanup_result,
+        "runtime_acquire_cleanup_error_category": observation.cleanup_error_category,
         "normal_final_result_present": normal_final_result_present,
     }
 
@@ -2633,12 +2913,180 @@ class RuntimeAcquireOfflineTests(unittest.IsolatedAsyncioTestCase):
             manager.release.set()
             await asyncio.gather(owner, return_exceptions=True)
 
+    async def test_cancellation_resistant_cleanup_returns_before_external_release(self) -> None:
+        manager = SyntheticAcquireManager("timeout")
+        manager.cleanup_fixture = "cleanup_nonconvergent"
+        observer = RuntimeAcquireObserver(timeout=0.01, cleanup_timeout=0.01, cleanup_cancel_join=0.02)
+        observation, owner = await observer.observe(manager, PROFILE_ID)
+        started = time.monotonic()
+        observation = await observer.contain(manager, PROFILE_ID, owner, observation)
+        elapsed = time.monotonic() - started
+        self.assertEqual(observation.cleanup_result, CleanupClass.NONCONVERGENT)
+        self.assertEqual(observation.result, RuntimeAcquireClass.CANCELLATION_NONCONVERGENT)
+        self.assertLess(elapsed, 0.20)
+        self.assertFalse(manager.release.is_set())
+        self.assertIsNotNone(manager.cleanup_task)
+        manager.release.set()
+        await asyncio.gather(manager.cleanup_task, owner, return_exceptions=True)
+
+    async def test_cleanup_safe_category_uses_separate_event_without_typeerror(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c8-cleanup-category-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            journal = RecoveryJournal(run.probe_recovery, source_sha="a" * 40, source_tree="b" * 40)
+            manager = SyntheticAcquireManager("timeout")
+            manager.cleanup_fixture = "cleanup_safe"
+            observation, owner = await RuntimeAcquireObserver(
+                timeout=0.01, cleanup_timeout=0.03,
+            ).observe(manager, PROFILE_ID)
+            observation = await RuntimeAcquireObserver(
+                timeout=0.01, cleanup_timeout=0.03,
+            ).contain(manager, PROFILE_ID, owner, observation, journal)
+            self.assertEqual(observation.cleanup_result, CleanupClass.SAFE_EXCEPTION)
+            self.assertEqual(observation.cleanup_error_category, "storage_boundary_invalid")
+            records = read_authoritative_recovery_journal(run.probe_recovery)
+            self.assertEqual(
+                [record["result"] for record in records if record["event"] == "RUNTIME_ACQUIRE_CLEANUP_ERROR_CATEGORY"],
+                ["storage_boundary_invalid"],
+            )
+
+    async def test_unrecognized_safe_category_is_fixed_and_not_published_raw(self) -> None:
+        observation, _ = await self._observe("safe:syntactically_safe_but_unrecognized")
+        self.assertEqual(observation.result, RuntimeAcquireClass.SAFE_EXCEPTION)
+        self.assertEqual(observation.error_category, SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED)
+        self.assertNotIn("syntactically_safe_but_unrecognized", json.dumps(safe_runtime_parent_outcome(observation)))
+
     async def test_failed_acquire_has_zero_downstream_effects(self) -> None:
         for fixture in ("timeout", "unexpected", "safe:capability_mismatch", "owner_nonconvergent"):
             observation, manager = await self._observe(fixture)
             self.assertNotEqual(observation.result, RuntimeAcquireClass.CONFIRMED)
             self.assertEqual(manager.downstream, {"model/list": 0, "thread/start": 0, "turn/start": 0, "approval": 0})
 
+
+
+class Repair1AcquisitionAuthorityOfflineTests(unittest.TestCase):
+    @staticmethod
+    def _write_journal(
+        run: FreshProbeRun, *, initial: str = "CONFIRMED", final: str | None = "CONFIRMED",
+        acquire_category: str | None = None, cleanup: str | None = None,
+        cleanup_category: str | None = None, duplicate_final: bool = False,
+        conflicting_final: bool = False,
+    ) -> ChildResultDiscovery:
+        journal = RecoveryJournal(run.probe_recovery, source_sha="a" * 40, source_tree="b" * 40)
+        journal._append({"event": "GLOBAL_LATCH_RESERVED", "result": "YES"})
+        journal.intent("RUNTIME_ACQUIRE")
+        journal.result("RUNTIME_ACQUIRE", initial)
+        if acquire_category is not None:
+            journal._append({"event": "RUNTIME_ACQUIRE_ERROR_CATEGORY", "result": acquire_category})
+        if cleanup is not None:
+            journal.intent("RUNTIME_ACQUIRE_CLEANUP")
+            journal.result("RUNTIME_ACQUIRE_CLEANUP", cleanup)
+            if cleanup_category is not None:
+                journal._append({"event": "RUNTIME_ACQUIRE_CLEANUP_ERROR_CATEGORY", "result": cleanup_category})
+        if final is not None:
+            journal.result("RUNTIME_ACQUIRE_FINAL", final)
+            if duplicate_final or conflicting_final:
+                journal.result("RUNTIME_ACQUIRE_FINAL", "SAFE_EXCEPTION" if conflicting_final else final)
+        return ChildResultDiscovery(run, True, True, "CHILD_RESULT_DISCOVERY_CONFIRMED")
+
+    def test_complete_safe_runtime_category_set_matches_reviewed_production_paths(self) -> None:
+        self.assertEqual(SAFE_RUNTIME_CATEGORIES, frozenset({
+            "capability_mismatch", "manager_shutting_down", "unknown_profile", "profile_reserved",
+            "profile_stopping", "unresolved_process", "storage_boundary_invalid", "executable_invalid",
+            "process_streams_missing", "initialize_failed", "initialize_timeout", "startup_failed",
+            "kill_reap_timeout",
+        }))
+        self.assertTrue(all(SAFE_CATEGORY_RE.fullmatch(category) for category in SAFE_RUNTIME_CATEGORIES))
+
+    def test_success_and_failed_chronologies_are_final_result_authority(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c8-acquire-authority-") as directory:
+            root = Path(directory)
+            success_run = FreshProbeRun.materialize(root)
+            success = recover_parent_acquisition_authority(self._write_journal(success_run))
+            self.assertEqual(success, ParentAcquisitionAuthority(RuntimeAcquireClass.CONFIRMED, RuntimeAcquireClass.CONFIRMED))
+            failed_run = FreshProbeRun.materialize(root)
+            failed = recover_parent_acquisition_authority(self._write_journal(
+                failed_run, initial="TIMEOUT", final="TIMEOUT", cleanup="CONFIRMED",
+            ))
+            self.assertEqual(failed.initial_result, RuntimeAcquireClass.TIMEOUT)
+            self.assertEqual(failed.final_result, RuntimeAcquireClass.TIMEOUT)
+            self.assertEqual(failed.cleanup_result, CleanupClass.CONFIRMED)
+
+    def test_parent_negative_matrix_is_never_normal_success(self) -> None:
+        cases = (
+            "no_child_run", "ambiguous_child_root", "missing_journal", "unsafe_journal", "symlink_journal",
+            "hardlinked_journal", "wrong_mode", "oversize", "malformed_jsonl", "unknown_field",
+            "missing_final", "duplicate_final", "conflicting_final", "invalid_final", "confirmed_without_confirmed_initial",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="p7c8-acquire-negative-") as directory:
+                root = Path(directory)
+                if case in {"no_child_run", "ambiguous_child_root"}:
+                    authority = recover_parent_acquisition_authority(
+                        ChildResultDiscovery(None, False, False, "CHILD_RESULT_DISCOVERY_" + case.upper()),
+                    )
+                else:
+                    run = FreshProbeRun.materialize(root)
+                    discovery = self._write_journal(run)
+                    path = run.probe_recovery
+                    if case == "missing_journal":
+                        path.unlink()
+                    elif case == "unsafe_journal":
+                        path.chmod(0o640)
+                    elif case == "symlink_journal":
+                        target = root / "journal-target"
+                        os.replace(path, target)
+                        path.symlink_to(target)
+                    elif case == "hardlinked_journal":
+                        target = root / "journal-target"
+                        os.replace(path, target)
+                        os.link(target, path)
+                    elif case == "wrong_mode":
+                        path.chmod(0o640)
+                    elif case == "oversize":
+                        path.write_bytes(b"x" * (MAX_RECOVERY_JOURNAL_BYTES + 1))
+                        path.chmod(0o600)
+                    elif case == "malformed_jsonl":
+                        path.write_bytes(b"{\n")
+                        path.chmod(0o600)
+                    elif case == "unknown_field":
+                        path.write_bytes(b'{"event":"SOURCE_GATE","result":"PASS","UNKNOWN_FIELD":true}\n')
+                        path.chmod(0o600)
+                    elif case == "missing_final":
+                        path.unlink()
+                        discovery = self._write_journal(run, final=None)
+                    elif case == "duplicate_final":
+                        path.unlink()
+                        discovery = self._write_journal(run, duplicate_final=True)
+                    elif case == "conflicting_final":
+                        path.unlink()
+                        discovery = self._write_journal(run, initial="TIMEOUT", final="TIMEOUT", cleanup="CONFIRMED", conflicting_final=True)
+                    elif case == "invalid_final":
+                        path.unlink()
+                        discovery = self._write_journal(run, final="INVALID")
+                    elif case == "confirmed_without_confirmed_initial":
+                        path.unlink()
+                        discovery = self._write_journal(run, initial="TIMEOUT", final="CONFIRMED", cleanup="CONFIRMED")
+                    authority = recover_parent_acquisition_authority(discovery)
+                self.assertEqual(authority.final_result, "RUNTIME_ACQUIRE_NOT_ESTABLISHED")
+                self.assertNotEqual(authority.final_result, RuntimeAcquireClass.CONFIRMED)
+
+    def test_parent_final_outcome_rejects_not_established_and_nonconfirmed_final(self) -> None:
+        for result in (
+            "RUNTIME_ACQUIRE_NOT_ESTABLISHED", RuntimeAcquireClass.TIMEOUT,
+            RuntimeAcquireClass.SAFE_EXCEPTION, RuntimeAcquireClass.UNEXPECTED_EXCEPTION,
+            RuntimeAcquireClass.CANCELLATION_NONCONVERGENT,
+        ):
+            with self.subTest(result=result):
+                with self.assertRaises(AssertionError):
+                    make_parent_execution_outcome(
+                        execution_class="PARENT_FINAL_RESULT_CONFIRMED", watchdog_status="PROCESS_COMPLETED",
+                        child_returncode_class=CHILD_RETURN_COMPLETED, child_result_present=True,
+                        child_result_valid=True, parent_boundary_class="BOUNDARY_ONLY_EXPECTED_MUTATION",
+                        boundary_drift_class=BOUNDARY_DRIFT_NONE, global_latch_present=True,
+                        normal_final_result_present=True, child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
+                        runtime_acquire_initial_result=RuntimeAcquireClass.CONFIRMED,
+                        runtime_acquire_result=result,
+                    )
 
 
 class DenyOnlyApprovalOfflineTests(unittest.IsolatedAsyncioTestCase):
@@ -3402,6 +3850,13 @@ class Repair4AuthorityOfflineTests(unittest.TestCase):
             PROBE_WATCHDOG_HARD_DEADLINE,
             PROBE_INTERNAL_WORST_CASE_SECONDS + PROBE_WATCHDOG_MARGIN_SECONDS,
         )
+        self.assertEqual(NORMAL_PATH_INTERNAL_WORST_CASE_SECONDS, 186.0)
+        self.assertEqual(FAILED_ACQUIRE_INTERNAL_WORST_CASE_SECONDS, 64.0)
+        self.assertGreater(
+            PROBE_WATCHDOG_HARD_DEADLINE,
+            FAILED_ACQUIRE_INTERNAL_WORST_CASE_SECONDS + PROBE_WATCHDOG_MARGIN_SECONDS,
+        )
+        self.assertEqual(P7C8_RUNTIME_ACQUIRE_CLEANUP_CANCEL_JOIN_SECONDS, 1.0)
 
     def test_no_approval_terminal_branch_can_form_a_finite_child_result(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c8-r4-no-approval-") as directory:
@@ -3480,6 +3935,8 @@ class Repair4AuthorityOfflineTests(unittest.TestCase):
                 child_result_valid=True, parent_boundary_class="BOUNDARY_ONLY_EXPECTED_MUTATION",
                 boundary_drift_class=BOUNDARY_DRIFT_NONE, normal_final_result_present=True,
                 global_latch_present=True, child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
+                runtime_acquire_initial_result=RuntimeAcquireClass.CONFIRMED,
+                runtime_acquire_result=RuntimeAcquireClass.CONFIRMED,
             )
             outcome_path = run.root / "parent-execution-outcome.json"
             write_parent_execution_outcome(outcome_path, outcome)
@@ -3711,6 +4168,8 @@ class Repair5AuthorityOfflineTests(unittest.TestCase):
                 boundary_drift_class=BOUNDARY_DRIFT_NONE, global_latch_present=True,
                 normal_final_result_present=True,
                 child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
+                runtime_acquire_initial_result=RuntimeAcquireClass.CONFIRMED,
+                runtime_acquire_result=RuntimeAcquireClass.CONFIRMED,
             )
         elif execution_class == CHILD_RETURN_TIMEOUT:
             defaults.update(watchdog_status="PROCESS_WATCHDOG_TIMEOUT", child_returncode_class=CHILD_RETURN_TIMEOUT)
@@ -4250,6 +4709,18 @@ class P7C8StaticGateTests(unittest.TestCase):
         self.assertNotIn("process_group_final_active_count", inspect.getsource(make_sanitized_result))
         self.assertIn("PARENT_MEASURED_GROUP_AND_CHILD", inspect.getsource(make_parent_final_result))
 
+    def test_parent_acquisition_uses_bounded_no_follow_journal_reader(self) -> None:
+        self.assertNotIn("read_text", inspect.getsource(read_authoritative_recovery_journal))
+        self.assertIn("O_NOFOLLOW", inspect.getsource(read_authoritative_recovery_journal))
+        self.assertIn("O_CLOEXEC", inspect.getsource(read_authoritative_recovery_journal))
+        self.assertIn("read_authoritative_recovery_journal", inspect.getsource(recover_parent_acquisition_authority))
+
+    def test_failed_containment_has_one_task_and_no_unbounded_cancel_join(self) -> None:
+        source = inspect.getsource(RuntimeAcquireObserver.contain)
+        self.assertEqual(source.count("asyncio.create_task(manager.shutdown_profile(profile_id))"), 1)
+        self.assertNotIn("gather(cleanup_task", source)
+        self.assertIn("P7C8_RUNTIME_ACQUIRE_CLEANUP_CANCEL_JOIN_SECONDS", inspect.getsource(RuntimeAcquireObserver))
+
     def test_parent_outcome_is_distinct_and_preflighted_before_child(self) -> None:
         self.assertNotEqual(REAL_PROBE_OUTCOME, REAL_PROBE_LATCH)
         self.assertNotEqual(REAL_PROBE_OUTCOME, REAL_PROBE_RESULT)
@@ -4301,8 +4772,11 @@ class P7C8StaticGateTests(unittest.TestCase):
         self.assertEqual(PROBE_OBSERVATION_TIMEOUT, 100.0)
         self.assertEqual(PROBE_RUNTIME_ACQUIRE_TIMEOUT, 45.0)
         self.assertEqual(PROBE_INTERNAL_WORST_CASE_SECONDS, 186.0)
+        self.assertEqual(NORMAL_PATH_INTERNAL_WORST_CASE_SECONDS, 186.0)
+        self.assertEqual(FAILED_ACQUIRE_INTERNAL_WORST_CASE_SECONDS, 64.0)
         self.assertEqual(PROBE_WATCHDOG_MARGIN_SECONDS, 15.0)
         self.assertEqual(PROBE_WATCHDOG_HARD_DEADLINE, 205.0)
+        self.assertEqual(P7C8_RUNTIME_ACQUIRE_CLEANUP_CANCEL_JOIN_SECONDS, 1.0)
 
     def test_acquisition_horizon_and_parent_outcome_fields_are_frozen(self) -> None:
         self.assertGreater(
