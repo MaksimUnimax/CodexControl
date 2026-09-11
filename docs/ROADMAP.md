@@ -51,7 +51,7 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - `LAST_DURABLY_ESTABLISHED_STAGE=RUNTIME_ACQUIRE_INTENT`.
 - `FAILURE_CLASS=RUNTIME_ACQUIRE_FAILURE`.
 - Exact runtime-acquire root cause remains `NOT_ESTABLISHED` because the accepted P7.C7 wrapper collapsed timeout and exception into one `NONCONVERGED` result.
-- Architect source review establishes a harness defect: outer runtime-acquire timeout 5s did not dominate named production startup bounds (15s initialize plus version-probe bounds), and error category was discarded.
+- Architect source review establishes a harness defect: outer runtime-acquire timeout 5s did not dominate named production startup bounds, and error category was discarded.
 - `P7C7_PRODUCTION_DEFECT_ESTABLISHED=NO`.
 - [CLOSED] P7.C7 remains permanently consumed.
 
@@ -69,17 +69,30 @@ Architect forensic review:
 
 ### P7.C8 fresh DENY-only successor
 
-Binding prep contract:
+Initial prep candidate:
 
-`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-11.md`
+- [REWORK_REQUIRED / ZERO EFFECT] `9297395efb678356255d91aa8d90001a5fc768e0`, tree `291fddbbef8a67dc918a730d363c086cbb910db3`.
+- Candidate correctly introduces a new P7.C8 namespace, dedicated runtime-acquire observer, 45-second acquire horizon, 12-second failed-acquire cleanup horizon, 100-second observation horizon and 205-second process watchdog.
 
-- [NEXT / ZERO REAL EFFECT] Build a new P7.C8 test-only probe harness with an entirely new one-shot namespace.
-- [BOUND] Preserve DENY-only, max-three DENY, ALLOW=0, one child/no retry, exact process-group ownership, immutable recovery journal, measured parent outcomes, post-quiescence boundary, exact normal `1/1/1` lifecycle ledger and zero resume/interrupt/delete/read/list.
-- [FIX] Replace P7.C7 runtime-acquire ambiguity with a dedicated observer that distinguishes `CONFIRMED`, `TIMEOUT`, safe categorized `RuntimeErrorSafe`, unexpected exception and cancellation nonconvergence.
-- [FIX] Runtime acquire target horizon 45s; failed-acquire cleanup authority 12s.
-- [FIX] Preserve safe `RuntimeErrorSafe.category` instead of collapsing it into `NONCONVERGED`.
-- [BUDGET] Candidate sleep 30s; observation 100s; normal internal budget 186s; watchdog hard deadline 205s with 15s margin.
-- [BLOCKED] Any P7.C8 real probe until preparation is independently architect accepted and exact executable SHA/tree are frozen.
+Architect review:
+
+`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_REVIEW_2026-09-11.md`
+
+Blocking Repair-1 defects:
+
+- [FIX] remove unbounded `asyncio.gather()` after cleanup timeout; cancellation/join must have its own finite bound;
+- [FIX] retain and durably publish the post-containment acquisition classification instead of discarding the returned `AcquireObservation`;
+- [FIX] parent acquisition authority must never default missing/unreadable evidence to `CONFIRMED`; introduce explicit fail-closed `NOT_ESTABLISHED`;
+- [FIX] cleanup safe-category persistence must not call an unsupported `RecoveryJournal.result(..., category=...)` signature;
+- [FIX] freeze the complete finite production `RuntimeErrorSafe.category` set reachable from acquire/start/cleanup and never silently drop a safe categorized failure;
+- [FIX] parent acquisition journal recovery must use bounded no-follow stable-identity JSONL reading instead of ordinary `Path.read_text()`.
+
+Binding Repair-1 contract:
+
+`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_CONTRACT_2026-09-11.md`
+
+- [NEXT / ZERO REAL EFFECT] **P7.C8 prep Repair-1:** repair only runtime-acquire containment and durable acquisition authority while preserving every already-correct DENY/process/journal/result gate.
+- [BLOCKED] Any P7.C8 real probe until Repair-1 is independently architect accepted and an exact executable SHA/tree is frozen.
 - [BLOCKED] Matcher authority and full hard-delete acceptance until a separately authorized P7.C8 real probe succeeds and is architect reviewed.
 
 `P7C8_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
