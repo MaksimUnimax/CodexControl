@@ -10,40 +10,41 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P3 dialogue application orchestration.
 - [DONE] P4 Telegram private management.
 - [DONE] P5 Telegram group routing.
-- [DONE] P6 response delivery/full local orchestration. Accepted `0409ad4a0744159aad875a5ddea4deaf1181699e`.
+- [DONE] P6 response delivery/full local orchestration — `0409ad4a0744159aad875a5ddea4deaf1181699e`.
 
 ## P7 — real Codex acceptance / hard-delete correction
 
 - [REJECTED / HISTORICAL] Original P7: one official P1.9 `DELETE_UNKNOWN`; forensic `5aac49bd1b8a349343db52071520beed7f95592d`. Historical thread never reused.
 - [DONE] P7.C1 storage-isolation discovery — `a9900471d0599be21b1a1834301c4421d95acb29`.
-- [DONE] P7.C2 schema-v3 confirmed-delete storage barrier — `80673db644962b0cc5b1a388d64cb5902bd4f46c`.
-- [DONE] P7.C3 configured persistent profile + isolated state-root runtime authority — `f76a32b2d18600fcf7ace6b9aa24067238d6dec7`.
-- [DONE] P7.C4 confirmed cleanup + DELETE_UNKNOWN local containment — `df161566cab5f8fa7ccf70f94379c78a9fb02ffe`.
+- [DONE] P7.C2 confirmed-delete storage barrier — `80673db644962b0cc5b1a388d64cb5902bd4f46c`.
+- [DONE] P7.C3 persistent profile + isolated state-root runtime authority — `f76a32b2d18600fcf7ace6b9aa24067238d6dec7`.
+- [DONE] P7.C4 confirmed cleanup + DELETE_UNKNOWN containment — `df161566cab5f8fa7ccf70f94379c78a9fb02ffe`.
 - [DONE] P7.C5 corrected fake hard-delete acceptance — `946ddf7ac6f7c3539bc3f344c6edf21d6ffce528`.
-- [ACCEPTED CORRECTION] ADR-0045: persistent authenticated `CODEX_HOME` may be shared; isolated mutable state/controller remain CodexControl-owned.
+- [ACCEPTED CORRECTION] ADR-0045: authenticated persistent `CODEX_HOME` may be shared; isolated mutable state/controller remain CodexControl-owned.
 
-### P7.C6 history
+### P7.C6 retained-thread correction history
 
-- [RUN 1 REJECTED / HARNESS DEFECT] Evidence `785a82e2e9bc392173ea1e910b490f84cfa590b2`. One real thread, one resume, three turns. Turn 1/2 passed persistence. Turn 3 reached approval and stopped at `P7C6_APPROVAL_NOT_EXACTLY_ALLOWED`. No interrupt/delete/read/list. Old approval remains `RESPONSE_UNKNOWN` and non-retryable.
-- [DONE / ZERO EFFECT] Retained Turn-3 forensic `e6835e7eaff21ce6a452c24f3309269df67c82ba`: exact terminal `INTERRUPTED`, command `COMPLETED`, no pending persisted approval, no delayed process/sentinel.
-- [DONE / ZERO EFFECT] Existing Run-1 latch forensic `c308c765d9915844fce97d1d1f6c933e302a75aa`: existing latch accepted as safe replay barrier, SHA-256 `50616410354022747284c1ce61bd02b8ecd1eb2636657eac502092fde800d55e`.
+- [RUN 1 REJECTED / HARNESS DEFECT] Evidence `785a82e2e9bc392173ea1e910b490f84cfa590b2`. One thread, one resume, three turns. Turn 1/2 passed persistence. Turn 3 stopped at approval. No interrupt/delete/read/list. Old approval remains `RESPONSE_UNKNOWN` and non-retryable.
+- [DONE / ZERO EFFECT] Retained Turn-3 forensic `e6835e7eaff21ce6a452c24f3309269df67c82ba`: exact terminal `INTERRUPTED`, command completed, no pending persisted approval, no delayed process/sentinel.
+- [DONE / ZERO EFFECT] Existing Run-1 latch forensic `c308c765d9915844fce97d1d1f6c933e302a75aa`: existing latch accepted as replay barrier; SHA-256 `50616410354022747284c1ce61bd02b8ecd1eb2636657eac502092fde800d55e`.
 
 ### P7.C6 same-thread continuation preparation
 
-- [REWORK_REQUIRED / ZERO EFFECT] Prep-v2 candidate `1c9b03108bb2493fd6547a92c807397bb4c0868c` is preserved as inert reviewed harness/evidence. Useful offline preparation passed: Run-1 marker recovery, retained topology, structural matcher 13 ALLOW / 18 DENY, continuation latch helper tests, no intended new-thread path.
+- [REWORK_REQUIRED / ZERO EFFECT] Prep-v2 inert candidate `1c9b03108bb2493fd6547a92c807397bb4c0868c`.
+- [REWORK_REQUIRED / ZERO EFFECT] Prep-v2 Repair-1 candidate `821be881f1e6b04d3905080191cc0f1141799923`.
 
-Architect review:
+Repair-1 review:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_CONTINUATION_PREP_V2_ARCHITECT_REVIEW_2026-09-10.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR_ARCHITECT_REVIEW_2026-09-11.md`
 
-Binding repair:
+Binding Repair-2 contract:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_CONTINUATION_PREP_V2_REPAIR_CONTRACT_2026-09-10.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR2_CONTRACT_2026-09-11.md`
 
-The repair must close all reviewed acceptance gaps before any real continuation: exact accepted source/clean-tree gate, fresh mount/alias preflight, actual controller schema/live-state proof, unrelated baseline preservation, bounded descriptor-safe all-marker oracle, complete dynamic budget, no-reacquire interrupt proof, measured official P1.9 result, post-delete isolated envelope, success-only recovery sanitization, durable finite failure diagnostics, and finite waits/bridge arming.
+Repair-1 closed many earlier gaps, including source authority, structural matcher, continuation latch source binding, actual schema checks, official delete observation, success-only sanitization and explicit real-file tests. It is still not real-executable because review found remaining harness defects: legitimate retained topology is self-rejected by preflight, external-user scope is overbroad, local continuation paths are not all preflighted before first RPC, recovery journal is fail-open, timeout-sensitive tasks are not always owned through convergence, marker scanning lacks pathname revalidation, unrelated baseline is not aggregate-bounded and reconciliation ignores exact path, dynamic budget ignores unknown methods, and several critical behavioral tests are incomplete.
 
-- [NEXT / ZERO-REAL-EFFECT] **P7.C6 same-thread continuation prep-v2 repair.** No `src/**` changes and no real Codex effects. Publish repaired gated harness/evidence, then stop for architect review.
-- [BLOCKED] P7.C6 real same-thread continuation. No authorization until repaired prep is independently accepted.
+- [NEXT / ZERO-REAL-EFFECT] **P7.C6 prep-v2 Repair-2.** Harness/evidence only, no `src/**`, no real Codex effects. Publish the repaired candidate and stop for architect review.
+- [BLOCKED] P7.C6 real same-thread continuation. No authorization until Repair-2 is independently accepted.
 
 ## P8 — deployment packaging/rollback
 
@@ -55,7 +56,7 @@ The repair must close all reviewed acceptance gaps before any real continuation:
 
 ## P10 — server-78 discovery/deployment
 
-Repeat discovery/profile/storage/capability; dedicated deploy key/token/config; same source architecture, no fork.
+Repeat discovery/profile/storage/capability with same source architecture.
 
 ## P11 — multi-bot shared-group acceptance
 
