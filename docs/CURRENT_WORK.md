@@ -43,26 +43,9 @@ Repair-6 preparation was architect accepted:
 
 The one-shot P7.C7 real probe executed exactly once and is permanently consumed. Real evidence commit: `4629cff73d981ee9c2abafa24c97ba7ca340f87c`.
 
-Consumed-probe forensic evidence commit:
+Consumed-probe forensic evidence commit: `e589eec3c215d192df48a8e252e74dc13c768327`.
 
-`e589eec3c215d192df48a8e252e74dc13c768327`
-
-Forensic evidence establishes:
-
-- unique retained P7.C7 run root;
-- global latch present;
-- normal result absent;
-- parent outcome `CHILD_NONZERO` with clean process-group convergence;
-- recovery journal has five valid records;
-- `RUNTIME_ACQUIRE_RESULT=NONCONVERGED`;
-- no model/list stage recorded;
-- no fresh thread or Turn;
-- approval path not reached;
-- no wire authority;
-- workdir empty and sentinel absent;
-- production defect not established.
-
-Final factual classifications:
+Accepted factual classifications:
 
 `JOURNAL_LAST_DURABLE_MILESTONE=RUNTIME_ACQUIRE_RESULT`
 
@@ -78,17 +61,11 @@ Final factual classifications:
 
 `P7C7_RUNTIME_ACQUIRE_ROOT_CAUSE=NOT_ESTABLISHED`
 
-`PRODUCTION_DEFECT_ESTABLISHED=NO`
-
-Architect forensic review:
-
-`docs/evidence/p7c7/P7C7_CONSUMED_REAL_DENY_ONLY_APPROVAL_PROBE_FORENSIC_ARCHITECT_REVIEW_2026-09-11.md`
-
-The architect review also establishes a P7.C7 harness defect: the probe used a 5-second outer timeout around the complete runtime acquire path even though production has a 15-second initialize bound and version probing contains separate 3-second spawn/output/wait bounds. The generic helper also collapsed timeout and arbitrary exception into one `NONCONVERGED` durable result, preventing exact root-cause reconstruction.
-
 `P7C7_HARNESS_OBSERVABILITY_DEFECT_ESTABLISHED=YES`
 
-The executor forensic evidence incorrectly stated that the architect review and forensic contract files were absent from base `4b650ed5b43be62acf8aad86d790a817cf72854c`; independent GitHub readback proves both files were present. This is an executor governance/readback defect and does not alter the accepted runtime findings.
+`PRODUCTION_DEFECT_ESTABLISHED=NO`
+
+P7.C7 used a 5-second outer acquire timeout around a production startup path containing a 15-second initialize bound plus separate version-probe bounds, and its generic helper collapsed timeout and exceptions into one `NONCONVERGED` result. P7.C7 is never rerun.
 
 `P7C7_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
@@ -96,28 +73,47 @@ The executor forensic evidence incorrectly stated that the architect review and 
 
 `P7C7_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
+## P7.C8 successor
+
+P7.C8 is a new successor namespace, not a retry of P7.C7.
+
+Initial P7.C8 zero-effect prep candidate:
+
+- commit `9297395efb678356255d91aa8d90001a5fc768e0`;
+- tree `291fddbbef8a67dc918a730d363c086cbb910db3`;
+- scope limited to the new P7.C8 harness plus prep evidence;
+- reported real effects `0`.
+
+Architect review:
+
+`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_REVIEW_2026-09-11.md`
+
+The candidate correctly introduces a dedicated acquisition observer and the new P7.C8 namespace, but remains **REWORK_REQUIRED** before any real execution.
+
+Blocking harness/evidence defects:
+
+- failed-acquire cleanup cancels its cleanup task and then waits through an unbounded `asyncio.gather`, violating the 12-second containment authority for cancellation-resistant cleanup;
+- the real child discards the `AcquireObservation` returned by containment, so a post-cleanup escalation to `RUNTIME_ACQUIRE_CANCELLATION_NONCONVERGENT` is not durably finalized;
+- parent acquisition recovery defaults absent/missing acquisition evidence to `RUNTIME_ACQUIRE_CONFIRMED`, which is not fail-closed;
+- cleanup safe-category persistence calls `RecoveryJournal.result(..., category=...)` even though that method does not accept `category`, so the categorized cleanup path raises `TypeError`;
+- the frozen safe runtime-category set is incomplete relative to production `RuntimeErrorSafe.category` values reachable from acquire/start/cleanup;
+- parent acquisition recovery uses ordinary `Path.read_text()` rather than bounded no-follow stable-identity journal reading.
+
+No production `src/**` defect is established.
+
+Binding Repair-1 contract:
+
+`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_CONTRACT_2026-09-11.md`
+
 ## Current executable slice
 
-**P7.C8 DENY-only approval-probe preparation — NEXT / ZERO REAL EFFECT.**
+**P7.C8 DENY-only approval-probe prep Repair-1 — NEXT / ZERO REAL EFFECT.**
 
-P7.C8 is a new successor, not a retry of P7.C7. It must use a new auth token, fresh profile/run namespace and new global latch/result/outcome paths. The preparation must preserve all accepted P7.C7 DENY-only/process/journal/outcome safety while fixing runtime-acquire observability and timeout authority.
+Repair-1 is limited to bounded failed-acquire containment and truthful durable acquisition authority. It must preserve every already-correct P7.C8 DENY/process/journal/result gate and must perform zero real Codex effects.
 
-Binding contract:
+`P7C8_DENY_ONLY_APPROVAL_PROBE_PREP=REWORK_REQUIRED`
 
-`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-11.md`
-
-Preparation target runtime authority:
-
-- acquire timeout 45s;
-- failed-acquire cleanup timeout 12s;
-- candidate sleep 30s;
-- observation timeout 100s;
-- normal internal budget 186s;
-- watchdog margin 15s;
-- hard watchdog 205s;
-- timeout and safe runtime exception must remain distinct durable outcomes;
-- `RuntimeErrorSafe.category` may be retained as the safe categorized error authority;
-- no P7.C8 real effect is authorized in preparation.
+`P7C8_PREP_REPAIR1=NEXT_ZERO_REAL_EFFECT`
 
 `P7C8_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
 
