@@ -44,10 +44,10 @@ Repair-2 successfully preserves/implements many required acceptance guards, incl
 
 It is still **not** accepted for real execution because review found remaining harness-only defects:
 
-1. final timeout/cancellation helpers still use unbounded `gather()` joins after their last timeout, so a supposedly finite one-shot continuation can hang indefinitely;
+1. final timeout/cancellation helpers still use unbounded joins after their last timeout, so a supposedly finite one-shot continuation can hang indefinitely;
 2. not every spawned task is explicitly terminalized on every sibling-failure edge, notably the Turn-4 approval bridge when Turn-4 start fails and the Turn-5 terminal waiter when interrupt fails;
 3. Turn-4 sentinel “exact content” currently proves one marker occurrence, not exact byte-for-byte equality;
-4. unrelated baseline capture has a scan-to-recorded-inode race between target-absence scanning and the later pathname `lstat()` used for baseline identity;
+4. unrelated baseline capture has a scan-to-recorded-inode race between target-absence scanning and the later pathname identity capture;
 5. post-delete unrelated reconciliation checks path/device/inode but does not revalidate the full safe regular-file owner/mode/link envelope.
 
 No production `src/**` change is authorized or required by these findings.
@@ -56,12 +56,30 @@ No production `src/**` change is authorized or required by these findings.
 
 `P7C6_REAL_CONTINUATION_AUTHORIZED=NO`
 
-## Owner-requested temporary disk-maintenance pause
+## Disk maintenance — COMPLETE / SAFE
 
-The next P7.C6 Repair-3 execution is intentionally **PAUSED** while server-80 disk usage is inventoried and reviewed for safe cleanup.
+Owner-requested server-80 conservative cleanup is complete.
 
-Disk work is independent of P7.C6 correctness. The disk inventory/cleanup must not delete or mutate any retained P7.C6 latch, recovery ledger, marker supplement, retained isolated state root, controller DB or target Codex profile/session authority.
+- Exact disk bytes reclaimed: `945344512` (`0.880421 GiB`).
+- P7.C6 protected state presence check: `PASS`.
+- Canonical repository HEAD remained `4d98e2b6170e76534fa18274236605f77440f740` during cleanup.
+- No Docker, journal, apt, general `/tmp`, Git clone, global `__pycache__`, archive or Codex-state cleanup occurred.
+- No real Codex effects occurred.
 
-After disk cleanup is reviewed and completed, resume from the frozen Repair-3 contract above.
+The temporary disk-maintenance pause is closed.
+
+## Current executable slice
+
+**P7.C6 same-thread continuation prep-v2 Repair-3 — NEXT / ZERO REAL EFFECT.**
+
+Binding contract:
+
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR3_CONTRACT_2026-09-11.md`
+
+Repair-3 may modify only the gated acceptance harness/tests/evidence. It must close the five remaining harness-only defects while preserving all accepted Repair-2 authorities. No production `src/**` change and no real Codex/app-server/business RPC effect is authorized.
+
+`P7C6_REPAIR3_AUTHORIZED=YES`
+
+`P7C6_REAL_CONTINUATION_AUTHORIZED=NO`
 
 P8/P9 remain blocked until P7.C6 is independently accepted.
