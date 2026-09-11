@@ -15,64 +15,48 @@ Date: 2026-09-11
 
 Run-1 evidence: `785a82e2e9bc392173ea1e910b490f84cfa590b2`.
 
-Run 1 created one disposable real thread, one runtime-generation resume and three turns. Turn 1/2 proved persistence. Turn 3 reached approval and stopped at `P7C6_APPROVAL_NOT_EXACTLY_ALLOWED`. No interrupt, official delete, thread/read or thread/list occurred. The old approval remains `RESPONSE_UNKNOWN` and is permanently non-retryable.
+The old Run-1 Turn-3 approval remains `RESPONSE_UNKNOWN` and permanently non-retryable. Accepted retained authorities remain the Turn-3 forensic `e6835e7eaff21ce6a452c24f3309269df67c82ba`, the existing Run-1 latch forensic `c308c765d9915844fce97d1d1f6c933e302a75aa`, retained-thread SHA-256 `9be5e1f196c868df772e6971186905ee81f9ba02fe9f4cf0f72f13a2e55e41f6`, and accepted Run-1 latch SHA-256 `50616410354022747284c1ce61bd02b8ecd1eb2636657eac502092fde800d55e`.
 
-Accepted retained recovery authorities:
-
-- Turn-3 forensic `e6835e7eaff21ce6a452c24f3309269df67c82ba`: exact Turn 3 terminal `INTERRUPTED`, command completed, no pending persisted approval, no delayed process/sentinel.
-- Existing Run-1 latch forensic `c308c765d9915844fce97d1d1f6c933e302a75aa`.
-- `/root/.codexcontrol/p7c6-real-one-shot-ledger.json` is accepted as the consumed Run-1 replay barrier, SHA-256 `50616410354022747284c1ce61bd02b8ecd1eb2636657eac502092fde800d55e`.
-- The retained thread may be used only by a separately architect-authorized same-thread continuation. No new real thread is allowed.
+No new real thread is allowed.
 
 `P7C6_PRODUCTION_DEFECT_ESTABLISHED=NO`.
 
-## P7.C6 continuation preparation lineage
-
-- Prep-v2 inert candidate: `1c9b03108bb2493fd6547a92c807397bb4c0868c` — REWORK_REQUIRED.
-- Repair-1 candidate: `821be881f1e6b04d3905080191cc0f1141799923` — REWORK_REQUIRED.
-- Repair-2 candidate: `4d98e2b6170e76534fa18274236605f77440f740` — REWORK_REQUIRED.
-- Repair-3 candidate: `2b38969c1c9a8232cb1c68efc953dae125e0e18c` — **REWORK_REQUIRED** after independent architect review.
-
-Repair-3 architect review:
-
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR3_ARCHITECT_REVIEW_2026-09-11.md`
-
-Frozen Repair-4 contract:
-
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR4_CONTRACT_2026-09-11.md`
-
-Repair-3 correctly closes the prior helper-level Repair-3 defects: bounded primary/secondary/final observations, explicit owned-task modeling, exact Turn-4 sentinel bytes, descriptor-coupled unrelated baseline identity, and safe-file post-delete reconciliation. It preserves the earlier source authority, topology/local-path gates, fail-closed journal updates, controller proof, bounded marker oracle, structural matcher, dynamic budget, no-new-thread path, official delete observer, DELETE_UNKNOWN no-retry semantics and success-only sanitization.
-
-It is still not accepted as the one-shot real executable because independent review found three final harness-only failure-edge defects:
-
-1. a FINAL_NONCONVERGENCE raises finitely but intentionally leaves the underlying cancellation-resistant asyncio task alive; the owner map is local to the real coroutine, so the full test process/event-loop teardown can still hang or allow the already-dispatched task to continue later;
-2. Turn-5 start nonconvergence is not wrapped in an ambiguity handler that sets `forensic_retained`, so outer cleanup may remove the workdir while a still-live Turn-5 start task can later converge;
-3. Turn-4 start failure swallows approval-bridge cancellation nonconvergence; a cancellation-resistant bridge therefore lacks an immediate runtime-shutdown/process-terminal authority strong enough to exclude a late ALLOW.
-
-These are acceptance-harness defects only. No production `src/**` change is authorized or required.
-
-`P7C6_CONTINUATION_PREP_V2_REPAIR3=REWORK_REQUIRED`
-
-`P7C6_REAL_CONTINUATION_AUTHORIZED=NO`
-
 ## Disk maintenance — COMPLETE / SAFE
 
-Owner-requested server-80 conservative cleanup completed safely before Repair-3. Exactly `945344512` bytes (`0.880421 GiB`) were reclaimed. P7.C6 protected state remained present, Git remained unchanged during cleanup, and no real Codex effects occurred.
+Conservative server-80 cleanup reclaimed exactly `945344512` bytes (`0.880421 GiB`). P7.C6 protected state remained present; no Git/Codex state or real Codex effects were touched.
+
+## P7.C6 continuation preparation lineage
+
+- Prep-v2: `1c9b03108bb2493fd6547a92c807397bb4c0868c` — REWORK_REQUIRED.
+- Repair-1: `821be881f1e6b04d3905080191cc0f1141799923` — REWORK_REQUIRED.
+- Repair-2: `4d98e2b6170e76534fa18274236605f77440f740` — REWORK_REQUIRED.
+- Repair-3 canonical commit: `2b38969c1c9a8232cb1c68efc953dae125e0e18c` — REWORK_REQUIRED.
+- Repair-4 candidate: `a55a765cdfb0d51e956045a238d4ecb5a237a5fe` — **REWORK_REQUIRED** after independent architect review.
+
+Repair-4 successfully adds the required dedicated child-process watchdog and preserves the accepted Repair-3 guards: finite coroutine-level ownership, all-marker/sentinel exactness, baseline identity atomicity, post-delete safe authority, source/topology/controller/budget gates, one-delete authority, no-new-thread path and success-only sanitization.
+
+However Repair-4 is not executable real authority because its process watchdog uses one global default `WATCHDOG_HARD_DEADLINE = 5.0`, and the real test invokes `launch_dedicated_continuation_child(mode="real")` without overriding that bound. The valid real continuation contains multiple deliberately finite operations whose normal allowed duration is far greater than five seconds; therefore the current watchdog would create a deterministic/near-deterministic false stop before the workflow can complete.
+
+A second evidence-quality gap remains: the real dedicated child discards the sanitized dict returned by `_run_real_continuation()` and the parent receives only process completion/returncode. Repair-5 must provide a bounded sanitized child-to-parent result authority so a process PASS is tied to the actual final lifecycle statuses/counters, without leaking raw IDs/markers/content.
+
+No production `src/**` defect is established by either gap.
+
+`P7C6_CONTINUATION_PREP_V2_REPAIR4=REWORK_REQUIRED`
+
+`P7C6_REAL_CONTINUATION_AUTHORIZED=NO`.
 
 ## Current executable slice
 
-**P7.C6 same-thread continuation prep-v2 Repair-4 — NEXT / ZERO REAL EFFECT.**
+**P7.C6 same-thread continuation prep-v2 Repair-5 — NEXT / ZERO REAL EFFECT.**
 
-Binding contract:
+Repair-5 is harness/tests/evidence only. It must:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR4_CONTRACT_2026-09-11.md`
+1. separate synthetic watchdog test deadlines from the real continuation watchdog authority;
+2. bind the real hard deadline to a documented finite value that exceeds the complete worst-case internal finite wait budget plus margin;
+3. preserve single-child/no-retry terminate/kill semantics;
+4. deliver a bounded sanitized success result from the real child to the parent and validate it before declaring process PASS;
+5. keep all real authorization gates unset during Repair-5 tests.
 
-Repair-4 is the final harness failure-edge repair: add process-level hard watchdog authority for cancellation-resistant tasks, retain forensic state on ambiguous Turn-5 start, and fail closed on nonconverging Turn-4 approval cancellation. Preserve all accepted Repair-3/Repair-2 authorities.
-
-No production `src/**` change and no real Codex/app-server/business RPC effect is authorized.
-
-`P7C6_REPAIR4_AUTHORIZED=YES`
-
-`P7C6_REAL_CONTINUATION_AUTHORIZED=NO`
+No production `src/**` changes and no real Codex/app-server/business RPC effects are authorized.
 
 P8/P9 remain blocked until P7.C6 is independently accepted.
