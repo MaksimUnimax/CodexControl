@@ -51,8 +51,8 @@ from codex_control.domain import CodexProfile
 from codex_control.adapters.codex.protocol import InboundServerRequest
 
 
-ARCHITECT_BASE_SHA = "9acd8238092bfb351c093209e7fa6c40951d4b47"
-ARCHITECT_BASE_TREE = "54e6168e5f8bd9ba3ed7afc118dd30b79dab1545"
+ARCHITECT_BASE_SHA = "36c03da116f06d03cf7b905670982b3fb7a3938b"
+ARCHITECT_BASE_TREE = "e9101cbcec0e57a500decf90fe50a2f455066a7e"
 AUTHORIZED_ENV = "AUTHORIZED_P7C7_DENY_ONLY_APPROVAL_PROBE_2026_09_11"
 EXPECTED_HEAD_ENV = "CODEXCONTROL_P7C7_PROBE_EXPECTED_HEAD"
 EXPECTED_TREE_ENV = "CODEXCONTROL_P7C7_PROBE_EXPECTED_TREE"
@@ -1086,6 +1086,15 @@ class FutureProbeBudget:
         raise AssertionError("ALLOW_DECISION_PATHS=0")
 
 
+def synthetic_normal_budget() -> FutureProbeBudget:
+    """Build one complete synthetic normal lifecycle through the sole ledger."""
+    budget = FutureProbeBudget()
+    for action in ("model_list_calls", "thread_start_calls", "turn_start_calls"):
+        budget.record(action)
+    budget.reconcile()
+    return budget
+
+
 def write_sanitized_result(path: Path, value: Mapping[str, Any]) -> None:
     validate_sanitized_result(value)
     write_exclusive_private_json(path, value, maximum=MAX_AUTHORITY_BYTES)
@@ -1587,10 +1596,10 @@ def make_sanitized_result(*, terminal_status: str | None, operator: DenyOnlyAppr
         "approval_owner_terminalized": True if observation is None else observation.approval_owner_terminalized,
         "terminal_owner_terminalized": True if observation is None else observation.terminal_owner_terminalized,
         "owner_nonconverged": False if observation is None else observation.owner_nonconverged,
-        "model_list_calls": 0,
-        "thread_start_calls": 0,
+        "model_list_calls": budget.model_list_calls if budget is not None else 0,
+        "thread_start_calls": budget.thread_start_calls if budget is not None else 0,
         "thread_resume_calls": 0,
-        "turn_start_calls": 0,
+        "turn_start_calls": budget.turn_start_calls if budget is not None else 0,
         "approval_deny_responses": budget.approval_deny_responses if budget is not None else operator.response_count,
         "approval_deny_attempts": budget.approval_deny_attempts if budget is not None else operator.response_count,
         "approval_deny_confirmed": budget.approval_deny_confirmed if budget is not None else operator.response_count,
@@ -1683,6 +1692,17 @@ def validate_child_result(value: Mapping[str, Any]) -> None:
     validate_sanitized_result(value)
     if set(value) != _child_result_keys() or value["child_result_authority"] != "CHILD_OBSERVATION_ONLY":
         raise AssertionError("CHILD_RESULT_SCHEMA_INVALID")
+    if any(value[key] != 1 for key in ("model_list_calls", "thread_start_calls", "turn_start_calls")):
+        raise AssertionError("CHILD_RESULT_NORMAL_LIFECYCLE_INVALID")
+    for key in ("fresh_thread_sha256", "fresh_turn_sha256"):
+        if not isinstance(value[key], str) or SHA256_RE.fullmatch(value[key]) is None:
+            raise AssertionError("CHILD_RESULT_IDENTITY_HASH_INVALID")
+    if any(value[key] != 0 for key in (
+        "thread_resume_calls", "interrupt_calls", "thread_delete_calls", "thread_read_calls", "thread_list_calls",
+    )):
+        raise AssertionError("CHILD_RESULT_FORBIDDEN_EFFECT_INVALID")
+    if value["approval_allow_responses"] != 0:
+        raise AssertionError("CHILD_RESULT_ALLOW_EFFECT_INVALID")
     if any(key in value for key in ("process_group_final_active_count", "process_group_scan_errors", "group_active_count", "group_scan_errors")):
         raise AssertionError("CHILD_RESULT_CLAIMS_PARENT_AUTHORITY")
 
@@ -1750,7 +1770,7 @@ def validate_parent_final_result(value: Mapping[str, Any]) -> None:
     validate_child_result({key: value[key] for key in _child_result_keys()})
     if (
         value["allow_response_count"] != 0 or value["approval_allow_responses"] != 0
-        or value["model_list_calls"] > 1 or value["thread_start_calls"] > 1 or value["turn_start_calls"] > 1
+        or value["model_list_calls"] != 1 or value["thread_start_calls"] != 1 or value["turn_start_calls"] != 1
         or any(value[key] != 0 for key in ("thread_resume_calls", "interrupt_calls", "thread_delete_calls", "thread_read_calls", "thread_list_calls"))
         or value["approval_deny_attempts"] > MAX_PROBE_APPROVAL_REQUESTS
         or value["approval_deny_attempts"] != value["approval_deny_confirmed"] + value["approval_deny_unknown_or_failed"]
@@ -2767,6 +2787,7 @@ class Repair3AuthorityOfflineTests(unittest.TestCase):
         child = make_sanitized_result(
             terminal_status="COMPLETED", operator=operator, run=run,
             boundary=scan_fresh_run_boundary(run), outcome=OUTCOME_TERMINAL_FIRST,
+            budget=synthetic_normal_budget(),
         )
         loop.close()
         return child
@@ -2928,7 +2949,7 @@ class Repair3AuthorityOfflineTests(unittest.TestCase):
                         result = make_sanitized_result(
                             terminal_status="COMPLETED", operator=operator, run=run,
                             boundary=scan_fresh_run_boundary(run), outcome=OUTCOME_TERMINAL_FIRST,
-                            observation=observation,
+                            budget=synthetic_normal_budget(), observation=observation,
                         )
                         validate_child_result(result)
             loop.close()
@@ -2946,6 +2967,7 @@ class Repair4AuthorityOfflineTests(unittest.TestCase):
         child = make_sanitized_result(
             terminal_status="COMPLETED", operator=operator, run=run,
             boundary=child_boundary, outcome=OUTCOME_TERMINAL_FIRST,
+            budget=synthetic_normal_budget(),
         )
         loop.close()
         return child
@@ -3300,6 +3322,7 @@ class AuthorityAndBoundaryOfflineTests(unittest.TestCase):
             child = make_sanitized_result(
                 terminal_status="COMPLETED", operator=operator, run=run,
                 boundary=scan_fresh_run_boundary(run), outcome=OUTCOME_TERMINAL_FIRST,
+                budget=synthetic_normal_budget(),
             )
             validate_child_result(child)
             self.assertNotIn("process_group_final_active_count", child)
@@ -3317,6 +3340,7 @@ class AuthorityAndBoundaryOfflineTests(unittest.TestCase):
             child = make_sanitized_result(
                 terminal_status="COMPLETED", operator=operator, run=run,
                 boundary=scan_fresh_run_boundary(run), outcome=OUTCOME_TERMINAL_FIRST,
+                budget=synthetic_normal_budget(),
             )
             authority = {"pid": 101, "pgid": 101, "sid": 101, "term_count": 0, "kill_count": 0, "signalled_parent_pgid": "NO", "second_pgid_targeted": "NO"}
             final = make_parent_final_result(
@@ -3350,6 +3374,7 @@ class Repair5AuthorityOfflineTests(unittest.TestCase):
         child = make_sanitized_result(
             terminal_status="COMPLETED", operator=operator, run=run,
             boundary=scan_fresh_run_boundary(run), outcome=OUTCOME_TERMINAL_FIRST,
+            budget=synthetic_normal_budget(),
         )
         loop.close()
         return child
@@ -3500,6 +3525,135 @@ class Repair5AuthorityOfflineTests(unittest.TestCase):
     def test_post_child_outcome_requires_exactly_one_child(self) -> None:
         with self.assertRaises(AssertionError):
             self._make_r5_outcome(CHILD_RETURN_NONZERO, one_child_count=0)
+
+
+class Repair6EffectLedgerOfflineTests(unittest.TestCase):
+    def _normal_child(self, run: FreshProbeRun) -> dict[str, Any]:
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        future.set_result("synthetic-turn")
+        operator = DenyOnlyApprovalOperator(
+            thread_id="synthetic-thread", turn_id=future, cwd=str(run.workdir), sentinel=str(run.sentinel),
+        )
+        try:
+            return make_sanitized_result(
+                terminal_status="COMPLETED", operator=operator, run=run,
+                boundary=scan_fresh_run_boundary(run), outcome=OUTCOME_TERMINAL_FIRST,
+                budget=synthetic_normal_budget(),
+            )
+        finally:
+            loop.close()
+
+    def test_normal_child_projects_and_persists_authoritative_one_one_one_ledger(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-r6-child-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            budget = synthetic_normal_budget()
+            self.assertEqual(
+                (budget.model_list_calls, budget.thread_start_calls, budget.turn_start_calls),
+                (1, 1, 1),
+            )
+            child = make_sanitized_result(
+                terminal_status="COMPLETED", operator=self._operator(run), run=run,
+                boundary=scan_fresh_run_boundary(run), outcome=OUTCOME_TERMINAL_FIRST, budget=budget,
+            )
+            validate_child_result(child)
+            self.assertEqual(
+                (child["model_list_calls"], child["thread_start_calls"], child["turn_start_calls"]),
+                (1, 1, 1),
+            )
+            self.assertIsInstance(child["fresh_thread_sha256"], str)
+            self.assertRegex(child["fresh_thread_sha256"], SHA256_RE)
+            self.assertIsInstance(child["fresh_turn_sha256"], str)
+            self.assertRegex(child["fresh_turn_sha256"], SHA256_RE)
+            path = run.root / CHILD_RESULT_FILENAME
+            write_sanitized_result(path, child)
+            readback = read_bounded_private_json(path)
+            validate_child_result(readback)
+            self.assertEqual(readback, child)
+
+    def _operator(self, run: FreshProbeRun) -> DenyOnlyApprovalOperator:
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        future.set_result("synthetic-turn")
+        operator = DenyOnlyApprovalOperator(
+            thread_id="synthetic-thread", turn_id=future, cwd=str(run.workdir), sentinel=str(run.sentinel),
+        )
+        # The Future retains the established synthetic identity after its
+        # private loop is closed; no asynchronous operation is performed.
+        loop.close()
+        return operator
+
+    def test_normal_child_negative_matrix_rejects_lifecycle_hash_forbidden_and_allow_mutations(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-r6-child-negative-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            child = self._normal_child(run)
+            mutations = (
+                ("model_list_calls", 0), ("thread_start_calls", 0), ("turn_start_calls", 0),
+                ("model_list_calls", 2), ("thread_start_calls", 2), ("turn_start_calls", 2),
+                ("fresh_thread_sha256", None), ("fresh_turn_sha256", None),
+                ("fresh_thread_sha256", "malformed"), ("fresh_turn_sha256", "malformed"),
+                ("thread_resume_calls", 1), ("interrupt_calls", 1),
+                ("thread_delete_calls", 1), ("thread_read_calls", 1), ("thread_list_calls", 1),
+                ("approval_allow_responses", 1),
+            )
+            for key, replacement in mutations:
+                invalid = dict(child)
+                invalid[key] = replacement
+                with self.subTest(key=key, replacement=replacement), self.assertRaises(AssertionError):
+                    validate_child_result(invalid)
+
+    def test_normal_parent_requires_exact_one_one_one_ledger(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-r6-parent-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            child = self._normal_child(run)
+            path = run.root / CHILD_RESULT_FILENAME
+            write_sanitized_result(path, child)
+            parent = make_parent_final_result(
+                child, child_return_classification=CHILD_RETURN_COMPLETED, one_child_count=1,
+                second_child_started="NO", retry_count=0,
+                authority={"pid": 101, "pgid": 101, "sid": 101, "term_count": 0, "kill_count": 0,
+                           "signalled_parent_pgid": "NO", "second_pgid_targeted": "NO"},
+                snapshot=ProcessGroupSnapshot((), (), 0),
+                parent_boundary=scan_fresh_run_boundary(run, phase=PARENT_POST_QUIESCENCE),
+            )
+            validate_parent_final_result(parent)
+            for key in ("model_list_calls", "thread_start_calls", "turn_start_calls"):
+                for replacement in (0, 2):
+                    invalid = dict(parent)
+                    invalid[key] = replacement
+                    with self.subTest(key=key, replacement=replacement), self.assertRaises(AssertionError):
+                        validate_parent_final_result(invalid)
+
+    def test_failure_outcome_does_not_gain_normal_effect_ledger_fields(self) -> None:
+        outcome = make_parent_execution_outcome(
+            execution_class=CHILD_RETURN_NONZERO, watchdog_status="PROCESS_COMPLETED",
+            child_returncode_class=CHILD_RETURN_NONZERO, child_result_present=False,
+            child_result_valid=False, parent_boundary_class="BOUNDARY_NOT_PROVED",
+            boundary_drift_class=BOUNDARY_DRIFT_DETECTED, global_latch_present=False,
+            normal_final_result_present=False, child_result_discovery_class="CHILD_RESULT_DISCOVERY_MISSING",
+        )
+        for key in ("model_list_calls", "thread_start_calls", "turn_start_calls"):
+            self.assertNotIn(key, outcome)
+            invalid = dict(outcome, **{key: 1})
+            with self.subTest(key=key), self.assertRaises(AssertionError):
+                validate_parent_execution_outcome(invalid)
+
+    def test_deny_accounting_remains_valid_from_zero_through_three_and_fourth_is_blocked(self) -> None:
+        for count in range(MAX_PROBE_APPROVAL_REQUESTS + 1):
+            budget = FutureProbeBudget()
+            for _ in range(count):
+                budget.record_approval_deny()
+            budget.reconcile()
+            self.assertEqual(budget.approval_deny_attempts, count)
+            self.assertEqual(budget.approval_deny_responses, count)
+            self.assertEqual(budget.approval_deny_confirmed, count)
+            self.assertEqual(budget.approval_deny_unknown_or_failed, 0)
+            self.assertEqual(budget.approval_allow_responses, 0)
+        budget = FutureProbeBudget()
+        for _ in range(MAX_PROBE_APPROVAL_REQUESTS):
+            budget.record_approval_deny()
+        with self.assertRaises(AssertionError):
+            budget.record_approval_deny()
 
 
 class RawWireAuthorityOfflineTests(unittest.TestCase):
@@ -3816,6 +3970,29 @@ class P7C7StaticGateTests(unittest.TestCase):
             with self.subTest(action=action):
                 with self.assertRaises(AssertionError):
                     budget.record(action)
+
+    def test_normal_child_write_is_after_confirmed_stages_and_budget_projection(self) -> None:
+        source = inspect.getsource(future_real_deny_only_approval_probe)
+        stage_positions = (
+            source.index('journal.result("MODEL_CATALOG", "CONFIRMED")'),
+            source.index('journal.result("THREAD_START_ADAPTER",'),
+            source.index('journal.result("TURN_START_ADAPTER",'),
+            source.index("budget.reconcile()"),
+            source.index("child_result = make_sanitized_result("),
+        )
+        self.assertEqual(stage_positions, tuple(sorted(stage_positions)))
+        self.assertIn("budget.record(action)", source)
+        self.assertIn('"model_list_calls"', source)
+        self.assertIn('"thread_start_calls"', source)
+        self.assertIn('"turn_start_calls"', source)
+
+    def test_frozen_observation_and_watchdog_values_remain_exact(self) -> None:
+        self.assertEqual(P7C7_CANDIDATE_SLEEP_SECONDS, 30.0)
+        self.assertEqual(PROBE_OBSERVATION_MARGIN_SECONDS, 60.0)
+        self.assertEqual(PROBE_OBSERVATION_TIMEOUT, 100.0)
+        self.assertEqual(PROBE_INTERNAL_WORST_CASE_SECONDS, 146.0)
+        self.assertEqual(PROBE_WATCHDOG_MARGIN_SECONDS, 15.0)
+        self.assertEqual(PROBE_WATCHDOG_HARD_DEADLINE, 165.0)
 
 class P7C7DenyOnlyApprovalProbeAcceptance(unittest.IsolatedAsyncioTestCase):
     @unittest.skipUnless(
