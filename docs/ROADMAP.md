@@ -22,81 +22,54 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P7.C5 corrected fake hard-delete acceptance — `946ddf7ac6f7c3539bc3f344c6edf21d6ffce528`.
 - [ACCEPTED CORRECTION] ADR-0045 shared persistent CODEX_HOME semantics.
 
-### P7.C6 retained-thread continuation
+### P7.C6
 
-- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Preparation Repair-6 `76a7aa24e3cfdfb12c3314a7e01691d4a943b551`, tree `92abebdfb3390d4c58f4aefc00aa84b83841e99e`.
-- [CONSUMED / NO RERUN] Real continuation failed before Turn-5/delete; Turn-4 completed without approval request.
-- Final classification: `OFFICIAL_P1_DELETE_CLASS=NOT_DISPATCHED_PROVED`; production defect `NO`.
+- [CONSUMED / NO RERUN] Real continuation did not reach Turn-5/delete; production defect `NO`.
 
-### P7.C7 fresh disposable-thread successor
+### P7.C7
 
-- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Final prep Repair-6 `320ae3ba1265608a92ebfe82992068d4b12ebcd9`, tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`.
-- [CONSUMED / NO RERUN] One-shot real DENY-only probe executed once; evidence `4629cff73d981ee9c2abafa24c97ba7ca340f87c`.
-- [DONE / ZERO EFFECT FORENSIC] Forensic evidence `e589eec3c215d192df48a8e252e74dc13c768327`.
-- No fresh thread/Turn/approval was reached; runtime acquire ended `NONCONVERGED` under an ambiguous 5s harness wrapper.
-- Root cause not established for that run; harness observability defect established; production defect `NO`.
-- [CLOSED] P7.C7 permanently consumed.
+- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] final prep Repair-6 `320ae3ba1265608a92ebfe82992068d4b12ebcd9`.
+- [CONSUMED / NO RERUN] one-shot real probe evidence `4629cff73d981ee9c2abafa24c97ba7ca340f87c`.
+- [DONE / FORENSIC] evidence `e589eec3c215d192df48a8e252e74dc13c768327`.
+- No fresh thread/Turn/approval; P7.C7 harness observability defect established; production defect `NO`.
 
-### P7.C8 fresh DENY-only successor
+### P7.C8
 
-#### Preparation
-
-- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Initial prep `9297395efb678356255d91aa8d90001a5fc768e0`.
-- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Repair-1 `070bcd0caa336d6df1ed24ee05d31dcce3d2cd95`, tree `787e083077b7386a8b05968f2193c611d8182d9d`, harness blob `53e70ba37803bb6a88e3e8ab4b7f499db1e28df8`.
-- Accepted correction: bounded failed-acquire containment, distinct initial/final acquisition classes, safe RuntimeErrorSafe category authority, fail-closed parent recovery and authoritative journal reader.
-
-#### One-shot real probe
-
-- [CONSUMED / NO RERUN] Executed exactly once; evidence commit `21d3c3f6dbcb0c77047121c75b70a0d0f0814bea`.
-- Parent outcome: `CHILD_NONZERO`, watchdog `PROCESS_COMPLETED`, acquire initial/final `RUNTIME_ACQUIRE_SAFE_EXCEPTION`, category `storage_boundary_invalid`, cleanup `CONFIRMED`, no normal/child result, one child, zero retry, no TERM/KILL.
-- [DONE / ARCHITECT ROOT-CAUSE REVIEW] P7.C8 harness manually created the isolated state root with only `sqlite/` and `logs/`, omitting the mandatory production `.codexcontrol-state-root-v1` marker. Production `IsolatedStateRoot.validate()` correctly rejected it before app-server startup.
-- `P7C8_FAILURE_CLASS=HARNESS_PRECONDITION_DEFECT`.
-- `P7C8_ROOT_CAUSE=ISOLATED_STATE_ROOT_NOT_PROVISIONED_BY_PRODUCTION_AUTHORITY`.
-- `P7C8_PRODUCTION_DEFECT_ESTABLISHED=NO`.
-- [CLOSED] P7.C8 permanently consumed.
-
-Architect review:
-
-`docs/evidence/p7c8/P7C8_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_ARCHITECT_REVIEW_2026-09-11.md`
-
-`P7C8_REAL_PROBE_RERUN_AUTHORIZED=NO`
-
-`P7C8_REAL_APPROVAL_PROBE_AUTHORIZED=NO_CONSUMED`
-
-`P7C8_MATCHER_AUTHORIZED=NO`
-
-`P7C8_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
+- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Repair-1 `070bcd0caa336d6df1ed24ee05d31dcce3d2cd95`, tree `787e083077b7386a8b05968f2193c611d8182d9d`.
+- [CONSUMED / NO RERUN] real evidence `21d3c3f6dbcb0c77047121c75b70a0d0f0814bea`.
+- [DONE / ROOT-CAUSE REVIEW] production correctly rejected manually incomplete test state root; harness precondition defect; production defect `NO`.
 
 ### P7.C9 production-provisioned DENY-only successor
 
-#### Initial preparation
+#### Preparation
 
-- [REWORK_REQUIRED / ZERO EFFECT] Candidate `097c8809a90eaca5d7d2074b35dc5e73ae9762c1`, tree `c099c3a35acde82674f70413f55121c9345c82ba`, harness blob `0bccd8e80b362dd283773d6fea18a4a094018042`.
-- [PASS] Real path leaves state root absent and calls production `IsolatedStateRoot.provision(profile)` then `validate(profile)` before runtime acquire.
-- [PASS] No manual marker/sqlite/logs creation in the future real path.
-- [PASS] Failed provision/validate blocks runtime acquire and downstream model/list/thread/Turn/approval effects.
-- [PASS] P7.C8 acquisition/DENY/process/journal/boundary/normal-1-1-1 gates are carried forward.
+- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] initial prep `097c8809a90eaca5d7d2074b35dc5e73ae9762c1`, tree `c099c3a35acde82674f70413f55121c9345c82ba`.
+- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Repair-1 `6cefa7772f00f6b1d67b9c6ecfd3770009d77c7f`, tree `1fd13ed5964f7c18ac5c5cfc799ee4670c719ab2`, harness blob `44271459c2b4523f97551ade93563aee96def1c3`.
+- [PASS] Future real path uses production `IsolatedStateRoot.provision(profile)` then `validate(profile)`; no manual marker/sqlite/logs creation.
+- [PASS] State-root workers have explicit bounded owner authority; normal success requires both `TERMINALIZED`.
+- [PASS] Parent provision/runtime evidence recovery is fail-closed and category domains are separated.
+- [PASS] P7.C8 acquisition authority, DENY-only, max-three DENY, ALLOW=0, one child/no retry, immutable journal, exact normal `1/1/1`, zero resume/interrupt/delete/read/list and process-group authority remain binding.
 
-Architect review:
+Acceptance:
 
-`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_ARCHITECT_ACCEPTANCE_2026-09-11.md`
 
-Blocking defects:
+#### One-shot real probe
 
-- [FIX] parent outcome validator must not shadow runtime-acquire category with provision/validate category before the `RUNTIME_ACQUIRE_NOT_ESTABLISHED` fact-consistency gate;
-- [FIX] the 5s state-root operation seam must durably distinguish worker terminalization from nonconvergence; a daemon worker may not continue mutating state after a bare `TIMEOUT` classification without ownership authority.
+Binding contract:
 
-Binding Repair-1 contract:
+`docs/evidence/p7c9/P7C9_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-11.md`
 
-`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_CONTRACT_2026-09-11.md`
+- [AUTHORIZED / ONE SHOT / EXACT SNAPSHOT] execute only from HEAD `6cefa7772f00f6b1d67b9c6ecfd3770009d77c7f`, tree `1fd13ed5964f7c18ac5c5cfc799ee4670c719ab2`.
+- [BOUND] New P7.C9 latch/result/outcome namespace; P7.C7/P7.C8 remain untouched and permanently consumed.
+- [BOUND] Production provision+validate precedes runtime acquisition. Failure/nonconvergence blocks downstream effects.
+- [BOUND] At most one runtime generation, one model/list, one fresh thread/start, one primary turn/start; DENY 0..3; ALLOW/resume/interrupt/delete/read/list 0.
+- [BOUND] Parent watchdog 207.001s; one child, zero retries; at most one exact-group TERM and KILL.
+- [BLOCKED] Matcher authority and hard-delete execution until the real P7.C9 evidence is architect accepted.
 
-- [NEXT / ZERO REAL EFFECT] **P7.C9 prep Repair-1:** repair only durable fact separation and state-root worker ownership while preserving production provisioning and all already-correct gates.
-- [BLOCKED] Any real P7.C9 probe until Repair-1 is independently architect accepted and an exact executable SHA/tree is frozen.
-- [BLOCKED] Matcher authority and hard-delete acceptance until separately authorized real evidence is accepted.
+`P7C9_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
 
-`P7C9_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
-
-`P7C9_REAL_EXECUTION_AUTHORIZED=NO`
+`P7C9_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
 
 `P7C9_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
