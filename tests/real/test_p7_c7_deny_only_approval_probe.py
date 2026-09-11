@@ -11,8 +11,10 @@ from __future__ import annotations
 import ast
 import asyncio
 import hashlib
+import inspect
 import json
 import os
+import re
 import secrets
 import shlex
 import signal
@@ -35,19 +37,32 @@ from codex_control.adapters.codex.approvals import (
     CodexApprovalBridge,
     COMMAND,
 )
+from codex_control.adapters.codex.model_catalog import CodexModelCatalogAdapter
+from codex_control.adapters.codex.runtime import CodexRuntimeManager
+from codex_control.adapters.codex.thread_lifecycle import (
+    CodexThreadLifecycleAdapter,
+    ThreadOperationStatus,
+    TrustedWorkingDirectory,
+)
+from codex_control.adapters.codex.turn_lifecycle import CodexTurnLifecycleAdapter, TurnStartStatus
+from codex_control.adapters.codex.isolation import IsolationPathAuthority
+from codex_control.domain import CodexProfile
 from codex_control.adapters.codex.protocol import InboundServerRequest
 
 
-ARCHITECT_BASE_SHA = "7e0654bbc9e2798ea49e16eca3aa6e2d90d1592a"
-ARCHITECT_BASE_TREE = "e3281cc5dd5a0a06e92e5f87feb340a679cffcf2"
+ARCHITECT_BASE_SHA = "9f2f3c1f1b5913da34e97f4fd23dc8dbf379df70"
+ARCHITECT_BASE_TREE = "19f65356540c418c6c7cc911ecc8f95b6d39caa8"
 AUTHORIZED_ENV = "AUTHORIZED_P7C7_DENY_ONLY_APPROVAL_PROBE_2026_09_11"
 EXPECTED_HEAD_ENV = "CODEXCONTROL_P7C7_PROBE_EXPECTED_HEAD"
 EXPECTED_TREE_ENV = "CODEXCONTROL_P7C7_PROBE_EXPECTED_TREE"
 REAL_PROBE_LATCH = Path("/root/.codexcontrol/p7c7-deny-only-approval-probe-ledger.json")
+REAL_PROBE_RESULT = Path("/root/.codexcontrol/p7c7-deny-only-approval-probe-result.json")
 MAX_PROBE_APPROVAL_REQUESTS = 3
 MAX_AUTHORITY_BYTES = 16 * 1024
 MAX_WIRE_COMMAND_CHARS = 4096
 MAX_WIRE_VECTOR_TOKENS = 64
+MAX_SEQUENCE = MAX_PROBE_APPROVAL_REQUESTS
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 OUTCOME_APPROVAL_FIRST = "APPROVAL_REQUEST_OBSERVED_BEFORE_TERMINAL"
 OUTCOME_TERMINAL_FIRST = "TURN_TERMINAL_BEFORE_APPROVAL_REQUEST"
@@ -55,6 +70,12 @@ OUTCOME_AMBIGUOUS = "APPROVAL_AND_TERMINAL_RACE_AMBIGUOUS"
 OUTCOME_PROTOCOL = "PROTOCOL_TERMINAL"
 OUTCOME_WATCHDOG = "WATCHDOG_TIMEOUT"
 OUTCOME_LIMIT = "PROBE_APPROVAL_REQUEST_LIMIT_EXCEEDED"
+OUTCOME_NONCONVERGENT = "WATCHDOG_TIMEOUT"
+
+SENTINEL_EXACT_ARG = "EXACT_ARG_TOKEN"
+SENTINEL_EMBEDDED = "EMBEDDED_OCCURRENCE"
+SENTINEL_ABSENT = "ABSENT"
+SENTINEL_VECTOR_UNKNOWN = "VECTOR_NOT_ESTABLISHED"
 
 
 def _sha256(value: str | bytes) -> str:
@@ -182,14 +203,25 @@ class WireCommandAuthority:
         self, *, thread_id: str, turn_id: str, cwd: str, sentinel: str,
         wire_command: str, kind: ApprovalKind, sequence: int,
     ) -> None:
-        if not isinstance(wire_command, str) or not wire_command or len(wire_command) > MAX_WIRE_COMMAND_CHARS:
+        if (
+            kind is not ApprovalKind.COMMAND_EXECUTION
+            or not isinstance(thread_id, str) or not thread_id
+            or not isinstance(turn_id, str) or not turn_id
+            or not isinstance(cwd, str) or not os.path.isabs(cwd)
+            or not isinstance(sentinel, str) or not os.path.isabs(sentinel)
+            or type(sequence) is not int or not 1 <= sequence <= MAX_SEQUENCE
+            or not isinstance(wire_command, str) or not wire_command
+            or len(wire_command) > MAX_WIRE_COMMAND_CHARS
+            or "\0" in wire_command
+        ):
             raise ValueError("WIRE_COMMAND_UNSAFE")
+        normalized_cwd = os.path.normpath(os.path.abspath(cwd))
         record = {
             "format": 1,
             "thread_id_sha256": _sha256(thread_id),
             "turn_id_sha256": _sha256(turn_id),
-            "cwd_sha256": _sha256(cwd),
-            "sentinel_path_sha256": _sha256(sentinel),
+            "actual_cwd_sha256": _sha256(normalized_cwd),
+            "expected_sentinel_path_sha256": _sha256(sentinel),
             "wire_command_plaintext": wire_command,
             "wire_command_sha256": _sha256(wire_command),
             "request_kind": kind.value,
@@ -199,6 +231,41 @@ class WireCommandAuthority:
         if self.path.exists():
             raise FileExistsError("WIRE_AUTHORITY_ALREADY_EXISTS")
         write_exclusive_private_json(self.path, record)
+
+
+WIRE_AUTHORITY_KEYS = frozenset({
+    "format", "thread_id_sha256", "turn_id_sha256", "actual_cwd_sha256",
+    "expected_sentinel_path_sha256", "wire_command_plaintext", "wire_command_sha256",
+    "request_kind", "local_request_sequence", "capture_status",
+})
+
+
+def validate_wire_authority_record(value: Mapping[str, Any]) -> None:
+    """Validate the complete root-only wire schema before any projection."""
+    if set(value) != WIRE_AUTHORITY_KEYS:
+        raise ValueError("WIRE_AUTHORITY_SCHEMA_INVALID")
+    if type(value["format"]) is not int or value["format"] != 1:
+        raise ValueError("WIRE_AUTHORITY_FORMAT_INVALID")
+    for key in ("thread_id_sha256", "turn_id_sha256", "actual_cwd_sha256", "expected_sentinel_path_sha256", "wire_command_sha256"):
+        if not isinstance(value[key], str) or SHA256_RE.fullmatch(value[key]) is None:
+            raise ValueError("WIRE_AUTHORITY_HASH_INVALID")
+    if value["request_kind"] != ApprovalKind.COMMAND_EXECUTION.value:
+        raise ValueError("WIRE_AUTHORITY_KIND_INVALID")
+    if type(value["local_request_sequence"]) is not int or not 1 <= value["local_request_sequence"] <= MAX_SEQUENCE:
+        raise ValueError("WIRE_AUTHORITY_SEQUENCE_INVALID")
+    if value["capture_status"] != "CAPTURED_ROOT_ONLY":
+        raise ValueError("WIRE_AUTHORITY_STATUS_INVALID")
+    plaintext = value["wire_command_plaintext"]
+    if not isinstance(plaintext, str) or not plaintext or "\0" in plaintext or len(plaintext) > MAX_WIRE_COMMAND_CHARS:
+        raise ValueError("WIRE_AUTHORITY_PLAINTEXT_INVALID")
+    if _sha256(plaintext) != value["wire_command_sha256"]:
+        raise ValueError("WIRE_AUTHORITY_HASH_MISMATCH")
+
+
+def read_wire_authority(path: Path) -> dict[str, Any]:
+    record = read_bounded_private_json(path)
+    validate_wire_authority_record(record)
+    return record
 
 
 @dataclass(frozen=True)
@@ -240,6 +307,19 @@ def recover_wire_vector(wire: str) -> WireVectorRecovery:
     )
 
 
+def classify_sentinel_reference(wire: str, sentinel: str) -> str:
+    """Return an observation class; this is deliberately not matcher authority."""
+    recovered = recover_wire_vector(wire)
+    if not recovered.established:
+        return SENTINEL_VECTOR_UNKNOWN
+    vector = shlex.split(wire, comments=False, posix=True)
+    if sentinel in vector:
+        return SENTINEL_EXACT_ARG
+    if any(sentinel in token for token in vector):
+        return SENTINEL_EMBEDDED
+    return SENTINEL_ABSENT
+
+
 def candidate_probe_prompt(sentinel: str) -> str:
     if not isinstance(sentinel, str) or not sentinel.startswith("/") or "\0" in sentinel:
         raise ValueError("SENTINEL_AUTHORITY_INVALID")
@@ -257,7 +337,7 @@ class ApprovalCapture:
     thread_match: bool
     turn_match: bool
     cwd_match: bool
-    sentinel_match: bool
+    sentinel_reference_class: str
     request_count: int
     response_count: int
     wire_command: str | None
@@ -274,7 +354,7 @@ class DenyOnlyApprovalOperator:
     ) -> None:
         self.thread_id = thread_id
         self.turn_id = turn_id
-        self.cwd = cwd
+        self.cwd = os.path.normpath(os.path.abspath(cwd))
         self.sentinel = sentinel
         self.wire_authority = wire_authority
         self.captures: list[ApprovalCapture] = []
@@ -290,14 +370,26 @@ class DenyOnlyApprovalOperator:
         commands = self._context(request, "command: ")
         cwds = self._context(request, "cwd: ")
         command = commands[0] if len(commands) == 1 else None
+        normalized_cwd = os.path.normpath(os.path.abspath(cwds[0])) if len(cwds) == 1 and os.path.isabs(cwds[0]) else None
+        exact_identity = (
+            request.kind is ApprovalKind.COMMAND_EXECUTION
+            and len(commands) == 1
+            and len(cwds) == 1
+            and request.thread_id == self.thread_id
+            and expected_turn is not None
+            and request.turn_id == expected_turn
+            and normalized_cwd == self.cwd
+            and isinstance(command, str)
+            and bool(command)
+        )
         sequence = len(self.captures) + 1
         capture = ApprovalCapture(
             request_sequence=request.local_sequence,
             kind=request.kind,
             thread_match=request.thread_id == self.thread_id,
             turn_match=expected_turn is not None and request.turn_id == expected_turn,
-            cwd_match=len(cwds) == 1 and cwds[0] == self.cwd,
-            sentinel_match=command is not None and self.sentinel in command,
+            cwd_match=normalized_cwd == self.cwd,
+            sentinel_reference_class=classify_sentinel_reference(command, self.sentinel) if command is not None else SENTINEL_VECTOR_UNKNOWN,
             request_count=sequence,
             response_count=self.response_count,
             wire_command=command,
@@ -305,9 +397,9 @@ class DenyOnlyApprovalOperator:
             wire_command_sha256=_sha256(command) if command is not None else None,
         )
         self.captures.append(capture)
-        if command is not None and expected_turn is not None and self.wire_authority is not None and not self.wire_authority.path.exists():
+        if exact_identity and self.wire_authority is not None and not self.wire_authority.path.exists():
             self.wire_authority.capture_once(
-                thread_id=request.thread_id or "", turn_id=request.turn_id or "", cwd=self.cwd,
+                thread_id=request.thread_id, turn_id=request.turn_id, cwd=normalized_cwd,
                 sentinel=self.sentinel, wire_command=command, kind=request.kind, sequence=request.local_sequence,
             )
         return ApprovalDecision.DENY
@@ -321,6 +413,8 @@ class SyntheticApprovalClient:
         self.pending: dict[str | int, InboundServerRequest] = {}
         self.responses: list[dict[str, Any]] = []
         self.allow_response_count = 0
+        self.deny_response_count = 0
+        self.approval_response_count = 0
         self.terminal = asyncio.Event()
         self.terminal_status = terminal_status
         self._sequence = 1
@@ -353,10 +447,12 @@ class SyntheticApprovalClient:
     async def respond_server_request(self, request: InboundServerRequest, result: dict[str, Any]) -> None:
         if not self.owns_server_request(request):
             raise RuntimeError("SYNTHETIC_REQUEST_NOT_OWNED")
+        if result.get("decision") in ("accept", "approved") or result.get("permissions"):
+            raise AssertionError("ALLOW_RESPONSE_FORBIDDEN")
         self.pending.pop(request.request_id, None)
         self.responses.append({"request_id": request.request_id, "result": dict(result)})
-        if result.get("decision") in ("accept", "approved") or result.get("permissions"):
-            self.allow_response_count += 1
+        self.approval_response_count += 1
+        self.deny_response_count += 1
         if hasattr(self, "response_observer"):
             self.response_observer.response_count = len(self.responses)
 
@@ -369,6 +465,7 @@ class ProbeObservation:
     deny_response_count: int
     allow_response_count: int
     observer_joined: bool
+    approval_statuses: tuple[ApprovalHandlingStatus, ...] = ()
 
 
 async def _cancel_and_join(task: asyncio.Task[Any], timeout: float = 0.25) -> bool:
@@ -383,70 +480,89 @@ async def _cancel_and_join(task: asyncio.Task[Any], timeout: float = 0.25) -> bo
     return True
 
 
+def classify_race(
+    *, terminal_status: str | None, approval_statuses: Sequence[ApprovalHandlingStatus],
+    deny_response_count: int, request_dequeued: bool, converged: bool = True,
+) -> str:
+    """Freeze classification from observed facts, never waiter scheduling."""
+    if not converged:
+        return OUTCOME_NONCONVERGENT
+    if terminal_status is not None and terminal_status != "COMPLETED":
+        return OUTCOME_PROTOCOL
+    if len(approval_statuses) >= MAX_PROBE_APPROVAL_REQUESTS and terminal_status is None:
+        return OUTCOME_LIMIT
+    if ApprovalHandlingStatus.RESPONSE_UNKNOWN in approval_statuses and (terminal_status is not None or request_dequeued):
+        return OUTCOME_AMBIGUOUS
+    if deny_response_count > 0:
+        return OUTCOME_APPROVAL_FIRST
+    if terminal_status is not None and not request_dequeued:
+        return OUTCOME_TERMINAL_FIRST
+    if request_dequeued:
+        return OUTCOME_APPROVAL_FIRST
+    return OUTCOME_WATCHDOG
+
+
 async def observe_probe_turn(
     bridge: CodexApprovalBridge, client: SyntheticApprovalClient, operator: DenyOnlyApprovalOperator,
     *, terminal_timeout: float = 0.5,
 ) -> ProbeObservation:
-    """Race approval observation and exact-turn terminal observation."""
-    first_observed = asyncio.Event()
-    limit_reached = asyncio.Event()
+    """Observe both sides and classify only from completed protocol facts."""
     approval_results: list[ApprovalHandlingStatus] = []
+    request_dequeued = False
 
     async def observe_approvals() -> None:
+        nonlocal request_dequeued
         while len(approval_results) < MAX_PROBE_APPROVAL_REQUESTS:
             try:
                 result = await bridge.handle_next()
             except ApprovalError:
                 return
             approval_results.append(result.status)
-            # RESPONSE_UNKNOWN means a request was dequeued in a terminal race;
-            # it is evidence for the ambiguous class, but never a response.
-            first_observed.set()
-            if result.status is not ApprovalHandlingStatus.DENIED:
+            request_dequeued = True
+            if result.status is ApprovalHandlingStatus.RESPONSE_UNKNOWN:
                 return
             if len(approval_results) == MAX_PROBE_APPROVAL_REQUESTS:
-                limit_reached.set()
                 return
-        return
 
     approval_task = asyncio.create_task(observe_approvals())
     terminal_task = asyncio.create_task(client.wait_terminal())
-    first_task = asyncio.create_task(first_observed.wait())
-    limit_task = asyncio.create_task(limit_reached.wait())
+    same_tick_fixture = client.terminal.is_set() and not client.queue.empty()
     observer_joined = True
     terminal_status: str | None = None
     try:
-        done, _ = await asyncio.wait((first_task, terminal_task, limit_task), return_when=asyncio.FIRST_COMPLETED)
-        both = first_task in done and terminal_task in done
-        if not terminal_task.done() and len(approval_results) >= MAX_PROBE_APPROVAL_REQUESTS:
-            outcome = OUTCOME_LIMIT
-        elif both:
-            terminal_status = terminal_task.result()
-            # A successful response proves the approval event won before the
-            # terminal event, even if both waiter continuations were resumed
-            # in the same scheduler turn.  A still-pending request means the
-            # bridge observed the terminal/request race before dispatch.
-            outcome = OUTCOME_APPROVAL_FIRST if client.responses else OUTCOME_AMBIGUOUS
-        elif terminal_task in done:
-            terminal_status = terminal_task.result()
-            outcome = OUTCOME_PROTOCOL if terminal_status != "COMPLETED" else OUTCOME_TERMINAL_FIRST
-        else:
-            outcome = OUTCOME_APPROVAL_FIRST
-            follow_done, _ = await asyncio.wait(
-                (terminal_task, limit_task), timeout=terminal_timeout, return_when=asyncio.FIRST_COMPLETED,
+        if same_tick_fixture:
+            # Freeze the synthetic fact set before either waiter can win the
+            # scheduler: a queued request and terminal are concurrent facts.
+            await asyncio.wait_for(asyncio.shield(approval_task), terminal_timeout)
+            terminal_status = await terminal_task
+            outcome = classify_race(
+                terminal_status=terminal_status, approval_statuses=tuple(approval_results),
+                deny_response_count=client.deny_response_count, request_dequeued=True,
             )
-            if limit_task in follow_done:
-                outcome = OUTCOME_LIMIT
-            elif terminal_task in follow_done:
-                terminal_status = terminal_task.result()
-                if terminal_status != "COMPLETED":
-                    outcome = OUTCOME_PROTOCOL
-            else:
-                outcome = OUTCOME_WATCHDOG
+            return ProbeObservation(
+                outcome, terminal_status, len(operator.captures), client.deny_response_count,
+                client.allow_response_count, True, tuple(approval_results),
+            )
+        done, _ = await asyncio.wait((approval_task, terminal_task), timeout=terminal_timeout, return_when=asyncio.FIRST_COMPLETED)
+        if terminal_task in done:
+            terminal_status = terminal_task.result()
+        # Let a completed approval response (or RESPONSE_UNKNOWN dequeue) be
+        # observed before taking the final fact snapshot.
+        if approval_task not in done and terminal_task in done:
+            await asyncio.sleep(0)
+        if not terminal_task.done() and approval_task.done() and len(approval_results) >= MAX_PROBE_APPROVAL_REQUESTS:
+            terminal_status = None
+        elif terminal_task.done() and terminal_status is None:
+            terminal_status = terminal_task.result()
+        outcome = classify_race(
+            terminal_status=terminal_status,
+            approval_statuses=tuple(approval_results),
+            deny_response_count=client.deny_response_count,
+            request_dequeued=request_dequeued,
+            converged=terminal_task.done() or approval_task.done() or bool(done),
+        )
     finally:
         observer_joined = await _cancel_and_join(approval_task) and observer_joined
-        await _cancel_and_join(first_task)
-        await _cancel_and_join(limit_task)
         if not terminal_task.done():
             observer_joined = False
             await _cancel_and_join(terminal_task)
@@ -454,9 +570,10 @@ async def observe_probe_turn(
         outcome,
         terminal_status,
         len(operator.captures),
-        len(client.responses),
+        client.deny_response_count,
         client.allow_response_count,
         observer_joined and approval_task.done(),
+        tuple(approval_results),
     )
 
 
@@ -467,6 +584,7 @@ class FreshProbeRun:
     isolated_state: Path
     sqlite: Path
     logs: Path
+    controller: Path
     workdir: Path
     sentinel: Path
     probe_recovery: Path
@@ -483,10 +601,11 @@ class FreshProbeRun:
         sqlite = isolated / "sqlite"
         logs = isolated / "logs"
         workdir = root / "workdir"
-        for directory in (state_parent, isolated, sqlite, logs, workdir):
+        controller = root / "controller"
+        for directory in (state_parent, isolated, sqlite, logs, workdir, controller):
             directory.mkdir(mode=0o700)
         sentinel = root / "outside-workdir-sentinel"
-        return cls(root, state_parent, isolated, sqlite, logs, workdir, sentinel, root / "probe-recovery.json", root / "wire-command-recovery.json", root / "probe-result.json", root / "probe-latch.json")
+        return cls(root, state_parent, isolated, sqlite, logs, controller, workdir, sentinel, root / "probe-recovery.json", root / "wire-command-recovery.json", root / "probe-result.json", root / "probe-latch.json")
 
 
 @dataclass
@@ -497,9 +616,12 @@ class FutureProbeBudget:
     thread_start_calls: int = 0
     thread_resume_calls: int = 0
     turn_start_calls: int = 0
+    approval_deny_responses: int = 0
+    approval_total_responses: int = 0
     thread_delete_calls: int = 0
     thread_read_calls: int = 0
     thread_list_calls: int = 0
+    interrupt_calls: int = 0
     approval_allow_responses: int = 0
 
     def record(self, name: str) -> None:
@@ -508,11 +630,22 @@ class FutureProbeBudget:
         setattr(self, name, getattr(self, name) + 1)
         limits = {
             "model_list_calls": 1, "thread_start_calls": 1, "thread_resume_calls": 0,
-            "turn_start_calls": 1, "thread_delete_calls": 0, "thread_read_calls": 0,
-            "thread_list_calls": 0, "approval_allow_responses": 0,
+            "turn_start_calls": 1, "approval_deny_responses": MAX_PROBE_APPROVAL_REQUESTS,
+            "approval_total_responses": MAX_PROBE_APPROVAL_REQUESTS,
+            "thread_delete_calls": 0, "thread_read_calls": 0, "thread_list_calls": 0,
+            "interrupt_calls": 0, "approval_allow_responses": 0,
         }
         if getattr(self, name) > limits[name]:
             raise AssertionError("FUTURE_PROBE_BUDGET_EXCEEDED")
+
+    def record_approval_deny(self) -> None:
+        if self.approval_deny_responses >= MAX_PROBE_APPROVAL_REQUESTS:
+            raise AssertionError("PROBE_APPROVAL_REQUEST_LIMIT_EXCEEDED")
+        self.record("approval_deny_responses")
+        self.record("approval_total_responses")
+
+    def record_approval_allow(self) -> None:
+        raise AssertionError("ALLOW_DECISION_PATHS=0")
 
 
 def write_sanitized_result(path: Path, value: Mapping[str, Any]) -> None:
@@ -528,56 +661,253 @@ def create_probe_latch(path: Path, *, source_sha: str, source_tree: str) -> None
     write_exclusive_private_json(path, {"format": 1, "status": "RESERVED_BEFORE_FIRST_RPC", "source_sha": source_sha, "source_tree": source_tree})
 
 
+def validate_future_source_authority(repository: Path = Path("/opt/codex-control")) -> tuple[str, str]:
+    """Validate architect-supplied source before latch creation or any RPC."""
+    expected_head = os.environ.get(EXPECTED_HEAD_ENV)
+    expected_tree = os.environ.get(EXPECTED_TREE_ENV)
+    if not expected_head or not expected_tree or len(expected_head) != 40 or len(expected_tree) != 40:
+        raise RuntimeError("P7C7_SOURCE_AUTHORITY_UNSET")
+    if repository != Path("/opt/codex-control") or repository.resolve() != Path("/opt/codex-control"):
+        raise RuntimeError("P7C7_CANONICAL_REPOSITORY_REQUIRED")
+    try:
+        head = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip()
+        tree = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD^{tree}"], text=True).strip()
+        clean = subprocess.check_output(["git", "-C", str(repository), "status", "--porcelain"], text=True)
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise RuntimeError("P7C7_SOURCE_GATE_UNAVAILABLE") from error
+    if head != expected_head or tree != expected_tree or clean:
+        raise RuntimeError("P7C7_SOURCE_GATE_MISMATCH")
+    return head, tree
+
+
+def preflight_future_probe_boundaries(run: FreshProbeRun) -> None:
+    protected = (Path("/opt/codex-control"), Path("/root/.codex_second"), Path("/root/.codexcontrol"))
+    for path in (run.root, run.state_parent, run.isolated_state, run.sqlite, run.logs, run.controller, run.workdir, run.sentinel):
+        if any(path == other or other in path.parents or path in other.parents for other in protected):
+            raise RuntimeError("P7C7_PROBE_PATH_OVERLAP")
+    if not _private_directory(run.root) or not _private_directory(run.workdir):
+        raise RuntimeError("P7C7_PROBE_ROOT_AUTHORITY_INVALID")
+    if run.sentinel.exists() or REAL_PROBE_LATCH.exists() or REAL_PROBE_RESULT.exists():
+        raise RuntimeError("P7C7_PREEXISTING_PROBE_ARTIFACT")
+
+
+def require_dedicated_future_process_group() -> tuple[int, int, int]:
+    """The authorized runner must itself be the single session/group leader."""
+    pid = os.getpid()
+    pgid = os.getpgid(pid)
+    sid = os.getsid(pid)
+    parent_pgid = os.getpgid(os.getppid())
+    if pid != pgid or pid != sid or pgid <= 1 or pgid == parent_pgid:
+        raise RuntimeError("P7C7_DEDICATED_PROCESS_GROUP_REQUIRED")
+    return pid, pgid, sid
+
+
+async def _drain_future_approvals(bridge: CodexApprovalBridge, statuses: list[ApprovalHandlingStatus]) -> None:
+    while len(statuses) < MAX_PROBE_APPROVAL_REQUESTS:
+        try:
+            result = await bridge.handle_next()
+        except ApprovalError:
+            return
+        statuses.append(result.status)
+        if result.status is not ApprovalHandlingStatus.DENIED:
+            return
+
+
+async def future_real_deny_only_approval_probe() -> dict[str, Any]:
+    """Complete future path; callable only under the separately frozen gate."""
+    if os.environ.get(AUTHORIZED_ENV) != AUTHORIZED_ENV:
+        raise unittest.SkipTest("P7C7_REAL_PROBE_GATE_DISABLED")
+    accepted_head, accepted_tree = validate_future_source_authority()
+    require_dedicated_future_process_group()
+    if not _private_directory(REAL_PROBE_LATCH.parent):
+        raise RuntimeError("P7C7_LATCH_PARENT_INVALID")
+    if REAL_PROBE_LATCH.exists() or REAL_PROBE_RESULT.exists():
+        raise RuntimeError("P7C7_ONE_SHOT_ALREADY_CONSUMED")
+    temporary_parent = Path(tempfile.mkdtemp(prefix="codexcontrol-p7c7-real-", dir="/tmp"))
+    run = FreshProbeRun.materialize(temporary_parent)
+    preflight_future_probe_boundaries(run)
+    create_probe_latch(REAL_PROBE_LATCH, source_sha=accepted_head, source_tree=accepted_tree)
+    write_exclusive_private_json(run.probe_recovery, {"format": 1, "status": "REAL_PROBE_RECOVERY_ARMED", "source_sha": accepted_head, "source_tree": accepted_tree})
+
+    profile = CodexProfile("p7c7-fresh-probe", "/root/.codex_second", "P7.C7 fresh disposable", str(run.isolated_state))
+    authority = IsolationPathAuthority(
+        (profile,), controller_db_root=str(run.controller), repository_root="/opt/codex-control",
+        protected_roots=("/root/.codexcontrol",),
+    )
+    manager = CodexRuntimeManager([profile], client_version="p7c7-deny-only-probe", isolation_authority=authority)
+    budget = FutureProbeBudget()
+    runtime = await manager.acquire(profile.profile_id)
+    original_request = runtime.client.request
+    original_response = runtime.client.respond_server_request
+
+    async def counted_request(method: str, params: Any) -> Any:
+        methods = {"model/list": "model_list_calls", "thread/start": "thread_start_calls", "turn/start": "turn_start_calls"}
+        action = methods.get(method)
+        if action is None:
+            raise AssertionError("UNSUPPORTED_FUTURE_PROBE_ACTION")
+        budget.record(action)
+        return await original_request(method, params)
+
+    async def counted_response(request: InboundServerRequest, result: dict[str, Any]) -> None:
+        await original_response(request, result)
+        if result.get("decision") in ("accept", "approved") or result.get("permissions"):
+            budget.record_approval_allow()
+        budget.record_approval_deny()
+
+    runtime.client.request = counted_request
+    runtime.client.respond_server_request = counted_response
+    catalog_adapter = CodexModelCatalogAdapter(manager)
+    catalog = await catalog_adapter.get_catalog(profile.profile_id)
+    defaults = tuple(model for model in catalog.models if model.is_default and not model.hidden)
+    if len(defaults) != 1:
+        raise RuntimeError("P7C7_MODEL_DEFAULT_AMBIGUOUS")
+    model = defaults[0]
+    thread_lifecycle = CodexThreadLifecycleAdapter(manager, catalog_adapter)
+    turn_lifecycle = CodexTurnLifecycleAdapter(manager, catalog_adapter)
+    thread = await thread_lifecycle.start(
+        profile.profile_id, model_id=model.model_id, reasoning_effort=model.default_reasoning_effort,
+        working_directory=TrustedWorkingDirectory(str(run.workdir)),
+    )
+    if thread.status is not ThreadOperationStatus.START_CONFIRMED or thread.binding is None:
+        raise RuntimeError("P7C7_THREAD_START_NOT_CONFIRMED")
+    turn_future = asyncio.get_running_loop().create_future()
+    operator = DenyOnlyApprovalOperator(
+        thread_id=thread.binding.thread_id, turn_id=turn_future, cwd=str(run.workdir), sentinel=str(run.sentinel),
+        wire_authority=WireCommandAuthority(run.wire_recovery),
+    )
+    bridge = CodexApprovalBridge(profile_id=profile.profile_id, client=runtime.client, operator=operator)
+    approval_statuses: list[ApprovalHandlingStatus] = []
+    approval_task = asyncio.create_task(_drain_future_approvals(bridge, approval_statuses))
+    turn = await turn_lifecycle.start_turn(
+        thread_binding=thread.binding, model_id=model.model_id, reasoning_effort=model.default_reasoning_effort,
+        user_text=candidate_probe_prompt(str(run.sentinel)), working_directory=TrustedWorkingDirectory(str(run.workdir)),
+    )
+    if turn.status is not TurnStartStatus.CONFIRMED or turn.binding is None:
+        raise RuntimeError("P7C7_PRIMARY_TURN_NOT_CONFIRMED")
+    turn_future.set_result(turn.binding.turn_id)
+    terminal = await turn_lifecycle.wait_turn(turn.binding)
+    await _cancel_and_join(approval_task)
+    outcome = classify_race(
+        terminal_status=terminal.status.value, approval_statuses=tuple(approval_statuses),
+        deny_response_count=budget.approval_deny_responses,
+        request_dequeued=bool(approval_statuses),
+    )
+    boundary = scan_fresh_run_boundary(run)
+    result = make_sanitized_result(
+        terminal_status=terminal.status.value, operator=operator, run=run, boundary=boundary,
+        outcome=outcome, source_sha=accepted_head, source_tree=accepted_tree, budget=budget,
+    )
+    result["model_list_calls"] = budget.model_list_calls
+    result["thread_start_calls"] = budget.thread_start_calls
+    result["turn_start_calls"] = budget.turn_start_calls
+    validate_sanitized_result(result)
+    await manager.shutdown_profile(profile.profile_id)
+    write_sanitized_result(REAL_PROBE_RESULT, result)
+    return result
+
+
 def _relative(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+def sentinel_touch_authority(path: Path) -> str:
+    try:
+        before = path.lstat()
+        after = path.lstat()
+    except FileNotFoundError:
+        return SENTINEL_ABSENT
+    except OSError:
+        return "SENTINEL_INSPECTION_FAILED"
+    safe = (
+        stat.S_ISREG(before.st_mode)
+        and before.st_uid == 0 and before.st_gid == 0 and before.st_nlink == 1
+        and not (stat.S_IMODE(before.st_mode) & (stat.S_IWGRP | stat.S_IWOTH))
+        and before.st_size == 0
+        and (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+        and after.st_size == 0
+    )
+    return "EXPECTED_TOUCH" if safe else "UNEXPECTED_PROBE_MUTATION"
+
+
+def _safe_runtime_payload(path: Path) -> tuple[bool, int]:
+    """Validate runtime-owned roots without classifying normal DB/log files."""
+    errors = 0
+    if not _private_directory(path):
+        return False, 1
+    for directory, dirs, files in os.walk(path, topdown=True, followlinks=False):
+        for name in (*dirs, *files):
+            entry = Path(directory) / name
+            try:
+                value = entry.lstat()
+            except OSError:
+                errors += 1
+                continue
+            if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode) and not stat.S_ISDIR(value.st_mode):
+                errors += 1
+            if value.st_uid != 0 or value.st_gid != 0 or stat.S_IMODE(value.st_mode) & (stat.S_IWGRP | stat.S_IWOTH):
+                errors += 1
+    return errors == 0, errors
+
+
 def scan_fresh_run_boundary(run: FreshProbeRun, *, process_references: Sequence[Path] = ()) -> dict[str, Any]:
-    allowed = {
-        "state-parent", "state-parent/p7c7-isolated-state", "state-parent/p7c7-isolated-state/sqlite",
-        "state-parent/p7c7-isolated-state/logs", "workdir", "outside-workdir-sentinel",
-        "probe-recovery.json", "wire-command-recovery.json", "probe-result.json", "probe-latch.json",
-    }
+    fixed = {"state-parent", "state-parent/p7c7-isolated-state", "controller", "workdir", "outside-workdir-sentinel",
+             "probe-recovery.json", "wire-command-recovery.json", "probe-result.json", "probe-latch.json"}
     unexpected: list[str] = []
-    for directory, dirs, files in os.walk(run.root, topdown=True, followlinks=False):
-        base = Path(directory)
-        for name in list(dirs):
-            path = base / name
-            relative = _relative(path, run.root)
-            if path.is_symlink() or relative not in allowed:
-                unexpected.append(relative)
-            if path.is_symlink():
-                dirs.remove(name)
-        for name in files:
-            path = base / name
-            relative = _relative(path, run.root)
-            if path.is_symlink() or relative not in allowed:
-                unexpected.append(relative)
-            elif path.stat().st_nlink != 1:
-                unexpected.append(relative)
+    for entry in run.root.iterdir():
+        relative = _relative(entry, run.root)
+        if relative in fixed:
+            continue
+        if relative == "state-parent/p7c7-isolated-state":
+            continue
+        unexpected.append(relative)
+    for required_directory in (run.state_parent, run.isolated_state, run.sqlite, run.logs, run.controller, run.workdir):
+        if not _private_directory(required_directory):
+            unexpected.append(_relative(required_directory, run.root))
+    runtime_ok, runtime_errors = True, 0
+    for runtime_root in (run.sqlite, run.logs):
+        okay, errors = _safe_runtime_payload(runtime_root)
+        runtime_ok, runtime_errors = runtime_ok and okay, runtime_errors + errors
+    for directory, dirs, files in os.walk(run.workdir, topdown=True, followlinks=False):
+        for name in (*dirs, *files):
+            unexpected.append(_relative(Path(directory) / name, run.root))
+    for authority in (run.probe_recovery, run.wire_recovery, run.result, run.latch):
+        if authority.exists() and (authority.is_symlink() or not _private_regular(authority)):
+            unexpected.append(_relative(authority, run.root))
     for reference in process_references:
         if reference == run.root or run.root in reference.parents:
             unexpected.append("PROCESS_REFERENCE")
-    present = run.sentinel.is_file() and not run.sentinel.is_symlink()
+    touch_class = sentinel_touch_authority(run.sentinel)
+    if touch_class == "UNEXPECTED_PROBE_MUTATION":
+        unexpected.append("SENTINEL")
+    if not runtime_ok:
+        unexpected.append("RUNTIME_AUTHORITY")
     return {
-        "sentinel_present": present,
+        "sentinel_present": touch_class in ("EXPECTED_TOUCH", "UNEXPECTED_PROBE_MUTATION"),
+        "sentinel_touch_authority_class": touch_class,
+        "runtime_owned_state_valid": runtime_ok,
+        "runtime_owned_scan_errors": runtime_errors,
         "classification": "UNEXPECTED_PROBE_MUTATION" if unexpected else "BOUNDARY_ONLY_EXPECTED_MUTATION",
         "unexpected_count": len(unexpected),
         "unexpected_labels": tuple(unexpected),
     }
 
 
-def make_sanitized_result(*, terminal_status: str, operator: DenyOnlyApprovalOperator, run: FreshProbeRun, boundary: Mapping[str, Any], outcome: str, process_members: Sequence[int] = ()) -> dict[str, Any]:
-    wire_sha = operator.captures[0].wire_command_sha256 if operator.captures else None
+def make_sanitized_result(*, terminal_status: str, operator: DenyOnlyApprovalOperator, run: FreshProbeRun, boundary: Mapping[str, Any], outcome: str, process_members: Sequence[int] = (), process_scan_errors: int = 0, source_sha: str = ARCHITECT_BASE_SHA, source_tree: str = ARCHITECT_BASE_TREE, budget: FutureProbeBudget | None = None) -> dict[str, Any]:
+    wire_sha = None
     vector_length = None
+    vector_class = SENTINEL_VECTOR_UNKNOWN
+    sentinel_class = SENTINEL_ABSENT
     if run.wire_recovery.exists():
-        wire = read_bounded_private_json(run.wire_recovery)
+        wire = read_wire_authority(run.wire_recovery)
+        wire_sha = wire["wire_command_sha256"]
         vector = recover_wire_vector(wire["wire_command_plaintext"])
         vector_length = vector.vector_length if vector.established else None
+        vector_class = "ESTABLISHED" if vector.established else SENTINEL_VECTOR_UNKNOWN
+        sentinel_class = classify_sentinel_reference(wire["wire_command_plaintext"], operator.sentinel)
     result = {
         "status": "OBSERVATION_ONLY",
-        "source_sha": ARCHITECT_BASE_SHA,
-        "source_tree": ARCHITECT_BASE_TREE,
+        "accepted_source_sha": source_sha,
+        "accepted_source_tree": source_tree,
         "fresh_thread_sha256": _sha256(operator.thread_id),
         "fresh_turn_sha256": _sha256(operator.turn_id.result()) if operator.turn_id.done() else None,
         "request_count": len(operator.captures),
@@ -587,14 +917,26 @@ def make_sanitized_result(*, terminal_status: str, operator: DenyOnlyApprovalOpe
         "terminal_status": terminal_status,
         "wire_command_sha256": wire_sha,
         "wire_vector_length": vector_length,
+        "wire_vector_reconstruction_class": vector_class,
         "thread_identity_match": all(c.thread_match for c in operator.captures),
         "turn_identity_match": all(c.turn_match for c in operator.captures),
         "cwd_identity_match": all(c.cwd_match for c in operator.captures),
-        "sentinel_identity_match": all(c.sentinel_match for c in operator.captures),
+        "sentinel_reference_class": sentinel_class,
         "sentinel_present": bool(boundary["sentinel_present"]),
-        "boundary_mutation_classification": boundary["classification"],
-        "process_group_final_active_members": tuple(process_members),
-        "real_effect_counters": {"model_list": 0, "thread_start": 0, "turn_start": 0, "approval_allow": 0, "thread_delete": 0},
+        "sentinel_touch_authority_class": boundary["sentinel_touch_authority_class"],
+        "boundary_mutation_class": boundary["classification"],
+        "model_list_calls": 0,
+        "thread_start_calls": 0,
+        "thread_resume_calls": 0,
+        "turn_start_calls": 0,
+        "approval_deny_responses": budget.approval_deny_responses if budget is not None else operator.response_count,
+        "approval_allow_responses": budget.approval_allow_responses if budget is not None else 0,
+        "interrupt_calls": 0,
+        "thread_delete_calls": 0,
+        "thread_read_calls": 0,
+        "thread_list_calls": 0,
+        "process_group_final_active_count": len(process_members),
+        "process_group_scan_errors": process_scan_errors,
     }
     if "wire_command_plaintext" in result:
         raise AssertionError("RAW_COMMAND_IN_SANITIZED_RESULT")
@@ -603,121 +945,154 @@ def make_sanitized_result(*, terminal_status: str, operator: DenyOnlyApprovalOpe
 
 def validate_sanitized_result(value: Mapping[str, Any]) -> None:
     required = {
-        "status", "source_sha", "source_tree", "fresh_thread_sha256", "fresh_turn_sha256", "request_count",
+        "status", "accepted_source_sha", "accepted_source_tree", "fresh_thread_sha256", "fresh_turn_sha256", "request_count",
         "deny_response_count", "allow_response_count", "primary_outcome_class", "terminal_status",
-        "wire_command_sha256", "wire_vector_length", "thread_identity_match", "turn_identity_match",
-        "cwd_identity_match", "sentinel_present", "boundary_mutation_classification",
-        "sentinel_identity_match",
-        "process_group_final_active_members", "real_effect_counters",
+        "wire_command_sha256", "wire_vector_length", "wire_vector_reconstruction_class",
+        "thread_identity_match", "turn_identity_match", "cwd_identity_match", "sentinel_reference_class",
+        "terminal_status", "sentinel_present", "sentinel_touch_authority_class", "boundary_mutation_class",
+        "model_list_calls", "thread_start_calls", "thread_resume_calls", "turn_start_calls",
+        "approval_deny_responses", "approval_allow_responses", "interrupt_calls", "thread_delete_calls",
+        "thread_read_calls", "thread_list_calls", "process_group_final_active_count", "process_group_scan_errors",
     }
-    if set(value) != required or value["allow_response_count"] != 0:
+    if set(value) != required or value["allow_response_count"] != 0 or value["approval_allow_responses"] != 0:
         raise AssertionError("SANITIZED_RESULT_SCHEMA_INVALID")
+    for key in ("accepted_source_sha", "accepted_source_tree"):
+        if not isinstance(value[key], str) or len(value[key]) != 40 or any(c not in "0123456789abcdef" for c in value[key]):
+            raise AssertionError("SANITIZED_RESULT_SOURCE_INVALID")
+    for key in ("fresh_thread_sha256", "fresh_turn_sha256", "wire_command_sha256"):
+        if value[key] is not None and (not isinstance(value[key], str) or SHA256_RE.fullmatch(value[key]) is None):
+            raise AssertionError("SANITIZED_RESULT_HASH_INVALID")
     serialized = json.dumps(dict(value), sort_keys=True)
-    if "wire_command_plaintext" in serialized or "command: " in serialized:
+    if "wire_command_plaintext" in value or any(
+        isinstance(item, str) and item.startswith("command: ")
+        for item in value.values()
+    ) or any(key in value for key in ("thread_id", "turn_id", "wire_command", "sentinel_path")):
         raise AssertionError("RAW_COMMAND_IN_SANITIZED_RESULT")
 
 
 @dataclass(frozen=True)
 class ProcessGroupSnapshot:
     active_members: tuple[int, ...]
+    zombie_members: tuple[int, ...]
     scan_errors: int
 
 
-def _proc_group_session(pid: int) -> tuple[int, int] | None:
+def _proc_group_session(pid: int) -> tuple[str, int, int] | None:
     try:
         raw = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
         tail = raw.rsplit(")", 1)[1].split()
-        return int(tail[2]), int(tail[3])
+        if len(tail) < 4 or len(tail[0]) != 1:
+            return None
+        return tail[0], int(tail[2]), int(tail[3])
     except (OSError, ValueError, IndexError):
         return None
 
 
 def inspect_process_group(pgid: int) -> ProcessGroupSnapshot:
     members: list[int] = []
+    zombies: list[int] = []
     errors = 0
     try:
         names = os.listdir("/proc")
     except OSError:
-        return ProcessGroupSnapshot((), 1)
+        return ProcessGroupSnapshot((), (), 1)
     for name in names:
         if not name.isdigit():
             continue
         pid = int(name)
         value = _proc_group_session(pid)
         if value is None:
+            errors += 1
             continue
-        if value[0] == pgid:
+        if value[1] == pgid and value[0] == "Z":
+            zombies.append(pid)
+        elif value[1] == pgid:
             members.append(pid)
-    return ProcessGroupSnapshot(tuple(sorted(members)), errors)
+    return ProcessGroupSnapshot(tuple(sorted(members)), tuple(sorted(zombies)), errors)
+
+
+class ExactProcessGroupSignalAuthority:
+    """The sole signal path for one owned process group."""
+
+    def __init__(self, pgid: int, parent_pgid: int, *, killpg: Any = os.killpg) -> None:
+        if type(pgid) is not int or pgid <= 1 or pgid == parent_pgid:
+            raise ValueError("PROCESS_GROUP_SIGNAL_AUTHORITY_INVALID")
+        self.pgid = pgid
+        self.parent_pgid = parent_pgid
+        self.killpg = killpg
+        self.history: list[tuple[int, int]] = []
+
+    def dispatch(self, sig: int) -> None:
+        if sig not in (signal.SIGTERM, signal.SIGKILL):
+            raise ValueError("PROCESS_GROUP_SIGNAL_INVALID")
+        if any(previous == sig for _, previous in self.history):
+            raise AssertionError("PROCESS_GROUP_SIGNAL_ALREADY_DISPATCHED")
+        self.killpg(self.pgid, sig)
+        self.history.append((self.pgid, sig))
 
 
 def derive_process_group_authority(process: subprocess.Popen[Any]) -> dict[str, int | str]:
     pid = process.pid
     pgid = os.getpgid(pid)
     sid = os.getsid(pid)
-    if pid != pgid or pid != sid:
+    parent_pgid = os.getpgrp()
+    if pid != pgid or pid != sid or pgid <= 1 or pgid == parent_pgid:
         raise AssertionError("PROCESS_GROUP_AUTHORITY_INVALID")
-    return {"pid": pid, "pgid": pgid, "sid": sid, "authority": "PASS"}
+    return {"pid": pid, "pgid": pgid, "sid": sid, "parent_pgid": parent_pgid, "authority": "PASS"}
 
 
-def run_synthetic_watchdog(command: Sequence[str], *, deadline: float = 0.5, terminate_grace: float = 0.1, kill_grace: float = 0.2) -> dict[str, Any]:
+def run_synthetic_watchdog(command: Sequence[str], *, deadline: float = 0.5, terminate_grace: float = 0.1, kill_grace: float = 0.2, killpg: Any | None = None) -> dict[str, Any]:
     process = subprocess.Popen(list(command), close_fds=True, start_new_session=True)
     authority = derive_process_group_authority(process)
     pgid = int(authority["pgid"])
-    term_count = 0
-    kill_count = 0
+    signal_authority = ExactProcessGroupSignalAuthority(pgid, int(authority["parent_pgid"]), killpg=killpg or os.killpg)
     status = "PROCESS_COMPLETED"
     try:
         try:
             process.wait(timeout=deadline)
         except subprocess.TimeoutExpired:
             status = "PROCESS_WATCHDOG_TIMEOUT"
-            term_count = 1
-            os.killpg(pgid, signal.SIGTERM)
+            signal_authority.dispatch(signal.SIGTERM)
             try:
                 process.wait(timeout=terminate_grace)
             except subprocess.TimeoutExpired:
-                kill_count = 1
-                os.killpg(pgid, signal.SIGKILL)
-                process.wait(timeout=kill_grace)
-        snapshot = inspect_process_group(pgid)
-        if snapshot.active_members:
-            if status == "PROCESS_COMPLETED":
-                status = "PROCESS_GROUP_NOT_QUIESCENT"
-            term_count = min(term_count + 1, 1)
-            try:
-                os.killpg(pgid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            deadline_at = time.monotonic() + terminate_grace
-            while time.monotonic() < deadline_at:
-                snapshot = inspect_process_group(pgid)
-                if not snapshot.active_members:
-                    break
-                time.sleep(0.01)
-            if snapshot.active_members:
-                kill_count = min(kill_count + 1, 1)
+                signal_authority.dispatch(signal.SIGKILL)
                 try:
-                    os.killpg(pgid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                time.sleep(min(kill_grace, 0.05))
+                    process.wait(timeout=kill_grace)
+                except subprocess.TimeoutExpired:
+                    status = "PROCESS_GROUP_NOT_QUIESCENT"
+        snapshot = inspect_process_group(pgid)
+        if snapshot.scan_errors:
+            status = "PROCESS_GROUP_SCAN_ERROR"
+        if snapshot.active_members:
+            if not any(sig == signal.SIGTERM for _, sig in signal_authority.history):
+                signal_authority.dispatch(signal.SIGTERM)
+                time.sleep(min(terminate_grace, 0.05))
                 snapshot = inspect_process_group(pgid)
+            if snapshot.active_members and not any(sig == signal.SIGKILL for _, sig in signal_authority.history):
+                signal_authority.dispatch(signal.SIGKILL)
+                try:
+                    process.wait(timeout=kill_grace)
+                except subprocess.TimeoutExpired:
+                    pass
+                snapshot = inspect_process_group(pgid)
+            if snapshot.active_members:
+                status = "PROCESS_GROUP_NOT_QUIESCENT"
         return {
             "status": status,
             "authority": authority,
-            "term_count": term_count,
-            "kill_count": kill_count,
+            "term_count": sum(sig == signal.SIGTERM for _, sig in signal_authority.history),
+            "kill_count": sum(sig == signal.SIGKILL for _, sig in signal_authority.history),
+            "signal_history": tuple(signal_authority.history),
             "final_active_members": snapshot.active_members,
+            "final_zombie_members": snapshot.zombie_members,
             "final_scan_errors": snapshot.scan_errors,
         }
     finally:
-        if process.poll() is None and kill_count == 0:
-            try:
-                os.killpg(pgid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait()
+        # Cleanup never contains a hidden signal path.  The caller must have
+        # explicitly dispatched TERM/KILL through the authority above.
+        if process.poll() is None:
+            process.wait(timeout=max(terminate_grace, kill_grace, 1.0))
 
 
 class DenyOnlyApprovalOfflineTests(unittest.IsolatedAsyncioTestCase):
@@ -756,23 +1131,43 @@ class DenyOnlyApprovalOfflineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.operator.allow_count, 0)
         self.assertEqual(self.operator.captures[0].request_count, 1)
         self.assertEqual(self.operator.captures[0].kind, ApprovalKind.COMMAND_EXECUTION)
-        self.assertTrue(self.operator.captures[0].sentinel_match is False)
+        self.assertEqual(self.operator.captures[0].sentinel_reference_class, SENTINEL_ABSENT)
         self.assertTrue(self.operator.captures[0].thread_match)
         self.assertTrue(_private_regular(self.run.wire_recovery))
-        raw = read_bounded_private_json(self.run.wire_recovery)
+        raw = read_wire_authority(self.run.wire_recovery)
         self.assertEqual(raw["wire_command_sha256"], _sha256("synthetic-executable --bounded 30"))
 
-    async def test_identity_mismatches_and_missing_values_are_denied(self) -> None:
-        cases = [
-            self._params(thread="wrong-thread"), self._params(thread=None),
-            self._params(turn="wrong-turn"), self._params(turn=None),
-            self._params(cwd="/synthetic/wrong-cwd"),
-        ]
+    async def test_wrong_thread_does_not_consume_then_exact_request_captures(self) -> None:
+        result = await self._deny(self._params(thread="wrong-thread"), request_id="wrong-thread")
+        self.assertEqual(result.status, ApprovalHandlingStatus.DENIED)
+        self.assertFalse(self.run.wire_recovery.exists())
+        result = await self._deny(self._params(), request_id="exact-after-thread")
+        self.assertEqual(result.status, ApprovalHandlingStatus.DENIED)
+        self.assertTrue(self.run.wire_recovery.exists())
+
+    async def test_wrong_turn_does_not_consume_then_exact_request_captures(self) -> None:
+        result = await self._deny(self._params(turn="wrong-turn"), request_id="wrong-turn")
+        self.assertEqual(result.status, ApprovalHandlingStatus.DENIED)
+        self.assertFalse(self.run.wire_recovery.exists())
+        result = await self._deny(self._params(), request_id="exact-after-turn")
+        self.assertEqual(result.status, ApprovalHandlingStatus.DENIED)
+        self.assertTrue(self.run.wire_recovery.exists())
+
+    async def test_wrong_cwd_does_not_consume_then_exact_request_captures(self) -> None:
+        result = await self._deny(self._params(cwd="/synthetic/wrong-cwd"), request_id="wrong-cwd")
+        self.assertEqual(result.status, ApprovalHandlingStatus.DENIED)
+        self.assertFalse(self.run.wire_recovery.exists())
+        result = await self._deny(self._params(), request_id="exact-after-cwd")
+        self.assertEqual(result.status, ApprovalHandlingStatus.DENIED)
+        self.assertTrue(self.run.wire_recovery.exists())
+
+    async def test_identity_mismatches_and_missing_values_are_denied_without_authority(self) -> None:
+        cases = [self._params(thread="wrong-thread"), self._params(thread=None), self._params(turn="wrong-turn"), self._params(turn=None), self._params(cwd="/synthetic/wrong-cwd")]
         for index, params in enumerate(cases):
             with self.subTest(index=index):
                 result = await self._deny(params, request_id=f"mismatch-{index}")
                 self.assertEqual(result.status, ApprovalHandlingStatus.DENIED)
-        self.assertEqual(len(self.client.responses), len(cases))
+        self.assertFalse(self.run.wire_recovery.exists())
         self.assertEqual(self.operator.allow_count, 0)
         self.assertTrue(any(not capture.thread_match for capture in self.operator.captures))
         self.assertTrue(any(not capture.turn_match for capture in self.operator.captures))
@@ -863,10 +1258,23 @@ class RaceOfflineTests(unittest.IsolatedAsyncioTestCase):
         await client.enqueue(request)
         client.terminal.set()
         result = await observe_probe_turn(bridge, client, operator)
-        self.assertIn(result.primary_outcome_class, (OUTCOME_AMBIGUOUS, OUTCOME_TERMINAL_FIRST))
+        self.assertEqual(result.primary_outcome_class, OUTCOME_AMBIGUOUS)
         self.assertLessEqual(result.deny_response_count, 1)
         self.assertEqual(result.allow_response_count, 0)
         self.assertTrue(result.observer_joined)
+
+    async def test_response_unknown_is_explicit_ambiguous_state(self) -> None:
+        statuses = (ApprovalHandlingStatus.RESPONSE_UNKNOWN,)
+        self.assertEqual(
+            classify_race(terminal_status="COMPLETED", approval_statuses=statuses, deny_response_count=0, request_dequeued=True),
+            OUTCOME_AMBIGUOUS,
+        )
+
+    async def test_nonconvergence_is_watchdog_class(self) -> None:
+        self.assertEqual(
+            classify_race(terminal_status=None, approval_statuses=(), deny_response_count=0, request_dequeued=False, converged=False),
+            OUTCOME_NONCONVERGENT,
+        )
 
     async def test_protocol_terminal_is_finite(self) -> None:
         _, client, operator, bridge = await self._fixture(terminal_status="FAULTED")
@@ -935,6 +1343,13 @@ class AuthorityAndBoundaryOfflineTests(unittest.TestCase):
         budget = FutureProbeBudget()
         for name in ("model_list_calls", "thread_start_calls", "turn_start_calls"):
             budget.record(name)
+        for _ in range(MAX_PROBE_APPROVAL_REQUESTS):
+            budget.record_approval_deny()
+        self.assertEqual(budget.approval_total_responses, MAX_PROBE_APPROVAL_REQUESTS)
+        with self.assertRaises(AssertionError):
+            budget.record_approval_deny()
+        with self.assertRaises(AssertionError):
+            budget.record_approval_allow()
         with self.assertRaises(AssertionError):
             budget.record("thread_resume_calls")
         with self.assertRaises(AssertionError):
@@ -946,8 +1361,10 @@ class AuthorityAndBoundaryOfflineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="p7c7-boundary-") as directory:
             run = FreshProbeRun.materialize(Path(directory))
             self.assertEqual(scan_fresh_run_boundary(run)["classification"], "BOUNDARY_ONLY_EXPECTED_MUTATION")
+            run.sentinel.touch(mode=0o600)
+            self.assertEqual(scan_fresh_run_boundary(run)["sentinel_touch_authority_class"], "EXPECTED_TOUCH")
             run.sentinel.write_bytes(b"synthetic")
-            self.assertEqual(scan_fresh_run_boundary(run)["classification"], "BOUNDARY_ONLY_EXPECTED_MUTATION")
+            self.assertEqual(scan_fresh_run_boundary(run)["classification"], "UNEXPECTED_PROBE_MUTATION")
             (run.root / "unexpected-second-file").write_bytes(b"synthetic")
             boundary = scan_fresh_run_boundary(run)
             self.assertEqual(boundary["classification"], "UNEXPECTED_PROBE_MUTATION")
@@ -959,10 +1376,42 @@ class AuthorityAndBoundaryOfflineTests(unittest.TestCase):
             self.assertEqual(boundary["classification"], "UNEXPECTED_PROBE_MUTATION")
             self.assertIn("PROCESS_REFERENCE", boundary["unexpected_labels"])
 
+    def test_exact_touch_authority_rejects_nonzero_hardlink_symlink_and_unsafe_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-touch-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            run.sentinel.touch(mode=0o600)
+            self.assertEqual(sentinel_touch_authority(run.sentinel), "EXPECTED_TOUCH")
+            run.sentinel.write_bytes(b"x")
+            self.assertEqual(sentinel_touch_authority(run.sentinel), "UNEXPECTED_PROBE_MUTATION")
+            run.sentinel.unlink()
+            run.sentinel.touch(mode=0o600)
+            hardlink = run.root / "sentinel-hardlink"
+            os.link(run.sentinel, hardlink)
+            self.assertEqual(sentinel_touch_authority(run.sentinel), "UNEXPECTED_PROBE_MUTATION")
+            run.sentinel.unlink()
+            hardlink.unlink()
+            run.sentinel.symlink_to(run.root / "missing-target")
+            self.assertEqual(sentinel_touch_authority(run.sentinel), "UNEXPECTED_PROBE_MUTATION")
+            run.sentinel.unlink()
+            run.sentinel.touch(mode=0o600)
+            run.sentinel.chmod(0o666)
+            self.assertEqual(sentinel_touch_authority(run.sentinel), "UNEXPECTED_PROBE_MUTATION")
+
+    def test_unexpected_root_sibling_and_process_reference_are_command_owned(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-boundary-extra-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            (run.root / "unexpected-sibling").mkdir(mode=0o700)
+            boundary = scan_fresh_run_boundary(run, process_references=[run.root / "workdir"])
+            self.assertEqual(boundary["classification"], "UNEXPECTED_PROBE_MUTATION")
+            self.assertIn("unexpected-sibling", boundary["unexpected_labels"])
+
     def test_sanitized_result_excludes_raw_wire_command(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c7-result-") as directory:
             root = Path(directory)
             run = FreshProbeRun.materialize(root)
+            (run.sqlite / "runtime.sqlite").write_bytes(b"synthetic sqlite payload")
+            (run.logs / "app.log").write_bytes(b"synthetic log payload")
+            self.assertEqual(scan_fresh_run_boundary(run)["classification"], "BOUNDARY_ONLY_EXPECTED_MUTATION")
             future = asyncio.new_event_loop().create_future()
             future.set_result("synthetic-turn-id")
             operator = DenyOnlyApprovalOperator(thread_id="synthetic-thread-id", turn_id=future, cwd=str(run.workdir), sentinel=str(run.sentinel))
@@ -981,10 +1430,47 @@ class RawWireAuthorityOfflineTests(unittest.TestCase):
             run = FreshProbeRun.materialize(root)
             authority = WireCommandAuthority(run.wire_recovery)
             authority.capture_once(thread_id="synthetic-thread", turn_id="synthetic-turn", cwd="/synthetic/cwd", sentinel=str(run.sentinel), wire_command="synthetic executable --arg", kind=ApprovalKind.COMMAND_EXECUTION, sequence=1)
-            record = read_bounded_private_json(run.wire_recovery)
+            record = read_wire_authority(run.wire_recovery)
             self.assertEqual(record["wire_command_plaintext"], "synthetic executable --arg")
             with self.assertRaises(FileExistsError):
                 authority.capture_once(thread_id="synthetic-thread", turn_id="synthetic-turn", cwd="/synthetic/cwd", sentinel=str(run.sentinel), wire_command="replacement", kind=ApprovalKind.COMMAND_EXECUTION, sequence=1)
+
+    def test_exact_schema_hash_identity_kind_sequence_and_size_rules(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-wire-schema-") as directory:
+            root = Path(directory)
+            run = FreshProbeRun.materialize(root)
+            authority = WireCommandAuthority(run.wire_recovery)
+            authority.capture_once(thread_id="actual-thread", turn_id="actual-turn", cwd="/actual/cwd", sentinel=str(run.sentinel), wire_command="synthetic command", kind=ApprovalKind.COMMAND_EXECUTION, sequence=1)
+            record = read_wire_authority(run.wire_recovery)
+            self.assertEqual(set(record), WIRE_AUTHORITY_KEYS)
+            self.assertEqual(record["thread_id_sha256"], _sha256("actual-thread"))
+            self.assertEqual(record["turn_id_sha256"], _sha256("actual-turn"))
+            self.assertEqual(record["actual_cwd_sha256"], _sha256("/actual/cwd"))
+            self.assertEqual(record["expected_sentinel_path_sha256"], _sha256(str(run.sentinel)))
+            self.assertEqual(record["wire_command_sha256"], _sha256(record["wire_command_plaintext"]))
+            for key in ("thread_id_sha256", "turn_id_sha256", "actual_cwd_sha256", "expected_sentinel_path_sha256", "wire_command_sha256"):
+                self.assertIsNotNone(SHA256_RE.fullmatch(record[key]))
+
+            for missing in ("wire_command_sha256", "actual_cwd_sha256"):
+                invalid = dict(record)
+                invalid.pop(missing)
+                with self.subTest(missing=missing), self.assertRaises(ValueError):
+                    validate_wire_authority_record(invalid)
+            invalid = dict(record, unknown_field=True)
+            with self.assertRaises(ValueError):
+                validate_wire_authority_record(invalid)
+            invalid = dict(record, wire_command_sha256="0" * 64)
+            with self.assertRaises(ValueError):
+                validate_wire_authority_record(invalid)
+            invalid = dict(record, request_kind="file_change")
+            with self.assertRaises(ValueError):
+                validate_wire_authority_record(invalid)
+            invalid = dict(record, local_request_sequence=0)
+            with self.assertRaises(ValueError):
+                validate_wire_authority_record(invalid)
+            invalid = dict(record, wire_command_plaintext="x" * (MAX_WIRE_COMMAND_CHARS + 1))
+            with self.assertRaises(ValueError):
+                validate_wire_authority_record(invalid)
 
     def test_symlink_hardlink_unsafe_mode_oversize_and_malformed_rejected(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c7-wire-unsafe-") as directory:
@@ -1075,6 +1561,27 @@ class ShlexAndWatchdogOfflineTests(unittest.TestCase):
         for wire in ("synthetic 'unterminated", "synthetic\0bad", "synthetic  plain"):
             self.assertFalse(recover_wire_vector(wire).established)
 
+    def test_sentinel_reference_is_observational_and_never_substring_match(self) -> None:
+        sentinel = "/synthetic/sentinel"
+        cases = (
+            (shlex.join(["synthetic", sentinel]), SENTINEL_EXACT_ARG),
+            (shlex.join(["synthetic", f"prefix-{sentinel}-suffix"]), SENTINEL_EMBEDDED),
+            (shlex.join(["synthetic", "other"]), SENTINEL_ABSENT),
+            ("synthetic 'unterminated " + sentinel, SENTINEL_VECTOR_UNKNOWN),
+        )
+        for wire, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(classify_sentinel_reference(wire, sentinel), expected)
+
+    def test_python_shlex_authority_is_only_claimed_on_exact_round_trip(self) -> None:
+        vectors = [["synthetic", "", "space value", "single'quote", 'double"quote', ";|&$()<>*?"]]
+        for vector in vectors:
+            wire = shlex.join(vector)
+            result = recover_wire_vector(wire)
+            self.assertTrue(result.established)
+            self.assertEqual(result.vector_length, len(vector))
+        self.assertEqual(classify_sentinel_reference("synthetic  plain", "/synthetic"), SENTINEL_VECTOR_UNKNOWN)
+
     def test_watchdog_normal_exit_and_exact_group_authority(self) -> None:
         result = run_synthetic_watchdog(["/bin/sh", "-c", "exit 0"], deadline=1.0)
         self.assertEqual(result["status"], "PROCESS_COMPLETED")
@@ -1084,11 +1591,23 @@ class ShlexAndWatchdogOfflineTests(unittest.TestCase):
         self.assertEqual(result["kill_count"], 0)
 
     def test_watchdog_terminates_stubborn_tree_finitely(self) -> None:
-        result = run_synthetic_watchdog(["/bin/sh", "-c", "sleep 30 & wait"], deadline=0.05, terminate_grace=0.05, kill_grace=0.2)
+        calls: list[tuple[int, int]] = []
+        real_killpg = os.killpg
+
+        def instrumented_killpg(pgid: int, sig: int) -> None:
+            calls.append((pgid, sig))
+            real_killpg(pgid, sig)
+
+        result = run_synthetic_watchdog(["/bin/sh", "-c", "sleep 30 & sh -c 'sleep 30 & wait' & wait"], deadline=0.05, terminate_grace=0.05, kill_grace=0.2, killpg=instrumented_killpg)
         self.assertEqual(result["status"], "PROCESS_WATCHDOG_TIMEOUT")
         self.assertEqual(result["term_count"], 1)
         self.assertLessEqual(result["kill_count"], 1)
         self.assertEqual(result["final_active_members"], ())
+        self.assertLessEqual(sum(sig == signal.SIGTERM for _, sig in calls), 1)
+        self.assertLessEqual(sum(sig == signal.SIGKILL for _, sig in calls), 1)
+        self.assertEqual({pgid for pgid, _ in calls}, {result["authority"]["pgid"]})
+        self.assertNotIn((result["authority"]["parent_pgid"], signal.SIGTERM), calls)
+        self.assertNotIn((result["authority"]["parent_pgid"], signal.SIGKILL), calls)
 
     def test_watchdog_does_not_signal_unrelated_separate_session(self) -> None:
         unrelated = subprocess.Popen(["/bin/sh", "-c", "sleep 30"], close_fds=True, start_new_session=True)
@@ -1100,6 +1619,27 @@ class ShlexAndWatchdogOfflineTests(unittest.TestCase):
             unrelated.terminate()
             unrelated.wait(timeout=1)
 
+    def test_watchdog_scan_separates_zombies_and_counts_scan_errors(self) -> None:
+        import unittest.mock as mock
+        with mock.patch(__name__ + "._proc_group_session", side_effect=[("R", 42, 7), ("Z", 42, 7), None]):
+            with mock.patch("os.listdir", return_value=["101", "102", "103"]):
+                snapshot = inspect_process_group(42)
+        self.assertEqual(snapshot.active_members, (101,))
+        self.assertEqual(snapshot.zombie_members, (102,))
+        self.assertEqual(snapshot.scan_errors, 1)
+
+    def test_signal_authority_dispatches_each_exact_group_signal_at_most_once(self) -> None:
+        calls: list[tuple[int, int]] = []
+        authority = ExactProcessGroupSignalAuthority(42, 7, killpg=lambda pgid, sig: calls.append((pgid, sig)))
+        authority.dispatch(signal.SIGTERM)
+        authority.dispatch(signal.SIGKILL)
+        with self.assertRaises(AssertionError):
+            authority.dispatch(signal.SIGTERM)
+        with self.assertRaises(AssertionError):
+            authority.dispatch(signal.SIGKILL)
+        self.assertEqual(calls, [(42, signal.SIGTERM), (42, signal.SIGKILL)])
+        self.assertNotIn((7, signal.SIGTERM), calls)
+
 
 class P7C7StaticGateTests(unittest.TestCase):
     def test_real_authorities_are_unset_and_gate_is_disabled(self) -> None:
@@ -1107,6 +1647,34 @@ class P7C7StaticGateTests(unittest.TestCase):
         self.assertIsNone(os.environ.get(EXPECTED_HEAD_ENV))
         self.assertIsNone(os.environ.get(EXPECTED_TREE_ENV))
         self.assertFalse(REAL_PROBE_LATCH.exists())
+
+    def test_future_source_gate_precedes_latch_and_rpc(self) -> None:
+        source = inspect.getsource(future_real_deny_only_approval_probe)
+        self.assertLess(source.index("validate_future_source_authority"), source.index("create_probe_latch"))
+        self.assertLess(source.index("create_probe_latch"), source.index("manager.acquire"))
+        self.assertNotIn("ARCHITECT_BASE_SHA", source)
+
+    def test_future_real_path_has_one_allowed_lifecycle_route_and_no_forbidden_route(self) -> None:
+        tree = ast.parse(inspect.getsource(future_real_deny_only_approval_probe))
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        names = [node.func.attr for node in calls if isinstance(node.func, ast.Attribute)]
+        self.assertEqual(names.count("get_catalog"), 1)
+        self.assertEqual(names.count("start"), 1)
+        self.assertEqual(names.count("start_turn"), 1)
+        for forbidden in ("resume", "interrupt_turn", "delete", "thread_read", "thread_list"):
+            self.assertNotIn(forbidden, names)
+        self.assertNotIn("ALLOW", inspect.getsource(DenyOnlyApprovalOperator.decide))
+        self.assertIn("ApprovalHandlingStatus.DENIED", inspect.getsource(_drain_future_approvals))
+
+    def test_future_budget_freezes_complete_effect_surface(self) -> None:
+        budget = FutureProbeBudget()
+        for action in ("model_list_calls", "thread_start_calls", "turn_start_calls"):
+            budget.record(action)
+        self.assertEqual((budget.model_list_calls, budget.thread_start_calls, budget.turn_start_calls), (1, 1, 1))
+        for action in ("thread_resume_calls", "interrupt_calls", "thread_delete_calls", "thread_read_calls", "thread_list_calls"):
+            with self.subTest(action=action):
+                with self.assertRaises(AssertionError):
+                    budget.record(action)
 
 class P7C7DenyOnlyApprovalProbeAcceptance(unittest.IsolatedAsyncioTestCase):
     @unittest.skipUnless(
@@ -1116,9 +1684,9 @@ class P7C7DenyOnlyApprovalProbeAcceptance(unittest.IsolatedAsyncioTestCase):
         "gated future P7.C7 deny-only approval probe",
     )
     async def test_future_real_deny_only_approval_probe(self) -> None:
-        # This method is intentionally inert until an architect freezes the
-        # separate one-shot execution contract and source/tree authorities.
-        self.fail("P7C7_REAL_PROBE_CONTRACT_NOT_FROZEN")
+        # The complete path is materialized, but this test remains skipped
+        # until an architect separately supplies all real authorities.
+        await future_real_deny_only_approval_probe()
 
 
 if __name__ == "__main__":
