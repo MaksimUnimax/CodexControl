@@ -15,7 +15,7 @@ Date: 2026-09-11
 
 Run-1 evidence: `785a82e2e9bc392173ea1e910b490f84cfa590b2`.
 
-The old Run-1 Turn-3 approval remains `RESPONSE_UNKNOWN` and permanently non-retryable. Accepted retained authorities remain the Turn-3 forensic `e6835e7eaff21ce6a452c24f3309269df67c82ba`, the existing Run-1 latch forensic `c308c765d9915844fce97d1d1f6c933e302a75aa`, retained-thread SHA-256 `9be5e1f196c868df772e6971186905ee81f9ba02fe9f4cf0f72f13a2e55e41f6`, and accepted Run-1 latch SHA-256 `50616410354022747284c1ce61bd02b8ecd1eb2636657eac502092fde800d55e`.
+The old Run-1 Turn-3 approval remains `RESPONSE_UNKNOWN` and permanently non-retryable. Accepted retained authorities remain the Turn-3 forensic `e6835e7eaff21ce6a452c24f3309269df67c82ba`, existing Run-1 latch forensic `c308c765d9915844fce97d1d1f6c933e302a75aa`, retained-thread SHA-256 `9be5e1f196c868df772e6971186905ee81f9ba02fe9f4cf0f72f13a2e55e41f6`, and Run-1 latch SHA-256 `50616410354022747284c1ce61bd02b8ecd1eb2636657eac502092fde800d55e`.
 
 No new real thread is allowed.
 
@@ -30,32 +30,33 @@ Conservative server-80 cleanup reclaimed exactly `945344512` bytes (`0.880421 Gi
 - Prep-v2: `1c9b03108bb2493fd6547a92c807397bb4c0868c` — REWORK_REQUIRED.
 - Repair-1: `821be881f1e6b04d3905080191cc0f1141799923` — REWORK_REQUIRED.
 - Repair-2: `4d98e2b6170e76534fa18274236605f77440f740` — REWORK_REQUIRED.
-- Repair-3 canonical commit: `2b38969c1c9a8232cb1c68efc953dae125e0e18c` — REWORK_REQUIRED.
-- Repair-4 candidate: `a55a765cdfb0d51e956045a238d4ecb5a237a5fe` — **REWORK_REQUIRED** after independent architect review.
+- Repair-3: `2b38969c1c9a8232cb1c68efc953dae125e0e18c` — REWORK_REQUIRED.
+- Repair-4: `a55a765cdfb0d51e956045a238d4ecb5a237a5fe` — REWORK_REQUIRED.
+- Repair-5: `01994403110f19e323dffd693f226b18bdcb73c7` — **REWORK_REQUIRED** after independent architect review.
 
-Repair-4 review:
+Repair-5 review:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR4_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR5_ARCHITECT_REVIEW_2026-09-11.md`
 
-Binding Repair-5 contract:
+Binding Repair-6 contract:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR5_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR6_CONTRACT_2026-09-11.md`
 
-Repair-4 successfully adds the required dedicated child-process watchdog and preserves the accepted Repair-3 guards: finite coroutine-level ownership, all-marker/sentinel exactness, baseline identity atomicity, post-delete safe authority, source/topology/controller/budget gates, one-delete authority, no-new-thread path and success-only sanitization.
+Repair-5 successfully closes the frozen watchdog-time-budget and child-to-parent result-authority defects: real/synthetic watchdog timing is separated; the real watchdog dominates the named internal finite-wait budget plus margin; a bounded exclusive root-only process-result file is written only after inner PASS; parent PASS revalidates exact source/tree, retained-thread hash, lifecycle statuses, residuals, scan/limit gates and dynamic effect counts.
 
-It is not executable real authority because the real watchdog inherits `WATCHDOG_HARD_DEADLINE = 5.0` while the valid frozen real flow contains multiple legitimate bounded waits much longer than five seconds. The current watchdog therefore creates a false-stop authority for a healthy continuation. The real dedicated child also discards the sanitized dict returned by `_run_real_continuation()`, leaving the parent with process exit metadata rather than a structured final lifecycle result authority.
+It is still not real-executable because the watchdog currently owns only the dedicated Python child PID. The acceptance child launches `codex app-server` through production `asyncio.create_subprocess_exec(...)` without a dedicated process group/session. Therefore killing the Python watchdog child does not itself prove termination of the continuation-owned app-server/command process tree. A watchdog timeout could return while real descendants survive.
 
-No production `src/**` defect is established.
+This is a harness/process-ownership defect only. No production `src/**` change is authorized or required.
 
-`P7C6_CONTINUATION_PREP_V2_REPAIR4=REWORK_REQUIRED`
+`P7C6_REPAIR5=REWORK_REQUIRED`
 
 `P7C6_REAL_CONTINUATION_AUTHORIZED=NO`.
 
 ## Current executable slice
 
-**P7.C6 same-thread continuation prep-v2 Repair-5 — NEXT / ZERO REAL EFFECT.**
+**P7.C6 same-thread continuation prep-v2 Repair-6 — NEXT / ZERO REAL EFFECT.**
 
-Repair-5 may modify only the gated acceptance harness/tests/evidence. It must separate synthetic vs real watchdog timing, prove the real hard deadline exceeds the full internal finite-wait budget plus margin, and add a bounded sanitized child-to-parent result authority whose fields are validated before process PASS.
+Repair-6 may modify only the gated acceptance harness/tests/evidence. It must launch the dedicated continuation child in its own OS session/process group, signal the whole exact continuation group on watchdog timeout, prove a descendant/grandchild cannot survive, and prove an unrelated external process receives no signal. Preserve all Repair-5 lifecycle/result/watchdog authorities.
 
 No production `src/**` changes and no real Codex/app-server/business RPC effects are authorized.
 
