@@ -24,36 +24,37 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 
 ### P7.C6 retained-thread correction history
 
-- [RUN 1 REJECTED / HARNESS DEFECT] `785a82e2e9bc392173ea1e910b490f84cfa590b2`: one thread, one resume, three turns; old Turn-3 approval is `RESPONSE_UNKNOWN` and permanently non-retryable.
-- [DONE / ZERO EFFECT] Turn-3 forensic `e6835e7eaff21ce6a452c24f3309269df67c82ba`: exact terminal `INTERRUPTED`, command completed, no pending persisted approval, no delayed process/sentinel.
-- [DONE / ZERO EFFECT] Existing Run-1 latch forensic `c308c765d9915844fce97d1d1f6c933e302a75aa`: existing latch accepted as replay barrier; SHA-256 `50616410354022747284c1ce61bd02b8ecd1eb2636657eac502092fde800d55e`.
+- [RUN 1 REJECTED / HARNESS DEFECT] `785a82e2e9bc392173ea1e910b490f84cfa590b2`: old Turn-3 approval remains `RESPONSE_UNKNOWN` and permanently non-retryable.
+- [DONE / ZERO EFFECT] Turn-3 forensic `e6835e7eaff21ce6a452c24f3309269df67c82ba`.
+- [DONE / ZERO EFFECT] Existing Run-1 latch forensic `c308c765d9915844fce97d1d1f6c933e302a75aa`.
 
 ### P7.C6 same-thread continuation preparation
 
-- [REWORK_REQUIRED / ZERO EFFECT] Prep-v2 `1c9b03108bb2493fd6547a92c807397bb4c0868c`.
-- [REWORK_REQUIRED / ZERO EFFECT] Repair-1 `821be881f1e6b04d3905080191cc0f1141799923`.
-- [REWORK_REQUIRED / ZERO EFFECT] Repair-2 `4d98e2b6170e76534fa18274236605f77440f740`.
-- [REWORK_REQUIRED / ZERO EFFECT] Repair-3 `2b38969c1c9a8232cb1c68efc953dae125e0e18c`.
-- [REWORK_REQUIRED / ZERO EFFECT] Repair-4 `a55a765cdfb0d51e956045a238d4ecb5a237a5fe`.
-- [REWORK_REQUIRED / ZERO EFFECT] Repair-5 `01994403110f19e323dffd693f226b18bdcb73c7`.
+- [REWORK_REQUIRED] Prep-v2 `1c9b03108bb2493fd6547a92c807397bb4c0868c`.
+- [REWORK_REQUIRED] Repair-1 `821be881f1e6b04d3905080191cc0f1141799923`.
+- [REWORK_REQUIRED] Repair-2 `4d98e2b6170e76534fa18274236605f77440f740`.
+- [REWORK_REQUIRED] Repair-3 `2b38969c1c9a8232cb1c68efc953dae125e0e18c`.
+- [REWORK_REQUIRED] Repair-4 `a55a765cdfb0d51e956045a238d4ecb5a237a5fe`.
+- [REWORK_REQUIRED] Repair-5 `01994403110f19e323dffd693f226b18bdcb73c7`.
+- [DONE / PREPARATION ACCEPTED] Repair-6 `76a7aa24e3cfdfb12c3314a7e01691d4a943b551`, tree `92abebdfb3390d4c58f4aefc00aa84b83841e99e`.
 
-Repair-5 review:
+Architect acceptance:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR5_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR6_ARCHITECT_ACCEPTANCE_2026-09-11.md`
 
-Frozen Repair-6:
+One-shot execution contract:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR6_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_REAL_SAME_THREAD_CONTINUATION_EXECUTION_CONTRACT_2026-09-11.md`
 
-Repair-5 correctly separates real/synthetic watchdog timing and adds the bounded durable child-to-parent PASS result authority. The remaining blocker is process-tree ownership: watchdog termination currently targets only the dedicated Python child while production `codex app-server` is spawned as its descendant without a dedicated process group/session. Whole continuation-group termination must be proven before real authority.
+Repair-6 closes the final preparation blocker by owning the complete continuation process tree in an isolated OS session/process group and proving exact group termination/quiescence, descendant/grandchild convergence and unrelated-process survival. All prior source, latch, marker, approval, interrupt, controller, budget, delete, residual, result-channel and success-only sanitization authorities remain binding.
 
-- [DONE / SERVER MAINTENANCE] Conservative server-80 disk cleanup reclaimed `945344512` bytes (`0.880421 GiB`) without touching P7.C6 state or Git.
-- [NEXT / ZERO-REAL-EFFECT] **P7.C6 prep-v2 Repair-6.** Harness/tests/evidence only. Create an isolated continuation OS session/process group, terminate/kill that exact group on watchdog timeout, prove descendant/grandchild death and unrelated-process survival, and preserve all Repair-5 authorities. No `src/**` changes and no real Codex effects.
-- [BLOCKED] P7.C6 real same-thread continuation. No authorization until Repair-6 is independently accepted.
+- [DONE / SERVER MAINTENANCE] Conservative disk cleanup reclaimed `945344512` bytes (`0.880421 GiB`) without touching P7.C6 state.
+- [NEXT / AUTHORIZED ONE SHOT] **P7.C6 real same-thread continuation.** Execute exactly accepted HEAD `76a7aa24e3cfdfb12c3314a7e01691d4a943b551` / tree `92abebdfb3390d4c58f4aefc00aa84b83841e99e`. One real attempt only: retained resume → Turn 4 exact approval proof → Turn 5 exact interrupt proof → one official P1.9 delete → physical erasure and safe process-result proof. No rerun after dispatch under any outcome.
+- [BLOCKED] P8 until P7.C6 real evidence is independently accepted.
 
 ## P8 — deployment packaging/rollback
 
-[BLOCKED BY P7.C6]
+[BLOCKED BY P7.C6 REAL ACCEPTANCE]
 
 ## P9 — server-80 live Telegram acceptance
 
