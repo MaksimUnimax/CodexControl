@@ -64,17 +64,12 @@ Architect-accepted final interpretation:
 - retained-thread resume completed with `RESUME_CONFIRMED`;
 - Turn-4 start completed with `TURN_START_CONFIRMED`;
 - approval bridge observed `0` approval requests and sent `0` approval responses, then timed out;
-- exactly one continuation turn exists beyond the historical three;
-- that continuation Turn-4 persisted terminal `COMPLETED` with one completed command item and one tool output;
-- the exact run-owned Turn-4 sentinel exists and equals the expected Turn-4 allow marker bytes;
+- Turn-4 nevertheless persisted terminal `COMPLETED` and created the exact run-owned sentinel;
 - no Turn-5 continuation turn exists and the Turn-5 marker is absent;
 - controller DB remained untouched at user_version `0`, with no synthetic dialogue, tombstone, containment or pending-storage state;
 - process-result authority was never created;
-- process-group shutdown authority passed with zero final active continuation members;
-- official P1.9 delete was **not dispatched**;
+- official P1.9 delete was not dispatched;
 - no production lifecycle/delete defect is established.
-
-The forensic's reported journal-vs-terminal `CONFLICT` is architect-corrected: there is no contradiction. The accepted harness waits for the approval bridge before it calls its own Turn-4 terminal waiter. Codex completed Turn-4 and created the sentinel while the approval bridge was still waiting for a request that never arrived; the bridge then timed out and the harness exited.
 
 Final P7.C6 classifications:
 
@@ -92,28 +87,58 @@ Final P7.C6 classifications:
 
 P7.C6 is closed as a consumed real-acceptance failure before Turn-5/delete. It is not a P7 PASS and not a production hard-delete failure.
 
-## P7.C7 successor lane
+## P7.C7 approval-stimulus authority — architect reviewed
 
-P7.C7 will be the fresh disposable-thread successor acceptance lane, but **no new real thread is authorized yet**.
+Executor authority lineage:
 
-Binding first-slice contract:
+- `5ec38a38cef6363bb3709aefe57c0dedae5f5e13` — initial zero-effect evidence;
+- `e00392fbff6894e1857eb4c8f1e1937a88ca1e96` — final evidence count correction.
 
-`docs/evidence/p7c7/P7C7_APPROVAL_STIMULUS_AUTHORITY_CONTRACT_2026-09-11.md`
+Evidence:
 
-Run-1 provides the empirical contrast needed for this zero-effect slice:
+`docs/evidence/p7c7/P7C7_APPROVAL_STIMULUS_AUTHORITY_EVIDENCE_2026-09-11.md`
 
-- its bounded `sleep 30 && touch <outside-workspace-sentinel>` stimulus produced exactly one `COMMAND_EXECUTION` approval request;
-- the old matcher failed;
-- retained Turn-3 forensic reconstructed the observed command locally, SHA-256 `69da337831d6b9729c7710a063af5133cebd0a32459d428e9309d7f9caf42b0a`, and classified it `OTHER / TOKEN_MISMATCH` against the historical safe grammar;
-- raw command content remains local-only.
+Architect review:
 
-Production `CodexTurnLifecycleAdapter` uses `approvalPolicy="on-request"` and `sandboxPolicy={"type":"workspaceWrite"}`; approval must therefore be treated as conditional rather than guaranteed for arbitrary command stimuli.
+`docs/evidence/p7c7/P7C7_APPROVAL_STIMULUS_AUTHORITY_ARCHITECT_REVIEW_2026-09-11.md`
+
+Accepted findings:
+
+- exact upstream authority is `rust-v0.144.6`, release commit `5d1fbf26c43abc65a203928b2e31561cb039e06d`;
+- Run-1 retained Turn-3/session hashes match accepted authority;
+- historical persisted command remains `OTHER / TOKEN_MISMATCH` and is not used as wire-command authority;
+- exact release proves internal `Vec<String>` -> approval event -> app-server `shlex_join` -> `CommandExecutionRequestApprovalParams.command`;
+- exact release also proves approval routing is conditional;
+- preserved/offline evidence does **not** establish which internal command vector a future model turn will generate from the proposed natural-language stimulus;
+- therefore future concrete approval-request wire grammar is not established and no ALLOW matcher may be frozen offline.
+
+Architect classification:
+
+`P7C7_APPROVAL_STIMULUS_AUTHORITY=ACCEPTED_AS_NOT_ESTABLISHED`
+
+`P7C7_APPROVAL_REQUEST_WIRE_MAPPING=ESTABLISHED`
+
+`P7C7_FUTURE_CONCRETE_WIRE_GRAMMAR=NOT_ESTABLISHED`
+
+`P7C7_MATCHER_AUTHORIZED=NO`
+
+This is a successful fail-closed authority result, not a production defect.
 
 ## Current executable slice
 
-**P7.C7 approval-stimulus authority — NEXT / ZERO REAL EFFECT.**
+**P7.C7 DENY-only approval-probe preparation — NEXT / ZERO REAL EFFECT.**
 
-The slice must reconstruct the exact Run-1 approval-producing command locally, explain the historical token mismatch, derive the narrowest safe structural matcher/template for a fresh dynamic sentinel, and prove broad shell forms remain denied. It may add test-only fixtures/evidence but may not modify production `src/**` or execute any real Codex operation.
+Binding preparation contract:
+
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-11.md`
+
+The preparation slice must build/test a future fresh-thread probe harness whose approval operator has no ALLOW path, observes approval and turn-terminal concurrently, captures real wire grammar only into root-only authority, denies every observed approval request, owns a fresh isolated run/process-group boundary, and remains gated/inert during ordinary tests.
+
+No fresh real thread is authorized by this preparation slice. After executor completion, architect must independently review the harness before freezing any one-shot real approval-probe contract.
+
+`P7C7_DENY_ONLY_PROBE_PREPARATION=NEXT_ZERO_REAL_EFFECT`
+
+`P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
 
 `P7C7_REAL_EXECUTION_AUTHORIZED=NO`
 
