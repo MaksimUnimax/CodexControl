@@ -56,8 +56,8 @@ from codex_control.domain import CodexProfile
 from codex_control.adapters.codex.protocol import InboundServerRequest
 
 
-ARCHITECT_BASE_SHA = "7b3185874bc544fc28eb334aba70e4c74935cadc"
-ARCHITECT_BASE_TREE = "7b27cf964c01d550273f5a35b97157d2be60d3cf"
+ARCHITECT_BASE_SHA = "48fb5755d89722bfac4f18d6dcde9c29f7b3e459"
+ARCHITECT_BASE_TREE = "14e736ccbdfc06879e875a9dc6469537b20b4dcc"
 AUTHORIZED_ENV = "AUTHORIZED_P7C9_DENY_ONLY_APPROVAL_PROBE_2026_09_11"
 EXPECTED_HEAD_ENV = "CODEXCONTROL_P7C9_PROBE_EXPECTED_HEAD"
 EXPECTED_TREE_ENV = "CODEXCONTROL_P7C9_PROBE_EXPECTED_TREE"
@@ -94,8 +94,13 @@ PROBE_RUNTIME_SHUTDOWN_TIMEOUT = 5.0
 PROBE_CHILD_RESULT_TIMEOUT = 2.0
 PROBE_TERM_GRACE_SECONDS = 2.0
 PROBE_KILL_GRACE_SECONDS = 2.0
+P7C9_STATE_ROOT_PROVISION_VALIDATE_TIMEOUT_SECONDS = 5.0
+P7C9_STATE_ROOT_WORKER_JOIN_SECONDS = 1.0
+P7C9_STATE_ROOT_INTERNAL_WORST_CASE_SECONDS = (
+    P7C9_STATE_ROOT_PROVISION_VALIDATE_TIMEOUT_SECONDS + P7C9_STATE_ROOT_WORKER_JOIN_SECONDS
+)
 NORMAL_PATH_INTERNAL_WORST_CASE_SECONDS = sum((
-    5.0,
+    P7C9_STATE_ROOT_INTERNAL_WORST_CASE_SECONDS,
     PROBE_RUNTIME_ACQUIRE_TIMEOUT,
     PROBE_MODEL_LIST_TIMEOUT,
     PROBE_THREAD_START_TIMEOUT,
@@ -109,7 +114,7 @@ NORMAL_PATH_INTERNAL_WORST_CASE_SECONDS = sum((
 ))
 P7C9_RUNTIME_ACQUIRE_CLEANUP_CANCEL_JOIN_SECONDS = 1.0
 FAILED_ACQUIRE_INTERNAL_WORST_CASE_SECONDS = sum((
-    5.0,
+    P7C9_STATE_ROOT_INTERNAL_WORST_CASE_SECONDS,
     PROBE_RUNTIME_ACQUIRE_TIMEOUT,
     12.0,
     P7C9_RUNTIME_ACQUIRE_CLEANUP_CANCEL_JOIN_SECONDS,
@@ -117,7 +122,10 @@ FAILED_ACQUIRE_INTERNAL_WORST_CASE_SECONDS = sum((
     PROBE_TERM_GRACE_SECONDS,
     PROBE_KILL_GRACE_SECONDS,
 ))
-FAILED_PROVISION_INTERNAL_WORST_CASE_SECONDS = 5.0 + PROBE_CHILD_RESULT_TIMEOUT + PROBE_TERM_GRACE_SECONDS + PROBE_KILL_GRACE_SECONDS
+FAILED_PROVISION_INTERNAL_WORST_CASE_SECONDS = (
+    P7C9_STATE_ROOT_INTERNAL_WORST_CASE_SECONDS
+    + PROBE_CHILD_RESULT_TIMEOUT + PROBE_TERM_GRACE_SECONDS + PROBE_KILL_GRACE_SECONDS
+)
 PROBE_INTERNAL_WORST_CASE_SECONDS = NORMAL_PATH_INTERNAL_WORST_CASE_SECONDS
 PROBE_WATCHDOG_MARGIN_SECONDS = 15.0
 PROBE_WATCHDOG_HARD_DEADLINE = max(
@@ -138,7 +146,7 @@ SAFE_CATEGORY_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED = "SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED"
 P7C9_RUNTIME_ACQUIRE_TIMEOUT_SECONDS = PROBE_RUNTIME_ACQUIRE_TIMEOUT
 P7C9_RUNTIME_ACQUIRE_CLEANUP_TIMEOUT_SECONDS = 12.0
-P7C9_STATE_ROOT_PROVISION_VALIDATE_TIMEOUT_SECONDS = 5.0
+STATE_ROOT_OWNER_RESULTS = frozenset({"TERMINALIZED", "NONCONVERGENT", "NOT_STARTED"})
 STATE_ROOT_RESULT_CLASSES = frozenset({
     "CONFIRMED", "SAFE_ISOLATION_EXCEPTION", "UNEXPECTED_EXCEPTION", "TIMEOUT", "NOT_ESTABLISHED",
 })
@@ -224,7 +232,9 @@ PARENT_OUTCOME_KEYS = frozenset({
     "runtime_acquire_initial_result", "runtime_acquire_result", "runtime_acquire_error_category",
     "runtime_acquire_cleanup_result", "runtime_acquire_cleanup_error_category",
     "state_root_provision_result", "state_root_provision_error_category",
+    "state_root_provision_owner_result",
     "state_root_validate_result", "state_root_validate_error_category",
+    "state_root_validate_owner_result",
 })
 CHILD_RESULT_DISCOVERY_CLASSES = frozenset({
     "CHILD_RESULT_DISCOVERY_CONFIRMED",
@@ -1110,34 +1120,90 @@ def run_state_root_operation(operation: Callable[[], Any]) -> tuple[str, str | N
     return "CONFIRMED", None
 
 
+STATE_ROOT_OWNER_TERMINALIZED = "TERMINALIZED"
+STATE_ROOT_OWNER_NONCONVERGENT = "NONCONVERGENT"
+STATE_ROOT_OWNER_NOT_STARTED = "NOT_STARTED"
+
+
+@dataclass(frozen=True)
+class StateRootOperationObservation:
+    """One finite state-root operation and its worker ownership fact."""
+
+    operation_result: str
+    safe_error_category: str | None
+    worker_terminalized: bool
+    owner_result: str
+
+    def __post_init__(self) -> None:
+        if self.operation_result not in STATE_ROOT_RESULT_CLASSES:
+            raise ValueError("STATE_ROOT_RESULT_INVALID")
+        if self.owner_result not in STATE_ROOT_OWNER_RESULTS:
+            raise ValueError("STATE_ROOT_OWNER_RESULT_INVALID")
+        if self.worker_terminalized is not (self.owner_result == STATE_ROOT_OWNER_TERMINALIZED):
+            raise ValueError("STATE_ROOT_WORKER_OWNER_MISMATCH")
+        if self.operation_result != "SAFE_ISOLATION_EXCEPTION" and self.safe_error_category is not None:
+            raise ValueError("STATE_ROOT_CATEGORY_UNEXPECTED")
+
+    def __getitem__(self, index: int) -> str | None:
+        """Retain the candidate's pair indexing for narrow compatibility."""
+        if index == 0:
+            return self.operation_result
+        if index == 1:
+            return self.safe_error_category
+        raise IndexError(index)
+
+
+def _state_root_not_started() -> StateRootOperationObservation:
+    return StateRootOperationObservation("NOT_ESTABLISHED", None, False, STATE_ROOT_OWNER_NOT_STARTED)
+
+
 async def bounded_state_root_operation(
     operation: Callable[[], Any], *, timeout: float = P7C9_STATE_ROOT_PROVISION_VALIDATE_TIMEOUT_SECONDS,
-) -> tuple[str, str | None]:
+) -> StateRootOperationObservation:
     """Owned child-side seam with a finite convergence deadline."""
     if timeout <= 0:
-        return "TIMEOUT", None
+        return StateRootOperationObservation("TIMEOUT", None, False, STATE_ROOT_OWNER_NOT_STARTED)
     completed = threading.Event()
     result: dict[str, tuple[str, str | None]] = {}
 
     def worker() -> None:
-        result["value"] = run_state_root_operation(operation)
-        completed.set()
+        try:
+            result["value"] = run_state_root_operation(operation)
+        except BaseException:
+            result["value"] = ("UNEXPECTED_EXCEPTION", None)
+        finally:
+            completed.set()
 
-    threading.Thread(target=worker, name="p7c9-state-root-authority", daemon=True).start()
+    worker_thread = threading.Thread(target=worker, name="p7c9-state-root-authority", daemon=True)
+    worker_thread.start()
     deadline = time.monotonic() + timeout
+    deadline_exceeded = False
     while not completed.is_set():
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            return "TIMEOUT", None
+            deadline_exceeded = True
+            break
         await asyncio.sleep(min(0.01, remaining))
-    return result.get("value", ("NOT_ESTABLISHED", None))
+    worker_thread.join(P7C9_STATE_ROOT_WORKER_JOIN_SECONDS)
+    terminalized = not worker_thread.is_alive()
+    if deadline_exceeded:
+        return StateRootOperationObservation(
+            "TIMEOUT", None, terminalized,
+            STATE_ROOT_OWNER_TERMINALIZED if terminalized else STATE_ROOT_OWNER_NONCONVERGENT,
+        )
+    if not terminalized:
+        return StateRootOperationObservation("TIMEOUT", None, False, STATE_ROOT_OWNER_NONCONVERGENT)
+    operation_result, safe_error_category = result.get("value", ("NOT_ESTABLISHED", None))
+    return StateRootOperationObservation(
+        operation_result, safe_error_category, True, STATE_ROOT_OWNER_TERMINALIZED,
+    )
 
 
 async def provision_and_validate_state_root(
     run: "FreshProbeRun", journal: "RecoveryJournal | None" = None,
     *, provision: Callable[[], Any] | None = None, validate: Callable[[], Any] | None = None,
     timeout: float = P7C9_STATE_ROOT_PROVISION_VALIDATE_TIMEOUT_SECONDS,
-) -> tuple[tuple[str, str | None], tuple[str, str | None]]:
+) -> tuple[StateRootOperationObservation, StateRootOperationObservation]:
     """Run production provision then validate, journaling sanitized authority."""
     profile, authority = synthetic_state_root_authority(run)
     provision = provision or (lambda: IsolatedStateRoot(authority).provision(profile))
@@ -1147,21 +1213,25 @@ async def provision_and_validate_state_root(
         journal.intent("STATE_ROOT_PROVISION")
     provision_result = await bounded_state_root_operation(provision, timeout=max(0.0, deadline - time.monotonic()))
     if journal is not None:
-        journal.result("STATE_ROOT_PROVISION", provision_result[0])
-        if provision_result[1] is not None:
-            journal._append({"event": "STATE_ROOT_PROVISION_ERROR_CATEGORY", "result": provision_result[1]})
-    if provision_result[0] != "CONFIRMED":
+        journal.result("STATE_ROOT_PROVISION", provision_result.operation_result)
+        if provision_result.safe_error_category is not None:
+            journal._append({"event": "STATE_ROOT_PROVISION_ERROR_CATEGORY", "result": provision_result.safe_error_category})
+        journal.result("STATE_ROOT_PROVISION_OWNER", provision_result.owner_result)
+    if provision_result.operation_result != "CONFIRMED":
+        validate_result = _state_root_not_started()
         if journal is not None:
             journal.intent("STATE_ROOT_VALIDATE")
-            journal.result("STATE_ROOT_VALIDATE", "NOT_ESTABLISHED")
-        return provision_result, ("NOT_ESTABLISHED", None)
+            journal.result("STATE_ROOT_VALIDATE", validate_result.operation_result)
+            journal.result("STATE_ROOT_VALIDATE_OWNER", validate_result.owner_result)
+        return provision_result, validate_result
     if journal is not None:
         journal.intent("STATE_ROOT_VALIDATE")
     validate_result = await bounded_state_root_operation(validate, timeout=max(0.0, deadline - time.monotonic()))
     if journal is not None:
-        journal.result("STATE_ROOT_VALIDATE", validate_result[0])
-        if validate_result[1] is not None:
-            journal._append({"event": "STATE_ROOT_VALIDATE_ERROR_CATEGORY", "result": validate_result[1]})
+        journal.result("STATE_ROOT_VALIDATE", validate_result.operation_result)
+        if validate_result.safe_error_category is not None:
+            journal._append({"event": "STATE_ROOT_VALIDATE_ERROR_CATEGORY", "result": validate_result.safe_error_category})
+        journal.result("STATE_ROOT_VALIDATE_OWNER", validate_result.owner_result)
     return provision_result, validate_result
 
 
@@ -1527,7 +1597,7 @@ async def future_real_deny_only_approval_probe(run_parent: Path | None = None) -
         provision=lambda: state_root_authority.provision(profile),
         validate=lambda: state_root_authority.validate(profile),
     )
-    if provision_result[0] != "CONFIRMED" or validate_result[0] != "CONFIRMED":
+    if provision_result.operation_result != "CONFIRMED" or validate_result.operation_result != "CONFIRMED":
         raise RuntimeError("STATE_ROOT_PROVISION_OR_VALIDATE_NOT_CONFIRMED")
     manager = CodexRuntimeManager([profile], client_version="p7c9-deny-only-probe", isolation_authority=authority)
     budget = FutureProbeBudget()
@@ -1727,6 +1797,12 @@ async def future_real_deny_only_approval_probe(run_parent: Path | None = None) -
         terminal_status=terminal_status, operator=operator, run=run, boundary=boundary,
         outcome=outcome, source_sha=accepted_head, source_tree=accepted_tree, budget=budget,
         runtime_shutdown_result=shutdown_result, thread_established=thread_established, observation=observation,
+        state_root_provision_result=provision_result.operation_result,
+        state_root_provision_error_category=provision_result.safe_error_category,
+        state_root_provision_owner_result=provision_result.owner_result,
+        state_root_validate_result=validate_result.operation_result,
+        state_root_validate_error_category=validate_result.safe_error_category,
+        state_root_validate_owner_result=validate_result.owner_result,
     )
     journal.intent("CHILD_RESULT_WRITE")
     write_sanitized_result(run.root / CHILD_RESULT_FILENAME, child_result)
@@ -1864,7 +1940,7 @@ def scan_fresh_run_boundary(
     }
 
 
-def make_sanitized_result(*, terminal_status: str | None, operator: DenyOnlyApprovalOperator, run: FreshProbeRun, boundary: Mapping[str, Any], outcome: str, source_sha: str = ARCHITECT_BASE_SHA, source_tree: str = ARCHITECT_BASE_TREE, budget: FutureProbeBudget | None = None, runtime_shutdown_result: str = "NOT_ATTEMPTED", thread_established: bool = True, observation: ProbeObservation | None = None, state_root_provision_result: str = "CONFIRMED", state_root_provision_error_category: str | None = None, state_root_validate_result: str = "CONFIRMED", state_root_validate_error_category: str | None = None) -> dict[str, Any]:
+def make_sanitized_result(*, terminal_status: str | None, operator: DenyOnlyApprovalOperator, run: FreshProbeRun, boundary: Mapping[str, Any], outcome: str, source_sha: str = ARCHITECT_BASE_SHA, source_tree: str = ARCHITECT_BASE_TREE, budget: FutureProbeBudget | None = None, runtime_shutdown_result: str = "NOT_ATTEMPTED", thread_established: bool = True, observation: ProbeObservation | None = None, state_root_provision_result: str = "CONFIRMED", state_root_provision_error_category: str | None = None, state_root_provision_owner_result: str = STATE_ROOT_OWNER_TERMINALIZED, state_root_validate_result: str = "CONFIRMED", state_root_validate_error_category: str | None = None, state_root_validate_owner_result: str = STATE_ROOT_OWNER_TERMINALIZED) -> dict[str, Any]:
     if observation is not None and not normal_child_result_allowed(observation):
         raise AssertionError("OWNER_NONCONVERGED_NO_NORMAL_RESULT")
     wire_sha = None
@@ -1920,8 +1996,10 @@ def make_sanitized_result(*, terminal_status: str | None, operator: DenyOnlyAppr
         "runtime_shutdown_result": runtime_shutdown_result,
         "state_root_provision_result": state_root_provision_result,
         "state_root_provision_error_category": state_root_provision_error_category,
+        "state_root_provision_owner_result": state_root_provision_owner_result,
         "state_root_validate_result": state_root_validate_result,
         "state_root_validate_error_category": state_root_validate_error_category,
+        "state_root_validate_owner_result": state_root_validate_owner_result,
         "boundary_proof_result": boundary["classification"],
         "child_result_authority": "CHILD_OBSERVATION_ONLY",
     }
@@ -1943,7 +2021,9 @@ def validate_sanitized_result(value: Mapping[str, Any]) -> None:
         "approval_deny_attempts", "approval_deny_confirmed", "approval_deny_unknown_or_failed",
         "thread_read_calls", "thread_list_calls", "request_limit_result", "runtime_shutdown_result",
         "state_root_provision_result", "state_root_provision_error_category",
+        "state_root_provision_owner_result",
         "state_root_validate_result", "state_root_validate_error_category",
+        "state_root_validate_owner_result",
         "boundary_proof_result", "child_result_authority",
     }
     if set(value) != required or value["allow_response_count"] != 0 or value["approval_allow_responses"] != 0:
@@ -1979,6 +2059,11 @@ def validate_sanitized_result(value: Mapping[str, Any]) -> None:
             raise AssertionError("STATE_ROOT_CATEGORY_INVALID")
         if value[result_key] != "SAFE_ISOLATION_EXCEPTION" and category is not None:
             raise AssertionError("STATE_ROOT_CATEGORY_UNEXPECTED")
+    for owner_key in ("state_root_provision_owner_result", "state_root_validate_owner_result"):
+        if value[owner_key] not in STATE_ROOT_OWNER_RESULTS:
+            raise AssertionError("STATE_ROOT_OWNER_RESULT_INVALID")
+        if value[owner_key] != STATE_ROOT_OWNER_TERMINALIZED:
+            raise AssertionError("STATE_ROOT_WORKER_NONTERMINAL")
 
 
 def _child_result_keys() -> frozenset[str]:
@@ -1993,7 +2078,9 @@ def _child_result_keys() -> frozenset[str]:
         "approval_allow_responses", "interrupt_calls", "thread_delete_calls", "thread_read_calls",
         "thread_list_calls", "request_limit_result", "runtime_shutdown_result", "boundary_proof_result", "child_result_authority",
         "state_root_provision_result", "state_root_provision_error_category",
+        "state_root_provision_owner_result",
         "state_root_validate_result", "state_root_validate_error_category",
+        "state_root_validate_owner_result",
     })
 
 
@@ -2142,8 +2229,10 @@ def make_parent_execution_outcome(
     runtime_acquire_cleanup_error_category: str | None = None,
     state_root_provision_result: str = "NOT_ESTABLISHED",
     state_root_provision_error_category: str | None = None,
+    state_root_provision_owner_result: str | None = None,
     state_root_validate_result: str = "NOT_ESTABLISHED",
     state_root_validate_error_category: str | None = None,
+    state_root_validate_owner_result: str | None = None,
 ) -> dict[str, Any]:
     """Build the distinct, sanitized parent execution-outcome authority."""
     value = {
@@ -2175,8 +2264,14 @@ def make_parent_execution_outcome(
         "runtime_acquire_cleanup_error_category": runtime_acquire_cleanup_error_category,
         "state_root_provision_result": state_root_provision_result,
         "state_root_provision_error_category": state_root_provision_error_category,
+        "state_root_provision_owner_result": state_root_provision_owner_result if state_root_provision_owner_result is not None else (
+            STATE_ROOT_OWNER_TERMINALIZED if state_root_provision_result == "CONFIRMED" else STATE_ROOT_OWNER_NOT_STARTED
+        ),
         "state_root_validate_result": state_root_validate_result,
         "state_root_validate_error_category": state_root_validate_error_category,
+        "state_root_validate_owner_result": state_root_validate_owner_result if state_root_validate_owner_result is not None else (
+            STATE_ROOT_OWNER_TERMINALIZED if state_root_validate_result == "CONFIRMED" else STATE_ROOT_OWNER_NOT_STARTED
+        ),
     }
     validate_parent_execution_outcome(value)
     return value
@@ -2218,43 +2313,64 @@ def validate_parent_execution_outcome(value: Mapping[str, Any]) -> None:
         "RUNTIME_ACQUIRE_NOT_ESTABLISHED",
     }:
         raise AssertionError("PARENT_OUTCOME_ACQUIRE_INVALID")
-    category = value["runtime_acquire_error_category"]
-    if category is not None and category != SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED and (
-        category not in SAFE_RUNTIME_CATEGORIES or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", category) is None
+    runtime_acquire_category = value["runtime_acquire_error_category"]
+    if runtime_acquire_category is not None and runtime_acquire_category != SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED and (
+        runtime_acquire_category not in SAFE_RUNTIME_CATEGORIES or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", runtime_acquire_category) is None
     ):
         raise AssertionError("PARENT_OUTCOME_ACQUIRE_CATEGORY_INVALID")
-    if value["runtime_acquire_result"] != RuntimeAcquireClass.SAFE_EXCEPTION and category is not None:
+    if value["runtime_acquire_result"] != RuntimeAcquireClass.SAFE_EXCEPTION and runtime_acquire_category is not None:
         raise AssertionError("PARENT_OUTCOME_ACQUIRE_CATEGORY_UNEXPECTED")
     if value["runtime_acquire_cleanup_result"] not in {None, "CONFIRMED", "SAFE_EXCEPTION", "TIMEOUT", "NONCONVERGENT"}:
         raise AssertionError("PARENT_OUTCOME_CLEANUP_INVALID")
-    cleanup_category = value["runtime_acquire_cleanup_error_category"]
-    if cleanup_category is not None and cleanup_category != SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED and (
-        cleanup_category not in SAFE_RUNTIME_CATEGORIES
-        or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", cleanup_category) is None
+    runtime_cleanup_category = value["runtime_acquire_cleanup_error_category"]
+    if runtime_cleanup_category is not None and runtime_cleanup_category != SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED and (
+        runtime_cleanup_category not in SAFE_RUNTIME_CATEGORIES
+        or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", runtime_cleanup_category) is None
     ):
         raise AssertionError("PARENT_OUTCOME_CLEANUP_CATEGORY_INVALID")
-    if value["runtime_acquire_cleanup_result"] != "SAFE_EXCEPTION" and cleanup_category is not None:
+    if value["runtime_acquire_cleanup_result"] != "SAFE_EXCEPTION" and runtime_cleanup_category is not None:
         raise AssertionError("PARENT_OUTCOME_CLEANUP_CATEGORY_UNEXPECTED")
-    for result_key, category_key in (
-        ("state_root_provision_result", "state_root_provision_error_category"),
-        ("state_root_validate_result", "state_root_validate_error_category"),
+    state_root_provision_category = value["state_root_provision_error_category"]
+    if value["state_root_provision_result"] not in STATE_ROOT_RESULT_CLASSES:
+        raise AssertionError("PARENT_OUTCOME_STATE_ROOT_RESULT_INVALID")
+    if state_root_provision_category is not None and state_root_provision_category != "SAFE_ISOLATION_EXCEPTION_CATEGORY_UNRECOGNIZED" and (
+        state_root_provision_category not in SAFE_ISOLATION_CATEGORIES or SAFE_CATEGORY_RE.fullmatch(state_root_provision_category) is None
     ):
-        if value[result_key] not in STATE_ROOT_RESULT_CLASSES:
-            raise AssertionError("PARENT_OUTCOME_STATE_ROOT_RESULT_INVALID")
-        category = value[category_key]
-        if category is not None and category != "SAFE_ISOLATION_EXCEPTION_CATEGORY_UNRECOGNIZED" and (
-            category not in SAFE_ISOLATION_CATEGORIES or SAFE_CATEGORY_RE.fullmatch(category) is None
-        ):
-            raise AssertionError("PARENT_OUTCOME_STATE_ROOT_CATEGORY_INVALID")
-        if value[result_key] != "SAFE_ISOLATION_EXCEPTION" and category is not None:
-            raise AssertionError("PARENT_OUTCOME_STATE_ROOT_CATEGORY_UNEXPECTED")
+        raise AssertionError("PARENT_OUTCOME_STATE_ROOT_CATEGORY_INVALID")
+    if value["state_root_provision_result"] != "SAFE_ISOLATION_EXCEPTION" and state_root_provision_category is not None:
+        raise AssertionError("PARENT_OUTCOME_STATE_ROOT_CATEGORY_UNEXPECTED")
+    state_root_validate_category = value["state_root_validate_error_category"]
+    if value["state_root_validate_result"] not in STATE_ROOT_RESULT_CLASSES:
+        raise AssertionError("PARENT_OUTCOME_STATE_ROOT_RESULT_INVALID")
+    if state_root_validate_category is not None and state_root_validate_category != "SAFE_ISOLATION_EXCEPTION_CATEGORY_UNRECOGNIZED" and (
+        state_root_validate_category not in SAFE_ISOLATION_CATEGORIES or SAFE_CATEGORY_RE.fullmatch(state_root_validate_category) is None
+    ):
+        raise AssertionError("PARENT_OUTCOME_STATE_ROOT_CATEGORY_INVALID")
+    if value["state_root_validate_result"] != "SAFE_ISOLATION_EXCEPTION" and state_root_validate_category is not None:
+        raise AssertionError("PARENT_OUTCOME_STATE_ROOT_CATEGORY_UNEXPECTED")
+    if value["state_root_provision_owner_result"] not in STATE_ROOT_OWNER_RESULTS:
+        raise AssertionError("PARENT_OUTCOME_STATE_ROOT_OWNER_INVALID")
+    if value["state_root_validate_owner_result"] not in STATE_ROOT_OWNER_RESULTS:
+        raise AssertionError("PARENT_OUTCOME_STATE_ROOT_OWNER_INVALID")
+    for result_key, owner_key in (
+        ("state_root_provision_result", "state_root_provision_owner_result"),
+        ("state_root_validate_result", "state_root_validate_owner_result"),
+    ):
+        operation_result = value[result_key]
+        owner_result = value[owner_key]
+        if operation_result == "CONFIRMED" and owner_result != STATE_ROOT_OWNER_TERMINALIZED:
+            raise AssertionError("PARENT_OUTCOME_CONFIRMED_OWNER_INVALID")
+        if operation_result == "NOT_ESTABLISHED" and owner_result != STATE_ROOT_OWNER_NOT_STARTED:
+            raise AssertionError("PARENT_OUTCOME_NOT_STARTED_OWNER_INVALID")
+        if operation_result in {"SAFE_ISOLATION_EXCEPTION", "UNEXPECTED_EXCEPTION"} and owner_result != STATE_ROOT_OWNER_TERMINALIZED:
+            raise AssertionError("PARENT_OUTCOME_EXCEPTION_OWNER_INVALID")
     if value["state_root_provision_result"] != "CONFIRMED" and value["state_root_validate_result"] == "CONFIRMED":
         raise AssertionError("PARENT_OUTCOME_STATE_ROOT_CHRONOLOGY_INVALID")
     if value["runtime_acquire_result"] == "RUNTIME_ACQUIRE_NOT_ESTABLISHED" and (
         value["runtime_acquire_initial_result"] is not None
-        or category is not None
+        or value["runtime_acquire_error_category"] is not None
         or value["runtime_acquire_cleanup_result"] is not None
-        or cleanup_category is not None
+        or value["runtime_acquire_cleanup_error_category"] is not None
     ):
         raise AssertionError("PARENT_OUTCOME_NOT_ESTABLISHED_FACTS_INVALID")
     if value["child_result_valid"] and value["child_result_discovery_class"] != "CHILD_RESULT_DISCOVERY_CONFIRMED":
@@ -2300,8 +2416,10 @@ def validate_parent_execution_outcome(value: Mapping[str, Any]) -> None:
             value["runtime_acquire_cleanup_error_category"] is None,
             value["state_root_provision_result"] == "CONFIRMED",
             value["state_root_provision_error_category"] is None,
+            value["state_root_provision_owner_result"] == STATE_ROOT_OWNER_TERMINALIZED,
             value["state_root_validate_result"] == "CONFIRMED",
             value["state_root_validate_error_category"] is None,
+            value["state_root_validate_owner_result"] == STATE_ROOT_OWNER_TERMINALIZED,
         )
         if not all(required):
             raise AssertionError("PARENT_OUTCOME_SUCCESS_FACTS_INVALID")
@@ -2980,8 +3098,10 @@ def recover_parent_state_root_authority(discovery: ChildResultDiscovery) -> dict
     missing = {
         "state_root_provision_result": "NOT_ESTABLISHED",
         "state_root_provision_error_category": None,
+        "state_root_provision_owner_result": STATE_ROOT_OWNER_NOT_STARTED,
         "state_root_validate_result": "NOT_ESTABLISHED",
         "state_root_validate_error_category": None,
+        "state_root_validate_owner_result": STATE_ROOT_OWNER_NOT_STARTED,
     }
     if discovery.run is None:
         return missing
@@ -2995,53 +3115,89 @@ def recover_parent_state_root_authority(discovery: ChildResultDiscovery) -> dict
         return [record for record in records if record.get("event") == name]
 
     provision_intent, provision_result = events("STATE_ROOT_PROVISION_INTENT"), events("STATE_ROOT_PROVISION_RESULT")
+    provision_owner = events("STATE_ROOT_PROVISION_OWNER_RESULT")
     validate_intent, validate_result = events("STATE_ROOT_VALIDATE_INTENT"), events("STATE_ROOT_VALIDATE_RESULT")
+    validate_owner = events("STATE_ROOT_VALIDATE_OWNER_RESULT")
     provision_category = events("STATE_ROOT_PROVISION_ERROR_CATEGORY")
     validate_category = events("STATE_ROOT_VALIDATE_ERROR_CATEGORY")
-    if len(provision_intent) != 1 or len(provision_result) != 1 or len(provision_category) > 1 or len(validate_category) > 1:
+    if (
+        len(provision_intent) != 1 or len(provision_result) != 1 or len(provision_owner) != 1
+        or len(provision_category) > 1 or len(validate_category) > 1
+    ):
         return missing
     provision_value = provision_result[0].get("result")
-    if provision_value not in STATE_ROOT_RESULT_CLASSES or provision_intent[0].get("status") != "PENDING":
+    provision_owner_value = provision_owner[0].get("result")
+    if (
+        provision_value not in STATE_ROOT_RESULT_CLASSES
+        or provision_owner_value not in STATE_ROOT_OWNER_RESULTS
+        or provision_intent[0].get("status") != "PENDING"
+    ):
         return missing
-    if not positions[id(provision_intent[0])] < positions[id(provision_result[0])]:
+    if not positions[id(provision_intent[0])] < positions[id(provision_result[0])] < positions[id(provision_owner[0])]:
         return missing
-    category = provision_category[0].get("result") if provision_category else None
-    if category is not None and (provision_value != "SAFE_ISOLATION_EXCEPTION" or category not in SAFE_ISOLATION_CATEGORIES | {"SAFE_ISOLATION_EXCEPTION_CATEGORY_UNRECOGNIZED"}):
+    provision_category_value = provision_category[0].get("result") if provision_category else None
+    if provision_category_value is not None and (
+        provision_value != "SAFE_ISOLATION_EXCEPTION"
+        or provision_category_value not in SAFE_ISOLATION_CATEGORIES | {"SAFE_ISOLATION_EXCEPTION_CATEGORY_UNRECOGNIZED"}
+        or not positions[id(provision_result[0])] < positions[id(provision_category[0])] < positions[id(provision_owner[0])]
+    ):
         return missing
-    if provision_category and not positions[id(provision_category[0])] > positions[id(provision_result[0])]:
+    if provision_value == "CONFIRMED" and provision_owner_value != STATE_ROOT_OWNER_TERMINALIZED:
+        return missing
+    if provision_value == "NOT_ESTABLISHED" and provision_owner_value != STATE_ROOT_OWNER_NOT_STARTED:
+        return missing
+    if provision_value not in {"CONFIRMED", "NOT_ESTABLISHED"} and provision_owner_value not in {
+        STATE_ROOT_OWNER_TERMINALIZED, STATE_ROOT_OWNER_NONCONVERGENT, STATE_ROOT_OWNER_NOT_STARTED,
+    }:
         return missing
     if provision_value != "CONFIRMED":
-        if len(validate_intent) != 1 or len(validate_result) != 1 or validate_category:
+        if len(validate_intent) != 1 or len(validate_result) != 1 or len(validate_owner) != 1 or validate_category:
             return missing
+        validate_value = validate_result[0].get("result")
+        validate_owner_value = validate_owner[0].get("result")
         if (
             validate_intent[0].get("status") != "PENDING"
-            or validate_result[0].get("result") != "NOT_ESTABLISHED"
-            or not positions[id(provision_result[0])] < positions[id(validate_intent[0])] < positions[id(validate_result[0])]
+            or validate_value != "NOT_ESTABLISHED"
+            or validate_owner_value != STATE_ROOT_OWNER_NOT_STARTED
+            or not positions[id(provision_owner[0])] < positions[id(validate_intent[0])] < positions[id(validate_result[0])] < positions[id(validate_owner[0])]
         ):
             return missing
         return {
             "state_root_provision_result": provision_value,
-            "state_root_provision_error_category": category,
+            "state_root_provision_error_category": provision_category_value,
+            "state_root_provision_owner_result": provision_owner_value,
             "state_root_validate_result": "NOT_ESTABLISHED",
             "state_root_validate_error_category": None,
+            "state_root_validate_owner_result": STATE_ROOT_OWNER_NOT_STARTED,
         }
-    if len(validate_intent) != 1 or len(validate_result) != 1:
+    if len(validate_intent) != 1 or len(validate_result) != 1 or len(validate_owner) != 1:
         return missing
     validate_value = validate_result[0].get("result")
-    if validate_value not in STATE_ROOT_RESULT_CLASSES or validate_intent[0].get("status") != "PENDING":
+    validate_owner_value = validate_owner[0].get("result")
+    if (
+        validate_value not in STATE_ROOT_RESULT_CLASSES
+        or validate_owner_value not in STATE_ROOT_OWNER_RESULTS
+        or validate_intent[0].get("status") != "PENDING"
+    ):
         return missing
-    if not positions[id(provision_result[0])] < positions[id(validate_intent[0])] < positions[id(validate_result[0])]:
+    if not positions[id(provision_owner[0])] < positions[id(validate_intent[0])] < positions[id(validate_result[0])] < positions[id(validate_owner[0])]:
         return missing
-    vcategory = validate_category[0].get("result") if validate_category else None
-    if vcategory is not None and (validate_value != "SAFE_ISOLATION_EXCEPTION" or vcategory not in SAFE_ISOLATION_CATEGORIES | {"SAFE_ISOLATION_EXCEPTION_CATEGORY_UNRECOGNIZED"}):
+    validate_category_value = validate_category[0].get("result") if validate_category else None
+    if validate_category_value is not None and (
+        validate_value != "SAFE_ISOLATION_EXCEPTION"
+        or validate_category_value not in SAFE_ISOLATION_CATEGORIES | {"SAFE_ISOLATION_EXCEPTION_CATEGORY_UNRECOGNIZED"}
+        or not positions[id(validate_result[0])] < positions[id(validate_category[0])] < positions[id(validate_owner[0])]
+    ):
         return missing
-    if validate_category and not positions[id(validate_category[0])] > positions[id(validate_result[0])]:
+    if validate_value == "CONFIRMED" and validate_owner_value != STATE_ROOT_OWNER_TERMINALIZED:
         return missing
     return {
         "state_root_provision_result": provision_value,
-        "state_root_provision_error_category": category,
+        "state_root_provision_error_category": provision_category_value,
+        "state_root_provision_owner_result": provision_owner_value,
         "state_root_validate_result": validate_value,
-        "state_root_validate_error_category": vcategory,
+        "state_root_validate_error_category": validate_category_value,
+        "state_root_validate_owner_result": validate_owner_value,
     }
 
 
@@ -3227,15 +3383,139 @@ class StateRootProvisionOfflineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(effects.runtime_acquire_calls, 0)
                 self.assertEqual((effects.model_list_calls, effects.thread_start_calls, effects.turn_start_calls, effects.approval_responses), (0, 0, 0, 0))
 
+    async def test_provision_and_validate_complete_before_deadline_are_terminalized(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c9-state-worker-success-") as directory:
+            run = FreshProbeRun.skeleton(Path(directory))
+            provision, validate = await provision_and_validate_state_root(
+                run, provision=lambda: None, validate=lambda: None, timeout=0.2,
+            )
+            self.assertEqual(provision.operation_result, "CONFIRMED")
+            self.assertIsNone(provision.safe_error_category)
+            self.assertTrue(provision.worker_terminalized)
+            self.assertEqual(provision.owner_result, STATE_ROOT_OWNER_TERMINALIZED)
+            self.assertEqual(validate.operation_result, "CONFIRMED")
+            self.assertIsNone(validate.safe_error_category)
+            self.assertTrue(validate.worker_terminalized)
+            self.assertEqual(validate.owner_result, STATE_ROOT_OWNER_TERMINALIZED)
+
+    async def test_provision_timeout_terminalized_blocks_validate_and_all_effects(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c9-state-worker-provision-timeout-") as directory:
+            run = FreshProbeRun.skeleton(Path(directory))
+            validate_calls = 0
+            effects = {"runtime_acquire": 0, "model_list": 0, "thread_start": 0, "turn_start": 0, "approval": 0}
+
+            def validate() -> None:
+                nonlocal validate_calls
+                validate_calls += 1
+
+            provision, validated = await provision_and_validate_state_root(
+                run, provision=lambda: time.sleep(0.05), validate=validate, timeout=0.01,
+            )
+            self.assertEqual((provision.operation_result, provision.owner_result), ("TIMEOUT", STATE_ROOT_OWNER_TERMINALIZED))
+            self.assertTrue(provision.worker_terminalized)
+            self.assertEqual((validated.operation_result, validated.owner_result), ("NOT_ESTABLISHED", STATE_ROOT_OWNER_NOT_STARTED))
+            self.assertEqual(validate_calls, 0)
+            if provision.operation_result == "CONFIRMED" and validated.operation_result == "CONFIRMED":
+                for key in effects:
+                    effects[key] += 1
+            self.assertEqual(effects, {"runtime_acquire": 0, "model_list": 0, "thread_start": 0, "turn_start": 0, "approval": 0})
+
+    async def test_provision_timeout_nonconvergent_is_finite_and_blocks_every_downstream_effect(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c9-state-worker-provision-nonconvergent-") as directory:
+            run = FreshProbeRun.skeleton(Path(directory))
+            release = threading.Event()
+            started = threading.Event()
+            finished = threading.Event()
+            validate_calls = 0
+            effects = {"runtime_acquire": 0, "model_list": 0, "thread_start": 0, "turn_start": 0, "approval": 0}
+
+            def stubborn_provision() -> None:
+                started.set()
+                release.wait()
+                finished.set()
+
+            def validate() -> None:
+                nonlocal validate_calls
+                validate_calls += 1
+
+            try:
+                provision, validated = await provision_and_validate_state_root(
+                    run, provision=stubborn_provision, validate=validate, timeout=0.01,
+                )
+                self.assertTrue(started.is_set())
+                self.assertEqual((provision.operation_result, provision.owner_result), ("TIMEOUT", STATE_ROOT_OWNER_NONCONVERGENT))
+                self.assertFalse(provision.worker_terminalized)
+                self.assertEqual((validated.operation_result, validated.owner_result), ("NOT_ESTABLISHED", STATE_ROOT_OWNER_NOT_STARTED))
+                self.assertEqual(validate_calls, 0)
+                if provision.operation_result == "CONFIRMED" and validated.operation_result == "CONFIRMED":
+                    for key in effects:
+                        effects[key] += 1
+                self.assertEqual(effects, {"runtime_acquire": 0, "model_list": 0, "thread_start": 0, "turn_start": 0, "approval": 0})
+            finally:
+                release.set()
+                self.assertTrue(finished.wait(1.0))
+
+    async def test_validate_timeout_terminalized_blocks_runtime_acquire(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c9-state-worker-validate-timeout-") as directory:
+            run = FreshProbeRun.skeleton(Path(directory))
+            effects = {"runtime_acquire": 0, "model_list": 0, "thread_start": 0, "turn_start": 0, "approval": 0}
+            provision, validate = await provision_and_validate_state_root(
+                run, provision=lambda: None, validate=lambda: time.sleep(0.05), timeout=0.01,
+            )
+            self.assertEqual((provision.operation_result, provision.owner_result), ("CONFIRMED", STATE_ROOT_OWNER_TERMINALIZED))
+            self.assertEqual((validate.operation_result, validate.owner_result), ("TIMEOUT", STATE_ROOT_OWNER_TERMINALIZED))
+            self.assertTrue(validate.worker_terminalized)
+            if provision.operation_result == "CONFIRMED" and validate.operation_result == "CONFIRMED":
+                for key in effects:
+                    effects[key] += 1
+            self.assertEqual(effects, {"runtime_acquire": 0, "model_list": 0, "thread_start": 0, "turn_start": 0, "approval": 0})
+
+    async def test_validate_timeout_nonconvergent_is_finite_and_blocks_runtime_acquire(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c9-state-worker-validate-nonconvergent-") as directory:
+            run = FreshProbeRun.skeleton(Path(directory))
+            release = threading.Event()
+            started = threading.Event()
+            finished = threading.Event()
+            effects = {"runtime_acquire": 0, "model_list": 0, "thread_start": 0, "turn_start": 0, "approval": 0}
+
+            def stubborn_validate() -> None:
+                started.set()
+                release.wait()
+                finished.set()
+
+            try:
+                provision, validate = await provision_and_validate_state_root(
+                    run, provision=lambda: None, validate=stubborn_validate, timeout=0.01,
+                )
+                self.assertTrue(started.is_set())
+                self.assertEqual((provision.operation_result, provision.owner_result), ("CONFIRMED", STATE_ROOT_OWNER_TERMINALIZED))
+                self.assertEqual((validate.operation_result, validate.owner_result), ("TIMEOUT", STATE_ROOT_OWNER_NONCONVERGENT))
+                self.assertFalse(validate.worker_terminalized)
+                if provision.operation_result == "CONFIRMED" and validate.operation_result == "CONFIRMED":
+                    for key in effects:
+                        effects[key] += 1
+                self.assertEqual(effects, {"runtime_acquire": 0, "model_list": 0, "thread_start": 0, "turn_start": 0, "approval": 0})
+            finally:
+                release.set()
+                self.assertTrue(finished.wait(1.0))
+
+    def test_state_root_timeout_path_uses_one_finite_owner_join(self) -> None:
+        source = inspect.getsource(bounded_state_root_operation)
+        self.assertEqual(source.count("worker_thread.join("), 1)
+        self.assertIn("P7C9_STATE_ROOT_WORKER_JOIN_SECONDS", source)
+        self.assertNotIn("worker_thread.join()", source)
+
     def _state_journal(self, root: Path, *, complete: bool = True) -> tuple[FreshProbeRun, RecoveryJournal, ChildResultDiscovery]:
         run = FreshProbeRun.skeleton(root)
         journal = RecoveryJournal(run.probe_recovery, source_sha="a" * 40, source_tree="b" * 40)
         journal._append({"event": "GLOBAL_LATCH_RESERVED", "result": "YES"})
         journal.intent("STATE_ROOT_PROVISION")
         journal.result("STATE_ROOT_PROVISION", "CONFIRMED")
+        journal.result("STATE_ROOT_PROVISION_OWNER", STATE_ROOT_OWNER_TERMINALIZED)
         if complete:
             journal.intent("STATE_ROOT_VALIDATE")
             journal.result("STATE_ROOT_VALIDATE", "CONFIRMED")
+            journal.result("STATE_ROOT_VALIDATE_OWNER", STATE_ROOT_OWNER_TERMINALIZED)
         return run, journal, ChildResultDiscovery(run, True, False, "SYNTHETIC")
 
     def test_parent_provision_recovery_is_confirmed_only_for_exact_chronology(self) -> None:
@@ -3244,7 +3524,9 @@ class StateRootProvisionOfflineTests(unittest.IsolatedAsyncioTestCase):
             _, _, discovery = self._state_journal(root)
             facts = recover_parent_state_root_authority(discovery)
             self.assertEqual(facts["state_root_provision_result"], "CONFIRMED")
+            self.assertEqual(facts["state_root_provision_owner_result"], STATE_ROOT_OWNER_TERMINALIZED)
             self.assertEqual(facts["state_root_validate_result"], "CONFIRMED")
+            self.assertEqual(facts["state_root_validate_owner_result"], STATE_ROOT_OWNER_TERMINALIZED)
 
     def test_parent_provision_recovery_missing_unsafe_duplicate_conflicting_and_invalid_fail_closed(self) -> None:
         cases = ("missing", "unsafe", "duplicate", "conflicting", "chronology")
@@ -3278,6 +3560,32 @@ class StateRootProvisionOfflineTests(unittest.IsolatedAsyncioTestCase):
                 facts = recover_parent_state_root_authority(ChildResultDiscovery(run, True, False, "SYNTHETIC"))
                 self.assertEqual(facts["state_root_provision_result"], "NOT_ESTABLISHED")
                 self.assertEqual(facts["state_root_validate_result"], "NOT_ESTABLISHED")
+
+    def test_parent_state_root_owner_recovery_missing_duplicate_and_conflicting_fail_closed(self) -> None:
+        for case in ("missing_provision_owner", "missing_validate_owner", "duplicate_provision_owner", "duplicate_validate_owner", "conflicting_owner"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="p7c9-state-owner-recovery-") as directory:
+                root = Path(directory)
+                run = FreshProbeRun.skeleton(root)
+                journal = RecoveryJournal(run.probe_recovery, source_sha="a" * 40, source_tree="b" * 40)
+                journal.intent("STATE_ROOT_PROVISION")
+                journal.result("STATE_ROOT_PROVISION", "CONFIRMED")
+                if case != "missing_provision_owner":
+                    journal.result("STATE_ROOT_PROVISION_OWNER", STATE_ROOT_OWNER_TERMINALIZED)
+                journal.intent("STATE_ROOT_VALIDATE")
+                journal.result("STATE_ROOT_VALIDATE", "CONFIRMED")
+                if case != "missing_validate_owner":
+                    journal.result("STATE_ROOT_VALIDATE_OWNER", STATE_ROOT_OWNER_TERMINALIZED)
+                if case == "duplicate_provision_owner":
+                    journal.result("STATE_ROOT_PROVISION_OWNER", STATE_ROOT_OWNER_TERMINALIZED)
+                elif case == "duplicate_validate_owner":
+                    journal.result("STATE_ROOT_VALIDATE_OWNER", STATE_ROOT_OWNER_TERMINALIZED)
+                elif case == "conflicting_owner":
+                    journal.result("STATE_ROOT_VALIDATE_OWNER", STATE_ROOT_OWNER_NONCONVERGENT)
+                facts = recover_parent_state_root_authority(ChildResultDiscovery(run, True, False, "SYNTHETIC"))
+                self.assertEqual(facts["state_root_provision_result"], "NOT_ESTABLISHED")
+                self.assertEqual(facts["state_root_validate_result"], "NOT_ESTABLISHED")
+                self.assertEqual(facts["state_root_provision_owner_result"], STATE_ROOT_OWNER_NOT_STARTED)
+                self.assertEqual(facts["state_root_validate_owner_result"], STATE_ROOT_OWNER_NOT_STARTED)
 
 
 class RuntimeAcquireOfflineTests(unittest.IsolatedAsyncioTestCase):
@@ -3519,6 +3827,48 @@ class Repair1AcquisitionAuthorityOfflineTests(unittest.TestCase):
                         runtime_acquire_initial_result=RuntimeAcquireClass.CONFIRMED,
                         runtime_acquire_result=result,
                     )
+
+    def test_not_established_runtime_matrix_rejects_each_runtime_fact_independently(self) -> None:
+        base = make_parent_execution_outcome(
+            execution_class=CHILD_RETURN_NONZERO, watchdog_status="PROCESS_COMPLETED",
+            child_returncode_class=CHILD_RETURN_NONZERO, child_result_present=False,
+            child_result_valid=False, parent_boundary_class="BOUNDARY_NOT_PROVED",
+            boundary_drift_class=BOUNDARY_DRIFT_DETECTED, global_latch_present=True,
+            normal_final_result_present=False, child_result_discovery_class="CHILD_RESULT_DISCOVERY_MISSING",
+            state_root_provision_error_category=None, state_root_validate_error_category=None,
+        )
+        mutations = {
+            "runtime_acquire_initial_result": RuntimeAcquireClass.CONFIRMED,
+            "runtime_acquire_error_category": "capability_mismatch",
+            "runtime_acquire_cleanup_result": "CONFIRMED",
+            "runtime_acquire_cleanup_error_category": "capability_mismatch",
+        }
+        for field, invalid_value in mutations.items():
+            invalid = dict(base)
+            invalid[field] = invalid_value
+            with self.subTest(field=field), self.assertRaises(AssertionError):
+                validate_parent_execution_outcome(invalid)
+
+    def test_state_root_category_validation_is_independent_of_runtime_matrix(self) -> None:
+        valid = make_parent_execution_outcome(
+            execution_class=CHILD_RETURN_NONZERO, watchdog_status="PROCESS_COMPLETED",
+            child_returncode_class=CHILD_RETURN_NONZERO, child_result_present=False,
+            child_result_valid=False, parent_boundary_class="BOUNDARY_NOT_PROVED",
+            boundary_drift_class=BOUNDARY_DRIFT_DETECTED, global_latch_present=True,
+            normal_final_result_present=False, child_result_discovery_class="CHILD_RESULT_DISCOVERY_MISSING",
+            state_root_provision_result="SAFE_ISOLATION_EXCEPTION",
+            state_root_provision_error_category="unexpected_state_entry",
+            state_root_provision_owner_result=STATE_ROOT_OWNER_TERMINALIZED,
+        )
+        self.assertEqual(valid["state_root_provision_error_category"], "unexpected_state_entry")
+        invalid = dict(valid)
+        invalid["state_root_provision_error_category"] = "raw unsafe"
+        with self.assertRaises(AssertionError):
+            validate_parent_execution_outcome(invalid)
+        invalid = dict(valid)
+        invalid["state_root_provision_result"] = "CONFIRMED"
+        with self.assertRaises(AssertionError):
+            validate_parent_execution_outcome(invalid)
 
 
 class DenyOnlyApprovalOfflineTests(unittest.IsolatedAsyncioTestCase):
@@ -4010,6 +4360,26 @@ class Repair3AuthorityOfflineTests(unittest.TestCase):
                 with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
                     validate_parent_final_result(invalid)
 
+    def test_normal_child_result_rejects_nonterminal_state_root_worker(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c9-state-owner-child-result-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            child = self._child(run)
+            authority = {
+                "pid": 101, "pgid": 101, "sid": 101, "term_count": 0, "kill_count": 0,
+                "signalled_parent_pgid": "NO", "second_pgid_targeted": "NO",
+            }
+            for owner_key in ("state_root_provision_owner_result", "state_root_validate_owner_result"):
+                invalid = dict(child)
+                invalid[owner_key] = STATE_ROOT_OWNER_NONCONVERGENT
+                with self.subTest(owner_key=owner_key), self.assertRaises(AssertionError):
+                    validate_child_result(invalid)
+                with self.assertRaises(AssertionError):
+                    make_parent_final_result(
+                        invalid, child_return_classification=CHILD_RETURN_COMPLETED,
+                        one_child_count=1, second_child_started="NO", retry_count=0,
+                        authority=authority, snapshot=ProcessGroupSnapshot((), (), 0),
+                    )
+
     def test_parent_writer_rejects_active_group_scan_error_and_bad_effects(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c9-parent-invalid-") as directory:
             run = FreshProbeRun.materialize(Path(directory))
@@ -4282,8 +4652,9 @@ class Repair4AuthorityOfflineTests(unittest.TestCase):
             PROBE_WATCHDOG_HARD_DEADLINE,
             PROBE_INTERNAL_WORST_CASE_SECONDS + PROBE_WATCHDOG_MARGIN_SECONDS,
         )
-        self.assertEqual(NORMAL_PATH_INTERNAL_WORST_CASE_SECONDS, 191.0)
-        self.assertEqual(FAILED_ACQUIRE_INTERNAL_WORST_CASE_SECONDS, 69.0)
+        self.assertEqual(NORMAL_PATH_INTERNAL_WORST_CASE_SECONDS, 192.0)
+        self.assertEqual(FAILED_PROVISION_INTERNAL_WORST_CASE_SECONDS, 12.0)
+        self.assertEqual(FAILED_ACQUIRE_INTERNAL_WORST_CASE_SECONDS, 70.0)
         self.assertGreater(
             PROBE_WATCHDOG_HARD_DEADLINE,
             FAILED_ACQUIRE_INTERNAL_WORST_CASE_SECONDS + PROBE_WATCHDOG_MARGIN_SECONDS,
@@ -5217,12 +5588,15 @@ class P7C9StaticGateTests(unittest.TestCase):
         self.assertEqual(PROBE_OBSERVATION_MARGIN_SECONDS, 60.0)
         self.assertEqual(PROBE_OBSERVATION_TIMEOUT, 100.0)
         self.assertEqual(PROBE_RUNTIME_ACQUIRE_TIMEOUT, 45.0)
-        self.assertEqual(PROBE_INTERNAL_WORST_CASE_SECONDS, 191.0)
-        self.assertEqual(NORMAL_PATH_INTERNAL_WORST_CASE_SECONDS, 191.0)
-        self.assertEqual(FAILED_ACQUIRE_INTERNAL_WORST_CASE_SECONDS, 69.0)
+        self.assertEqual(PROBE_INTERNAL_WORST_CASE_SECONDS, 192.0)
+        self.assertEqual(NORMAL_PATH_INTERNAL_WORST_CASE_SECONDS, 192.0)
+        self.assertEqual(FAILED_PROVISION_INTERNAL_WORST_CASE_SECONDS, 12.0)
+        self.assertEqual(FAILED_ACQUIRE_INTERNAL_WORST_CASE_SECONDS, 70.0)
         self.assertEqual(PROBE_WATCHDOG_MARGIN_SECONDS, 15.0)
-        self.assertEqual(PROBE_WATCHDOG_HARD_DEADLINE, 206.001)
+        self.assertEqual(PROBE_WATCHDOG_HARD_DEADLINE, 207.001)
         self.assertEqual(P7C9_RUNTIME_ACQUIRE_CLEANUP_CANCEL_JOIN_SECONDS, 1.0)
+        self.assertEqual(P7C9_STATE_ROOT_PROVISION_VALIDATE_TIMEOUT_SECONDS, 5.0)
+        self.assertEqual(P7C9_STATE_ROOT_WORKER_JOIN_SECONDS, 1.0)
 
     def test_acquisition_horizon_and_parent_outcome_fields_are_frozen(self) -> None:
         self.assertGreater(
