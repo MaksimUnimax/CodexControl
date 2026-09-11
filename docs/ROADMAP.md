@@ -38,14 +38,14 @@ Repair-2 review:
 
 `docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR2_ARCHITECT_REVIEW_2026-09-11.md`
 
-Frozen next repair:
+Frozen Repair-3:
 
 `docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR3_CONTRACT_2026-09-11.md`
 
 Repair-2 closes most prior preparation defects but is not real-executable. Remaining harness-only blockers are: final unbounded joins after timeout, incomplete task terminalization on sibling failure paths, non-exact sentinel-content proof, a scan-to-baseline-identity race, and incomplete post-delete safe-file authority reconciliation.
 
-- [PAUSED BY OWNER / SERVER MAINTENANCE] **Server-80 disk inventory and reviewed cleanup.** This maintenance must not remove or mutate any retained P7.C6 recovery/latch/controller/state authority.
-- [NEXT AFTER DISK MAINTENANCE / ZERO EFFECT] **P7.C6 prep-v2 Repair-3.** Harness/tests/evidence only; no production `src/**` change and no real Codex effects.
+- [DONE / SERVER MAINTENANCE] **Conservative server-80 disk cleanup.** Reclaimed exactly `945344512` bytes (`0.880421 GiB`). P7.C6 protected state remained present, canonical project Git state was unchanged, and no real Codex effects occurred.
+- [NEXT / ZERO-REAL-EFFECT] **P7.C6 prep-v2 Repair-3.** Harness/tests/evidence only. Close the five frozen Repair-3 defects while preserving all accepted Repair-2 authorities. No `src/**` changes and no real Codex effects.
 - [BLOCKED] P7.C6 real same-thread continuation. No authorization until Repair-3 is independently accepted.
 
 ## P8 — deployment packaging/rollback
