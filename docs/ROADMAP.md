@@ -22,46 +22,47 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [DONE] P7.C5 corrected fake hard-delete acceptance — `946ddf7ac6f7c3539bc3f344c6edf21d6ffce528`.
 - [ACCEPTED CORRECTION] ADR-0045 shared persistent CODEX_HOME semantics.
 
-### P7.C6 preparation
+### P7.C6 retained-thread continuation
 
 - [REWORK_REQUIRED / ZERO EFFECT] Prep-v2 through Repair-5.
 - [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Repair-6 `76a7aa24e3cfdfb12c3314a7e01691d4a943b551`, tree `92abebdfb3390d4c58f4aefc00aa84b83841e99e`.
-
-### P7.C6 one-shot real continuation
-
-- [CONSUMED / REAL ACCEPTANCE FAILURE / NO RERUN] The one authorized real command executed exactly once and returned `RC=1`.
+- [CONSUMED / REAL ACCEPTANCE FAILURE / NO RERUN] One-shot same-thread continuation executed exactly once and returned `RC=1`.
 - One-shot evidence: `9b45d27a9d55d7d0695351ca57f71a75a4cd7971`.
 - Zero-effect consumed-run forensic: `cf716ebb6c90e09fe927bccf36fdc08c776537b3`.
-- Architect forensic review: `docs/evidence/p7c6/P7C6_CONSUMED_REAL_CONTINUATION_ARCHITECT_REVIEW_2026-09-11.md`.
-- Turn-4 start confirmed and Turn-4 actually completed with exact sentinel proof.
-- Approval bridge observed zero approval requests/responses and timed out.
-- No Turn-5 start is present.
-- Controller stayed untouched at schema/user_version `0` with no synthetic dialogue/deletion state.
-- Official P1.9 delete is `NOT_DISPATCHED_PROVED`.
-- Root cause is `HARNESS_ACCEPTANCE_STIMULUS_DEFECT`; production defect remains `NO`.
-- The retained P7.C6 thread is permanently forensic-only; no same-thread rerun, resume, interrupt, delete, read or list is authorized.
-
-`P7C6_REAL_ACCEPTANCE=FAILED_HARNESS_STIMULUS`
-
-`P7C6_REAL_RERUN_AUTHORIZED=NO`
+- Architect review: `docs/evidence/p7c6/P7C6_CONSUMED_REAL_CONTINUATION_ARCHITECT_REVIEW_2026-09-11.md`.
+- Final classification: Turn-4 completed with exact sentinel but emitted no approval request; harness approval wait timed out before Turn-5/delete.
+- `OFFICIAL_P1_DELETE_CLASS=NOT_DISPATCHED_PROVED`.
+- `ROOT_CAUSE_CLASS=HARNESS_ACCEPTANCE_STIMULUS_DEFECT`.
+- `PRODUCTION_DEFECT_ESTABLISHED=NO`.
+- Retained P7.C6 thread is permanently forensic-only; no same-thread rerun is authorized.
 
 ### P7.C7 fresh disposable-thread successor
 
 P7.C7 is the successor path for the still-missing real approval + interrupt + official delete + post-delete acceptance.
 
-No real P7.C7 thread is authorized yet.
+#### Approval-stimulus authority
 
-Run-1 provides a preserved empirical approval-producing observation: its bounded `sleep 30 && touch <outside-workspace-sentinel>` stimulus produced exactly one `COMMAND_EXECUTION` approval request, while retained Turn-3 forensic later reconstructed the command locally and classified its observed grammar as `OTHER / TOKEN_MISMATCH`, command SHA-256 `69da337831d6b9729c7710a063af5133cebd0a32459d428e9309d7f9caf42b0a`.
+- [DONE / ZERO EFFECT / FAIL-CLOSED] Authority evidence lineage `5ec38a38cef6363bb3709aefe57c0dedae5f5e13` -> `e00392fbff6894e1857eb4c8f1e1937a88ca1e96`.
+- Architect review: `docs/evidence/p7c7/P7C7_APPROVAL_STIMULUS_AUTHORITY_ARCHITECT_REVIEW_2026-09-11.md`.
+- Exact upstream `rust-v0.144.6` source proves internal command vector -> app-server `shlex_join` wire mapping and conditional approval routing.
+- Future model-generated internal command vector is not deterministically knowable from preserved/offline evidence.
+- Therefore `P7C7_APPROVAL_REQUEST_GRAMMAR=NOT_ESTABLISHED` is architect accepted as the correct fail-closed conclusion.
+- No ALLOW matcher is authorized from persisted Run-1 command data.
 
-Production turn-start authority uses `approvalPolicy="on-request"` and workspace-write sandboxing, so P7.C7 must first freeze a proven approval stimulus/matcher rather than assume every command generates approval.
+#### DENY-only approval probe preparation
 
 Binding contract:
 
-`docs/evidence/p7c7/P7C7_APPROVAL_STIMULUS_AUTHORITY_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-11.md`
 
-- [NEXT / ZERO REAL EFFECT] **P7.C7 approval-stimulus authority.** Reconstruct the approval-producing Run-1 grammar locally; explain the token mismatch; derive the narrowest safe dynamic matcher; prove broad shell forms remain denied. No production changes and no real Codex effects.
-- [BLOCKED] P7.C7 fresh-thread harness preparation until approval-stimulus authority is architect accepted.
-- [BLOCKED] P7.C7 real fresh-thread acceptance until harness preparation is separately accepted and explicitly one-shot authorized.
+- [NEXT / ZERO REAL EFFECT] Build/test a gated future fresh-thread approval probe with an operator that can never ALLOW, concurrently observes approval and turn terminal, captures raw wire grammar root-only, denies every observed approval request, has a bounded multiple-request policy, uses fresh isolated/process-group authority, and remains inert during ordinary tests.
+- [BLOCKED] One-shot real P7.C7 approval probe until preparation is independently architect accepted.
+- [BLOCKED] P7.C7 matcher authority until a real DENY-only probe yields safe wire-command evidence or another direct authority closes the grammar gap.
+- [BLOCKED] P7.C7 full fresh-thread hard-delete acceptance until probe/matcher/harness are separately accepted and explicitly authorized.
+
+`P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+
+`P7C7_REAL_EXECUTION_AUTHORIZED=NO`
 
 ## P8 — deployment packaging/rollback
 
