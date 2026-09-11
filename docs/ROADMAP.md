@@ -25,38 +25,39 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 ### P7.C6 retained-thread continuation
 
 - [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Preparation Repair-6 `76a7aa24e3cfdfb12c3314a7e01691d4a943b551`, tree `92abebdfb3390d4c58f4aefc00aa84b83841e99e`.
-- [CONSUMED / REAL ACCEPTANCE FAILURE / NO RERUN] One-shot same-thread continuation executed once and failed before Turn-5/delete.
-- Architect classification: Turn-4 completed with exact sentinel but emitted no approval request; `OFFICIAL_P1_DELETE_CLASS=NOT_DISPATCHED_PROVED`; `ROOT_CAUSE_CLASS=HARNESS_ACCEPTANCE_STIMULUS_DEFECT`; production defect `NO`.
-- Retained P7.C6 thread is permanently forensic-only.
+- [CONSUMED / NO RERUN] Real continuation failed before Turn-5/delete; Turn-4 completed without approval request.
+- Final classification: `OFFICIAL_P1_DELETE_CLASS=NOT_DISPATCHED_PROVED`; production defect `NO`.
 
 ### P7.C7 fresh disposable-thread successor
 
 #### Approval-stimulus authority
 
-- [DONE / ZERO EFFECT / FAIL-CLOSED] Evidence lineage `5ec38a38cef6363bb3709aefe57c0dedae5f5e13` -> `e00392fbff6894e1857eb4c8f1e1937a88ca1e96`.
-- Exact upstream `rust-v0.144.6` source proves internal command vector -> app-server `shlex_join` mapping and conditional approval routing.
-- Future concrete model-generated wire grammar is not established offline.
-- `P7C7_APPROVAL_STIMULUS_AUTHORITY=ACCEPTED_AS_NOT_ESTABLISHED`.
-- No ALLOW matcher is authorized.
+- [DONE / ZERO EFFECT / FAIL-CLOSED] Future concrete approval wire grammar not established offline.
+- Exact upstream `rust-v0.144.6` source establishes internal vector -> app-server `shlex_join` projection and conditional approval routing.
+- `P7C7_MATCHER_AUTHORIZED=NO`.
 
 #### DENY-only approval probe preparation
 
 - [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Initial prep through Repair-5.
 - [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Repair-6 `320ae3ba1265608a92ebfe82992068d4b12ebcd9`, tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`, harness blob `b2bf5f91250b8881050ce3afcbd3e86874b15e5e`.
-- Repair-6 acceptance: `docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_ARCHITECT_ACCEPTANCE_2026-09-11.md`.
 
 #### One-shot real DENY-only approval probe
 
-- [CONSUMED / FORENSIC REQUIRED / NO RERUN] Executed exactly once from the accepted Repair-6 snapshot.
-- Published evidence commit: `4629cff73d981ee9c2abafa24c97ba7ca340f87c`.
-- Parent authority: global latch present; normal result absent; parent outcome present; `CHILD_NONZERO`; watchdog `PROCESS_COMPLETED`; active process-group members `0`; scan errors `0`; no TERM/KILL; one child; zero retries.
-- `REAL_COMMAND_RC=0` is not observational success; finite child-failure outcomes may return normally through the parent unittest.
-- Published evidence does not establish exact child failure stage, fresh thread/Turn existence, approval request, DENY response, wire grammar, terminal or sentinel result.
-- [NEXT / ZERO REAL EFFECT] **Consumed-probe forensic:** reconstruct recovery-journal chronology, root-only wire authority, isolated runtime evidence and offline persistent-session correlation without any new app-server RPC or process signal.
-- Architect review: `docs/evidence/p7c7/P7C7_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_ARCHITECT_REVIEW_2026-09-11.md`.
-- Forensic contract: `docs/evidence/p7c7/P7C7_CONSUMED_REAL_DENY_ONLY_APPROVAL_PROBE_FORENSIC_CONTRACT_2026-09-11.md`.
-- [BLOCKED] Matcher authority until accepted forensic/real evidence establishes safe concrete wire grammar.
-- [BLOCKED] Full fresh-thread hard-delete acceptance until probe/forensic/matcher/full harness are separately accepted and explicitly authorized.
+- [CONSUMED / NO RERUN] Executed exactly once; real evidence commit `4629cff73d981ee9c2abafa24c97ba7ca340f87c`.
+- [DONE / ZERO EFFECT FORENSIC] Forensic evidence commit `e589eec3c215d192df48a8e252e74dc13c768327`.
+- Unique retained run established.
+- Journal: `SOURCE_GATE`, `GLOBAL_LATCH_RESERVED`, `RUNTIME_ACQUIRE_INTENT`, `RUNTIME_ACQUIRE_RESULT=NONCONVERGED`, `BOUNDARY_PROOF_RESULT=DEFERRED_TO_PARENT`.
+- No model/list stage recorded; no fresh thread; no Turn; approval not reached; no wire authority; workdir empty; sentinel absent.
+- `LAST_DURABLY_ESTABLISHED_STAGE=RUNTIME_ACQUIRE_INTENT`.
+- `FAILURE_CLASS=RUNTIME_ACQUIRE_FAILURE`.
+- Exact runtime-acquire root cause remains `NOT_ESTABLISHED` because the accepted P7.C7 wrapper collapsed timeout and exception into one `NONCONVERGED` result.
+- Architect source review establishes a harness defect: outer runtime-acquire timeout 5s did not dominate named production startup bounds (15s initialize plus version-probe bounds), and error category was discarded.
+- `P7C7_PRODUCTION_DEFECT_ESTABLISHED=NO`.
+- [CLOSED] P7.C7 remains permanently consumed.
+
+Architect forensic review:
+
+`docs/evidence/p7c7/P7C7_CONSUMED_REAL_DENY_ONLY_APPROVAL_PROBE_FORENSIC_ARCHITECT_REVIEW_2026-09-11.md`
 
 `P7C7_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
@@ -66,13 +67,34 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 
 `P7C7_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
+### P7.C8 fresh DENY-only successor
+
+Binding prep contract:
+
+`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-11.md`
+
+- [NEXT / ZERO REAL EFFECT] Build a new P7.C8 test-only probe harness with an entirely new one-shot namespace.
+- [BOUND] Preserve DENY-only, max-three DENY, ALLOW=0, one child/no retry, exact process-group ownership, immutable recovery journal, measured parent outcomes, post-quiescence boundary, exact normal `1/1/1` lifecycle ledger and zero resume/interrupt/delete/read/list.
+- [FIX] Replace P7.C7 runtime-acquire ambiguity with a dedicated observer that distinguishes `CONFIRMED`, `TIMEOUT`, safe categorized `RuntimeErrorSafe`, unexpected exception and cancellation nonconvergence.
+- [FIX] Runtime acquire target horizon 45s; failed-acquire cleanup authority 12s.
+- [FIX] Preserve safe `RuntimeErrorSafe.category` instead of collapsing it into `NONCONVERGED`.
+- [BUDGET] Candidate sleep 30s; observation 100s; normal internal budget 186s; watchdog hard deadline 205s with 15s margin.
+- [BLOCKED] Any P7.C8 real probe until preparation is independently architect accepted and exact executable SHA/tree are frozen.
+- [BLOCKED] Matcher authority and full hard-delete acceptance until a separately authorized P7.C8 real probe succeeds and is architect reviewed.
+
+`P7C8_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+
+`P7C8_REAL_EXECUTION_AUTHORIZED=NO`
+
+`P7C8_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
+
 ## P8 — deployment packaging/rollback
 
-[BLOCKED BY P7.C7 REAL ACCEPTANCE]
+[BLOCKED BY P7 REAL ACCEPTANCE]
 
 ## P9 — server-80 live Telegram acceptance
 
-[BLOCKED BY P7.C7 REAL ACCEPTANCE]
+[BLOCKED BY P7 REAL ACCEPTANCE]
 
 ## P10 — server-78 discovery/deployment
 
