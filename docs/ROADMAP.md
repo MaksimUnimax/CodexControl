@@ -26,15 +26,14 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 
 - [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Preparation Repair-6 `76a7aa24e3cfdfb12c3314a7e01691d4a943b551`, tree `92abebdfb3390d4c58f4aefc00aa84b83841e99e`.
 - [CONSUMED / REAL ACCEPTANCE FAILURE / NO RERUN] One-shot same-thread continuation executed once and failed before Turn-5/delete.
-- Architect classification: Turn-4 completed with exact sentinel but emitted no approval request; `OFFICIAL_P1_DELETE_CLASS=NOT_DISPATCHED_PROVED`; `ROOT_CAUSE_CLASS=HARNESS_ACCEPTANCE_STIMULUS_DEFECT`; production defect `NO`.
+- Final architect classification: Turn-4 completed with exact sentinel but emitted no approval request; approval wait timed out; `OFFICIAL_P1_DELETE_CLASS=NOT_DISPATCHED_PROVED`; `ROOT_CAUSE_CLASS=HARNESS_ACCEPTANCE_STIMULUS_DEFECT`; production defect `NO`.
 - Retained P7.C6 thread is permanently forensic-only.
 
 ### P7.C7 fresh disposable-thread successor
 
 #### Approval-stimulus authority
 
-- [DONE / ZERO EFFECT / FAIL-CLOSED] Evidence lineage `5ec38a38cef6363bb3709aefe57c0dedae5f5e13` -> `e00392fbff6894e1857eb4c8f1e1937a88ca1e96`.
-- Exact upstream `rust-v0.144.6` source proves internal command vector -> app-server `shlex_join` mapping and conditional approval routing.
+- [DONE / ZERO EFFECT / FAIL-CLOSED] Exact upstream `rust-v0.144.6` source proves internal command vector -> app-server `shlex_join` mapping and conditional approval routing.
 - Future concrete model-generated wire grammar is not established offline.
 - `P7C7_APPROVAL_STIMULUS_AUTHORITY=ACCEPTED_AS_NOT_ESTABLISHED`.
 - No ALLOW matcher is authorized.
@@ -42,13 +41,31 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 #### DENY-only approval probe preparation
 
 - [REWORK_REQUIRED / ZERO EFFECT] Initial prep `e4bcdf43ba3f5c50a65f7f1085781eec41770ede`.
-- [REWORK_REQUIRED / ZERO EFFECT] Repair-1 `bffe4d05340545edd44d503c9a16f1128c65ca7d`, tree `2378c6f0c2b605413cd36c8383d01ee5f0c8f887`.
-- Repair-1 architect review: `docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_ARCHITECT_REVIEW_2026-09-11.md`.
-- Repair-1 keeps useful safety improvements but is not real-executable yet: fast queued approval can be denied before Turn authority and miss wire capture; the real path is not wrapped by a dedicated parent watchdog; inner waits/recovery are not fully finite/durable; DENY ambiguity accounting is incomplete; child result invents process-group zeroes; `/proc` churn semantics are too strict; real path bypasses the proven finite race; final boundary proof occurs before guaranteed containment.
-- Binding Repair-2: `docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR2_CONTRACT_2026-09-11.md`.
-- [NEXT / ZERO REAL EFFECT] **Repair-2:** close the remaining execution-authority defects, preserve zero ALLOW paths, and materialize one complete but disabled one-shot parent/child probe architecture with exact queued-request handling, durable effect journal, finite inner ownership, truthful response accounting and parent-measured group/result authority.
-- [BLOCKED] One-shot real P7.C7 DENY-only approval probe until Repair-2 is independently architect accepted and exact executable source/tree are frozen.
-- [BLOCKED] P7.C7 matcher authority until accepted real probe evidence establishes safe concrete wire grammar.
+- [REWORK_REQUIRED / ZERO EFFECT] Repair-1 `bffe4d05340545edd44d503c9a16f1128c65ca7d`.
+- [REWORK_REQUIRED / ZERO EFFECT] Repair-2 `388b1a1bf46b56bc1734bbf2e3eb630266b822a7`.
+
+Repair-2 materially improves the disabled future real path: exact Turn authority precedes approval dequeue, a queued request can be captured after Turn confirmation, durable journal and DENY attempt accounting exist, finite stage timeouts and a dedicated parent/child process-group watchdog exist, child/final result schemas are separated, runtime-owned sqlite/log state is separated from command-owned mutation surface, and `/proc` disappearance semantics are improved.
+
+Independent architect review still blocks real execution because:
+
+1. parent final result is written through the child-schema writer, so the extended parent schema is rejected and the global final result can never be materialized;
+2. approval-request observation is durably journaled only after the race returns, which is later than possible DENY dispatch;
+3. wire-return and adapter-level result semantics for model/thread/turn are conflated/duplicated in the journal;
+4. command-boundary proof is child-local before parent process-group quiescence, so late descendant mutation can make the final boundary claim stale;
+5. watchdog timeout classification can collapse into generic child nonzero even though a dedicated timeout class exists;
+6. nonconverged approval/terminal owner state does not block child-result publication.
+
+Binding architect review:
+
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR2_ARCHITECT_REVIEW_2026-09-11.md`
+
+Binding Repair-3 contract:
+
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR3_CONTRACT_2026-09-11.md`
+
+- [NEXT / ZERO REAL EFFECT] **Repair-3:** close the six remaining execution/evidence-authority defects while preserving all Repair-2 safety gates.
+- [BLOCKED] One-shot real P7.C7 DENY-only approval probe until Repair-3 is independently architect accepted and exact executable SHA/tree are frozen.
+- [BLOCKED] P7.C7 matcher authority until accepted real DENY-only probe evidence establishes a safe concrete wire grammar.
 - [BLOCKED] P7.C7 full fresh-thread hard-delete acceptance until probe/matcher/full harness are separately accepted and explicitly authorized.
 
 `P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
