@@ -25,35 +25,11 @@ P7.C6 is permanently consumed and forensic-only.
 
 `P7C6_REAL_RERUN_AUTHORIZED=NO`
 
-## P7.C7 approval-stimulus authority
-
-Exact upstream `rust-v0.144.6` release commit `5d1fbf26c43abc65a203928b2e31561cb039e06d` proves the internal command-vector -> app-server `shlex_join` mapping, but offline evidence did not establish the future concrete model-generated wire grammar.
-
-`P7C7_APPROVAL_STIMULUS_AUTHORITY=ACCEPTED_AS_NOT_ESTABLISHED`
-
-`P7C7_MATCHER_AUTHORIZED=NO`
-
 ## P7.C7 DENY-only approval probe
 
-Repair-6 preparation was architect accepted:
+P7.C7 preparation Repair-6 was accepted at `320ae3ba1265608a92ebfe82992068d4b12ebcd9`, tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`. The one-shot real probe executed once and is permanently consumed. Evidence: `4629cff73d981ee9c2abafa24c97ba7ca340f87c`; forensic evidence: `e589eec3c215d192df48a8e252e74dc13c768327`.
 
-- executable commit `320ae3ba1265608a92ebfe82992068d4b12ebcd9`;
-- tree `eb0381e02b94de1a5f2bc1220c4591536b2ba5b0`;
-- harness blob `b2bf5f91250b8881050ce3afcbd3e86874b15e5e`.
-
-The one-shot P7.C7 real probe executed exactly once and is permanently consumed. Real evidence commit: `4629cff73d981ee9c2abafa24c97ba7ca340f87c`.
-
-Consumed-probe forensic evidence commit: `e589eec3c215d192df48a8e252e74dc13c768327`.
-
-Accepted factual classifications:
-
-`JOURNAL_LAST_DURABLE_MILESTONE=RUNTIME_ACQUIRE_RESULT`
-
-`JOURNAL_LAST_DURABLE_RESULT=NONCONVERGED`
-
-`LAST_DURABLY_ESTABLISHED_STAGE=RUNTIME_ACQUIRE_INTENT`
-
-`FAILURE_CLASS=RUNTIME_ACQUIRE_FAILURE`
+Final P7.C7 facts:
 
 `P7C7_FRESH_THREAD_DISPOSITION=NO_FRESH_THREAD_PROVED`
 
@@ -63,106 +39,69 @@ Accepted factual classifications:
 
 `P7C7_HARNESS_OBSERVABILITY_DEFECT_ESTABLISHED=YES`
 
-`PRODUCTION_DEFECT_ESTABLISHED=NO`
-
-P7.C7 used a 5-second outer acquire timeout around a production startup path containing a 15-second initialize bound plus separate version-probe bounds, and its generic helper collapsed timeout and exceptions into one `NONCONVERGED` result. P7.C7 is never rerun.
+`P7C7_PRODUCTION_DEFECT_ESTABLISHED=NO`
 
 `P7C7_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
-`P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO_CONSUMED`
-
-`P7C7_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
-
 ## P7.C8 successor
 
-Initial prep `9297395efb678356255d91aa8d90001a5fc768e0` was architect reviewed as `REWORK_REQUIRED` because acquisition containment/evidence still had unbounded cleanup join, optimistic parent `CONFIRMED`, lost post-containment classification, an invalid cleanup-category journal route, incomplete safe category authority and a non-authoritative journal reader.
+P7.C8 Repair-1 was architect accepted at `070bcd0caa336d6df1ed24ee05d31dcce3d2cd95`, tree `787e083077b7386a8b05968f2193c611d8182d9d`. Its one-shot real probe executed exactly once and is permanently consumed. Real evidence: `21d3c3f6dbcb0c77047121c75b70a0d0f0814bea`.
 
-Repair-1 was architect accepted:
-
-- executable commit `070bcd0caa336d6df1ed24ee05d31dcce3d2cd95`;
-- executable tree `787e083077b7386a8b05968f2193c611d8182d9d`;
-- harness blob `53e70ba37803bb6a88e3e8ab4b7f499db1e28df8`.
-
-The one-shot P7.C8 real probe executed exactly once and is permanently consumed. Real evidence commit: `21d3c3f6dbcb0c77047121c75b70a0d0f0814bea`.
-
-Durable parent authority:
-
-- `PARENT_EXECUTION_CLASS=CHILD_NONZERO`;
-- `WATCHDOG_STATUS=PROCESS_COMPLETED`;
-- `RUNTIME_ACQUIRE_INITIAL_RESULT=RUNTIME_ACQUIRE_SAFE_EXCEPTION`;
-- `RUNTIME_ACQUIRE_RESULT=RUNTIME_ACQUIRE_SAFE_EXCEPTION`;
-- `RUNTIME_ACQUIRE_ERROR_CATEGORY=storage_boundary_invalid`;
-- `RUNTIME_ACQUIRE_CLEANUP_RESULT=CONFIRMED`;
-- normal result absent;
-- child result absent;
-- active process-group count 0, scan errors 0, no TERM/KILL;
-- one child, zero retries.
-
-Architect source review establishes the exact root cause: the P7.C8 test harness manually created `isolated_state/sqlite` and `isolated_state/logs` but omitted the production `.codexcontrol-state-root-v1` marker. Production `IsolatedStateRoot.validate()` requires the exact marker/sqlite/logs layout and correctly rejected the manual state root as `storage_boundary_invalid` before app-server/model/list/thread/start.
-
-Architect review:
-
-`docs/evidence/p7c8/P7C8_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_ARCHITECT_REVIEW_2026-09-11.md`
-
-Final P7.C8 classification:
+The durable runtime-acquire result was `RUNTIME_ACQUIRE_SAFE_EXCEPTION`, category `storage_boundary_invalid`, with confirmed cleanup and no fresh thread/Turn/approval. Architect source review established a harness precondition defect: P7.C8 manually created `sqlite/` and `logs/` but omitted the mandatory production `.codexcontrol-state-root-v1` marker. Production isolation correctly rejected that root.
 
 `P7C8_FAILURE_CLASS=HARNESS_PRECONDITION_DEFECT`
 
 `P7C8_ROOT_CAUSE=ISOLATED_STATE_ROOT_NOT_PROVISIONED_BY_PRODUCTION_AUTHORITY`
 
-`P7C8_FRESH_THREAD_DISPOSITION=NO_FRESH_THREAD_PROVED`
-
-`P7C8_APPROVAL_DISPOSITION=APPROVAL_NOT_REACHED_PROVED`
-
 `P7C8_PRODUCTION_DEFECT_ESTABLISHED=NO`
 
 `P7C8_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
-`P7C8_REAL_APPROVAL_PROBE_AUTHORIZED=NO_CONSUMED`
-
-`P7C8_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
-
 ## P7.C9 production-provisioned successor
 
-Initial zero-effect P7.C9 prep candidate:
+Initial prep `097c8809a90eaca5d7d2074b35dc5e73ae9762c1` correctly moved future real state-root creation to production `IsolatedStateRoot.provision(profile)` followed by `validate(profile)`, but architect review required Repair-1 for parent-category shadowing and state-root worker ownership.
 
-- commit `097c8809a90eaca5d7d2074b35dc5e73ae9762c1`;
-- tree `c099c3a35acde82674f70413f55121c9345c82ba`;
-- harness blob `0bccd8e80b362dd283773d6fea18a4a094018042`;
-- scope limited to the new P7.C9 harness and prep evidence;
-- reported real effects `0`.
+Repair-1 is now architect accepted:
 
-The candidate correctly uses production `IsolatedStateRoot.provision(profile)` followed by `validate(profile)` before runtime acquisition and does not manually create the state root, marker, `sqlite/`, or `logs/`. Failed provision/validate blocks downstream runtime/model/thread/Turn/approval effects, and the accepted P7.C8 acquisition/DENY/process/journal/result gates remain present.
+- executable commit `6cefa7772f00f6b1d67b9c6ecfd3770009d77c7f`;
+- executable tree `1fd13ed5964f7c18ac5c5cfc799ee4670c719ab2`;
+- harness blob `44271459c2b4523f97551ade93563aee96def1c3`;
+- Repair-1 evidence blob `58d505e7c6e4e49ad01376ce9ceb7626554d9a9f`.
 
-Architect review:
+Architect acceptance:
 
-`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_ARCHITECT_ACCEPTANCE_2026-09-11.md`
 
-Disposition: **REWORK_REQUIRED** before any real P7.C9 execution.
+Accepted P7.C9 authority now includes:
 
-Blocking defects:
-
-- `validate_parent_execution_outcome()` shadows `runtime_acquire_error_category` with a state-root category variable before the `RUNTIME_ACQUIRE_NOT_ESTABLISHED` consistency check, so contradictory failure evidence can evade the intended validator gate;
-- the state-root bounded seam returns `TIMEOUT` while its daemon worker may still be running and mutating the fresh state root; worker terminalization/nonconvergence is not durably represented.
-
-Binding Repair-1 contract:
-
-`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_CONTRACT_2026-09-11.md`
+- production-only state-root provision and immediate validation;
+- state root absent before production provisioning;
+- explicit state-root worker ownership `TERMINALIZED/NONCONVERGENT/NOT_STARTED`;
+- 5-second provision/validate ceiling plus 1-second bounded worker join;
+- failed/nonconvergent provision blocks validation/runtime acquire; failed/nonconvergent validation blocks runtime acquire;
+- parent state-root recovery fails closed for missing/unsafe/duplicate/conflicting result or owner chronology;
+- normal child and parent success require provision+validate `CONFIRMED` and both workers `TERMINALIZED`;
+- runtime acquisition retains P7.C8 initial/final classes, bounded containment and fail-closed parent recovery;
+- DENY-only, max-three DENY, ALLOW=0, exact normal `1/1/1`, zero resume/interrupt/delete/read/list, one child/no retry, immutable journal and exact process-group authority remain binding.
 
 ## Current executable slice
 
-**P7.C9 DENY-only approval-probe prep Repair-1 — NEXT / ZERO REAL EFFECT.**
+**P7.C9 one-shot real DENY-only approval probe — AUTHORIZED UNDER EXACT SNAPSHOT ONLY.**
 
-Repair-1 is limited to parent evidence fact separation and truthful bounded state-root worker ownership. Production provisioning remains mandatory and all accepted acquisition/DENY/process/journal/result gates must remain unchanged.
+Binding execution contract:
 
-`P7C9_DENY_ONLY_APPROVAL_PROBE_PREP=REWORK_REQUIRED`
+`docs/evidence/p7c9/P7C9_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-11.md`
 
-`P7C9_PREP_REPAIR1=NEXT_ZERO_REAL_EFFECT`
+The probe must execute only from detached HEAD `6cefa7772f00f6b1d67b9c6ecfd3770009d77c7f`, tree `1fd13ed5964f7c18ac5c5cfc799ee4670c719ab2`.
 
-`P7C9_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+Once started, P7.C9 is consumed under every outcome. The probe remains observational and never automatically authorizes matcher or hard-delete execution.
 
-`P7C9_REAL_EXECUTION_AUTHORIZED=NO`
+`P7C9_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
+
+`P7C9_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
 
 `P7C9_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
+
+`P7C8_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
 P8/P9 remain blocked until real P7 acceptance is architect accepted.
