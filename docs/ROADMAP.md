@@ -24,27 +24,29 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 
 ### P7.C6 retained-thread correction history
 
-- [RUN 1 REJECTED / HARNESS DEFECT] Evidence `785a82e2e9bc392173ea1e910b490f84cfa590b2`. One thread, one resume, three turns. Turn 1/2 passed persistence. Turn 3 stopped at approval. No interrupt/delete/read/list. Old approval remains `RESPONSE_UNKNOWN` and non-retryable.
-- [DONE / ZERO EFFECT] Retained Turn-3 forensic `e6835e7eaff21ce6a452c24f3309269df67c82ba`: exact terminal `INTERRUPTED`, command completed, no pending persisted approval, no delayed process/sentinel.
+- [RUN 1 REJECTED / HARNESS DEFECT] `785a82e2e9bc392173ea1e910b490f84cfa590b2`: one thread, one resume, three turns; old Turn-3 approval is `RESPONSE_UNKNOWN` and permanently non-retryable.
+- [DONE / ZERO EFFECT] Turn-3 forensic `e6835e7eaff21ce6a452c24f3309269df67c82ba`: exact terminal `INTERRUPTED`, command completed, no pending persisted approval, no delayed process/sentinel.
 - [DONE / ZERO EFFECT] Existing Run-1 latch forensic `c308c765d9915844fce97d1d1f6c933e302a75aa`: existing latch accepted as replay barrier; SHA-256 `50616410354022747284c1ce61bd02b8ecd1eb2636657eac502092fde800d55e`.
 
 ### P7.C6 same-thread continuation preparation
 
-- [REWORK_REQUIRED / ZERO EFFECT] Prep-v2 inert candidate `1c9b03108bb2493fd6547a92c807397bb4c0868c`.
-- [REWORK_REQUIRED / ZERO EFFECT] Prep-v2 Repair-1 candidate `821be881f1e6b04d3905080191cc0f1141799923`.
+- [REWORK_REQUIRED / ZERO EFFECT] Prep-v2 `1c9b03108bb2493fd6547a92c807397bb4c0868c`.
+- [REWORK_REQUIRED / ZERO EFFECT] Repair-1 `821be881f1e6b04d3905080191cc0f1141799923`.
+- [REWORK_REQUIRED / ZERO EFFECT] Repair-2 `4d98e2b6170e76534fa18274236605f77440f740`.
 
-Repair-1 review:
+Repair-2 review:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR2_ARCHITECT_REVIEW_2026-09-11.md`
 
-Binding Repair-2 contract:
+Frozen next repair:
 
-`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR2_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR3_CONTRACT_2026-09-11.md`
 
-Repair-1 closed many earlier gaps, including source authority, structural matcher, continuation latch source binding, actual schema checks, official delete observation, success-only sanitization and explicit real-file tests. It is still not real-executable because review found remaining harness defects: legitimate retained topology is self-rejected by preflight, external-user scope is overbroad, local continuation paths are not all preflighted before first RPC, recovery journal is fail-open, timeout-sensitive tasks are not always owned through convergence, marker scanning lacks pathname revalidation, unrelated baseline is not aggregate-bounded and reconciliation ignores exact path, dynamic budget ignores unknown methods, and several critical behavioral tests are incomplete.
+Repair-2 closes most prior preparation defects but is not real-executable. Remaining harness-only blockers are: final unbounded joins after timeout, incomplete task terminalization on sibling failure paths, non-exact sentinel-content proof, a scan-to-baseline-identity race, and incomplete post-delete safe-file authority reconciliation.
 
-- [NEXT / ZERO-REAL-EFFECT] **P7.C6 prep-v2 Repair-2.** Harness/evidence only, no `src/**`, no real Codex effects. Publish the repaired candidate and stop for architect review.
-- [BLOCKED] P7.C6 real same-thread continuation. No authorization until Repair-2 is independently accepted.
+- [PAUSED BY OWNER / SERVER MAINTENANCE] **Server-80 disk inventory and reviewed cleanup.** This maintenance must not remove or mutate any retained P7.C6 recovery/latch/controller/state authority.
+- [NEXT AFTER DISK MAINTENANCE / ZERO EFFECT] **P7.C6 prep-v2 Repair-3.** Harness/tests/evidence only; no production `src/**` change and no real Codex effects.
+- [BLOCKED] P7.C6 real same-thread continuation. No authorization until Repair-3 is independently accepted.
 
 ## P8 — deployment packaging/rollback
 
