@@ -69,35 +69,30 @@ Architect forensic review:
 
 ### P7.C8 fresh DENY-only successor
 
-Initial prep candidate:
+#### Preparation
 
-- [REWORK_REQUIRED / ZERO EFFECT] `9297395efb678356255d91aa8d90001a5fc768e0`, tree `291fddbbef8a67dc918a730d363c086cbb910db3`.
-- Candidate correctly introduces a new P7.C8 namespace, dedicated runtime-acquire observer, 45-second acquire horizon, 12-second failed-acquire cleanup horizon, 100-second observation horizon and 205-second process watchdog.
+- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] Initial prep `9297395efb678356255d91aa8d90001a5fc768e0`, tree `291fddbbef8a67dc918a730d363c086cbb910db3`.
+- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Repair-1 `070bcd0caa336d6df1ed24ee05d31dcce3d2cd95`, tree `787e083077b7386a8b05968f2193c611d8182d9d`, harness blob `53e70ba37803bb6a88e3e8ab4b7f499db1e28df8`.
+- Repair-1 acceptance: `docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_ARCHITECT_ACCEPTANCE_2026-09-11.md`.
+- Accepted correction: acquisition has distinct initial/final classes; failed-acquire containment is bounded; parent recovery is fail-closed `NOT_ESTABLISHED`; safe `RuntimeErrorSafe.category` authority is retained without raw text; normal success requires acquisition `CONFIRMED` and exact lifecycle/process/boundary gates.
 
-Architect review:
+#### One-shot real DENY-only approval probe
 
-`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_REVIEW_2026-09-11.md`
+Binding execution contract:
 
-Blocking Repair-1 defects:
+`docs/evidence/p7c8/P7C8_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-11.md`
 
-- [FIX] remove unbounded `asyncio.gather()` after cleanup timeout; cancellation/join must have its own finite bound;
-- [FIX] retain and durably publish the post-containment acquisition classification instead of discarding the returned `AcquireObservation`;
-- [FIX] parent acquisition authority must never default missing/unreadable evidence to `CONFIRMED`; introduce explicit fail-closed `NOT_ESTABLISHED`;
-- [FIX] cleanup safe-category persistence must not call an unsupported `RecoveryJournal.result(..., category=...)` signature;
-- [FIX] freeze the complete finite production `RuntimeErrorSafe.category` set reachable from acquire/start/cleanup and never silently drop a safe categorized failure;
-- [FIX] parent acquisition journal recovery must use bounded no-follow stable-identity JSONL reading instead of ordinary `Path.read_text()`.
+- [AUTHORIZED / ONE SHOT / EXACT SNAPSHOT] Execute only from HEAD `070bcd0caa336d6df1ed24ee05d31dcce3d2cd95`, tree `787e083077b7386a8b05968f2193c611d8182d9d`.
+- [BOUND] New P7.C8 one-shot latch/result/outcome namespace; P7.C7 state is never reused or modified.
+- [BOUND] At most one owned runtime generation, one model/list, one fresh thread/start, one primary turn/start; DENY 0..3; ALLOW/resume/interrupt/delete/read/list 0.
+- [BOUND] Runtime acquire ceiling 45s; failed-acquire cleanup 12s plus 1s bounded cancel/join; observation 100s; process watchdog 205s.
+- [BOUND] Once started, P7.C8 is consumed under every outcome; no rerun.
+- [BLOCKED] Matcher authority until accepted real P7.C8 evidence establishes concrete approval/wire behavior.
+- [BLOCKED] Full hard-delete acceptance until real P7.C8 evidence, matcher authority and a separately accepted hard-delete harness exist.
 
-Binding Repair-1 contract:
+`P7C8_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
 
-`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_CONTRACT_2026-09-11.md`
-
-- [NEXT / ZERO REAL EFFECT] **P7.C8 prep Repair-1:** repair only runtime-acquire containment and durable acquisition authority while preserving every already-correct DENY/process/journal/result gate.
-- [BLOCKED] Any P7.C8 real probe until Repair-1 is independently architect accepted and an exact executable SHA/tree is frozen.
-- [BLOCKED] Matcher authority and full hard-delete acceptance until a separately authorized P7.C8 real probe succeeds and is architect reviewed.
-
-`P7C8_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
-
-`P7C8_REAL_EXECUTION_AUTHORIZED=NO`
+`P7C8_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
 
 `P7C8_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
