@@ -16,8 +16,11 @@ import os
 import re
 import secrets
 import shlex
+import signal
 import stat
 import subprocess
+import sys
+import time
 import tempfile
 import unittest
 from dataclasses import dataclass, replace
@@ -64,9 +67,9 @@ AUTHORIZATION = "AUTHORIZED_RETAINED_THREAD_T4_T5_DELETE_2026_09_10"
 EXPECTED_HEAD_ENV = "CODEXCONTROL_P7C6_CONTINUATION_EXPECTED_HEAD"
 EXPECTED_TREE_ENV = "CODEXCONTROL_P7C6_CONTINUATION_EXPECTED_TREE"
 EXPECTED_REPOSITORY = "/opt/codex-control"
-ARCHITECT_BASE_SHA = "de398808cfce7d4c42da3d08109e5a166078cd34"
-ARCHITECT_BASE_TREE = "1d5166d53b80a30afe0d4b89651a53648e9702a4"
-REVIEWED_CANDIDATE = "4d98e2b6170e76534fa18274236605f77440f740"
+ARCHITECT_BASE_SHA = "3d0d575a6dedb0d5c7383c763d12de46f5cef7b4"
+ARCHITECT_BASE_TREE = "a64a63e703a6e0c8ab044efb3cb453015c7ed588"
+REVIEWED_CANDIDATE = "a55a765cdfb0d51e956045a238d4ecb5a237a5fe"
 PROFILE_ID = "server-80-codexcontrol"
 SERVER_ID = "server-80"
 PERSISTENT_HOME = "/root/.codex_second"
@@ -86,6 +89,51 @@ ORACLE_MAX_FILES = 10_000
 ORACLE_MAX_FILE_BYTES = 16 * 1024 * 1024
 ORACLE_MAX_BYTES = 64 * 1024 * 1024
 ORACLE_CHUNK_BYTES = 64 * 1024
+SYNTHETIC_WATCHDOG_HARD_DEADLINE = 5.0
+SYNTHETIC_WATCHDOG_TERMINATE_GRACE = 1.0
+SYNTHETIC_WATCHDOG_KILL_GRACE = 1.0
+REAL_PROCESS_RESULT_PATH = Path("/root/.codexcontrol/p7c6-same-thread-continuation-process-result.json")
+PROCESS_RESULT_MAX_BYTES = 64 * 1024
+
+# The sum is deliberately conservative: mutually exclusive shutdown and
+# convergence branches are counted together so the watchdog cannot undercount
+# a reachable finite path.
+REAL_INTERNAL_WAIT_AUTHORITIES = {
+    "runtime_acquire": 120.0, "runtime_acquire_convergence": 30.0,
+    "runtime_shutdown": 30.0, "runtime_shutdown_final": 1.0,
+    "model_list": 120.0, "model_list_convergence": 30.0,
+    "thread_resume": 120.0, "thread_resume_convergence": 30.0,
+    "turn4_start": 120.0, "turn4_start_convergence": 30.0,
+    "turn4_approval_wait": 90.0, "turn4_approval_cancel": 30.0,
+    "turn4_approval_cancel_final": 30.0,
+    "turn4_terminal": 120.0, "turn4_terminal_convergence": 30.0,
+    "turn5_start": 120.0, "turn5_start_convergence": 30.0,
+    "turn5_active_before_interrupt": 5.0,
+    "interrupt": 90.0, "interrupt_convergence": 30.0,
+    "turn5_terminal": 90.0, "turn5_terminal_convergence": 30.0,
+    "official_delete": 180.0, "official_delete_convergence": 30.0,
+    "owned_task_final_cancellation": 30.0,
+    "owned_task_final_cancellation_final": 30.0,
+    "post_effect_shutdown": 30.0, "post_effect_shutdown_final": 1.0,
+}
+REAL_WATCHDOG_MARGIN_SECONDS = 30.0
+
+
+def calculate_real_internal_worst_case_seconds(authorities: Mapping[str, float] | None = None) -> float:
+    values = REAL_INTERNAL_WAIT_AUTHORITIES if authorities is None else authorities
+    if not values or any(type(value) not in (int, float) or value <= 0 for value in values.values()):
+        raise ValueError("REAL_INTERNAL_WAIT_AUTHORITY_INVALID")
+    return float(sum(values.values()))
+
+
+REAL_INTERNAL_WORST_CASE_SECONDS = calculate_real_internal_worst_case_seconds()
+REAL_WATCHDOG_HARD_DEADLINE = REAL_INTERNAL_WORST_CASE_SECONDS + REAL_WATCHDOG_MARGIN_SECONDS + 60.0
+REAL_WATCHDOG_TERMINATE_GRACE = 5.0
+REAL_WATCHDOG_KILL_GRACE = 5.0
+
+
+def _real_wait(name: str) -> float:
+    return REAL_INTERNAL_WAIT_AUTHORITIES[name]
 
 
 class ContinuationLatchError(Exception):
@@ -1357,6 +1405,407 @@ async def _bounded_shutdown(manager: Any, timeout: float = 30.0, final_timeout: 
         raise
 
 
+def _owned_task_states(owned_tasks: Mapping[str, OwnedTask]) -> dict[str, dict[str, bool | str]]:
+    """Return finite task state only; never serialize task objects or reprs."""
+    return {
+        name: {"phase": owner.phase, "terminalized": owner.terminalized, "nonconverged": owner.nonconverged}
+        for name, owner in owned_tasks.items()
+    }
+
+
+def _require_all_owned_tasks_terminal(owned_tasks: Mapping[str, OwnedTask]) -> None:
+    if any(not owner.terminalized or owner.nonconverged for owner in owned_tasks.values()):
+        raise AssertionError("P7C6_SUCCESS_REQUIRES_ALL_OWNERS_TERMINAL")
+
+
+def _turn_failure_result(error: BaseException) -> str:
+    return "UNKNOWN" if isinstance(error, (asyncio.TimeoutError, TaskNonconvergedError)) else "FAILED"
+
+
+async def _turn5_start_with_retention(
+    owner_value: OwnedTask | asyncio.Task[Any], *, journal: Any, manager: Any,
+    retention: dict[str, bool], timeout: float, convergence_timeout: float,
+) -> Any:
+    try:
+        result = await _await_owned_task(
+            owner_value, timeout=timeout, convergence_timeout=convergence_timeout,
+            on_timeout=lambda: journal.update(TURN5_START_RESULT="UNKNOWN"),
+            shutdown=lambda: _bounded_shutdown(manager, timeout=timeout, final_timeout=convergence_timeout),
+        )
+    except BaseException as error:
+        retention["forensic_retained"] = True
+        try:
+            journal.update(TURN5_START_RESULT=_turn_failure_result(error), failure_stage="TURN5_START_UNCERTAIN")
+        finally:
+            await _bounded_shutdown(manager, timeout=timeout, final_timeout=convergence_timeout)
+        raise
+    status = getattr(getattr(result, "status", None), "value", getattr(result, "status", None))
+    if status != TurnStartStatus.CONFIRMED.value or getattr(result, "binding", None) is None:
+        retention["forensic_retained"] = True
+        error = AssertionError("P7C6_TURN5_START_NOT_CONFIRMED")
+        try:
+            journal.update(TURN5_START_RESULT="FAILED", failure_stage="TURN5_START_UNCERTAIN")
+        finally:
+            await _bounded_shutdown(manager, timeout=timeout, final_timeout=convergence_timeout)
+        raise error
+    return result
+
+
+async def _turn4_start_failure_with_approval(
+    start_error: BaseException, approval_owner: OwnedTask, *, journal: Any, manager: Any,
+    retention: dict[str, bool], timeout: float, final_timeout: float,
+) -> None:
+    retention["forensic_retained"] = True
+    try:
+        await _cancel_owned_approval(approval_owner, timeout=timeout, final_timeout=final_timeout)
+    except BaseException as approval_error:
+        retention["forensic_retained"] = True
+        try:
+            journal.update(TURN4_START_RESULT="FAILED", failure_stage="APPROVAL_BRIDGE_NONCONVERGED")
+        finally:
+            await _bounded_shutdown(manager, timeout=timeout, final_timeout=final_timeout)
+        raise approval_error from start_error
+    raise start_error
+
+
+PROCESS_RESULT_KEYS = frozenset({
+    "format", "status", "accepted_harness_sha", "accepted_harness_tree", "retained_thread_sha256",
+    "official_p1_delete_status", "application_delete_status", "tombstone_present", "live_dialogue_after_delete",
+    "persistent_thread_residuals", "persistent_marker_residuals", "persistent_scan_errors", "persistent_limit_exceeded",
+    "isolated_thread_residuals", "isolated_marker_residuals", "isolated_scan_errors", "isolated_limit_exceeded",
+    "postdelete_sqlite_payload_descendants", "postdelete_logs_payload_descendants", "postdelete_isolated_traversal_errors",
+    "unrelated_baseline_preserved", "ownership_envelope_valid", "model_list_calls", "thread_start_calls",
+    "thread_resume_calls", "turn_start_calls", "approval_responses", "interrupt_calls", "thread_delete_calls",
+    "thread_read_calls", "thread_list_calls", "runtime_reacquire_during_interrupt",
+})
+PROCESS_RESULT_COUNT_KEYS = frozenset({
+    "persistent_thread_residuals", "persistent_marker_residuals", "persistent_scan_errors",
+    "isolated_thread_residuals", "isolated_marker_residuals", "isolated_scan_errors",
+    "postdelete_sqlite_payload_descendants", "postdelete_logs_payload_descendants",
+    "postdelete_isolated_traversal_errors", "model_list_calls", "thread_start_calls", "thread_resume_calls",
+    "turn_start_calls", "approval_responses", "interrupt_calls", "thread_delete_calls", "thread_read_calls",
+    "thread_list_calls",
+})
+PROCESS_RESULT_MAX_COUNT = 1_000_000
+
+
+def _validate_process_result_schema(value: Mapping[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != PROCESS_RESULT_KEYS:
+        raise AssertionError("P7C6_PROCESS_RESULT_SCHEMA_INVALID")
+    if type(value["format"]) is not int or value["format"] != 1:
+        raise AssertionError("P7C6_PROCESS_RESULT_FORMAT_INVALID")
+    for key in ("accepted_harness_sha", "accepted_harness_tree"):
+        if type(value[key]) is not str or re.fullmatch(r"[0-9a-f]{40}", value[key]) is None:
+            raise AssertionError("P7C6_PROCESS_RESULT_SOURCE_INVALID")
+    if type(value["retained_thread_sha256"]) is not str or re.fullmatch(r"[0-9a-f]{64}", value["retained_thread_sha256"]) is None:
+        raise AssertionError("P7C6_PROCESS_RESULT_THREAD_HASH_INVALID")
+    finite = {
+        "status": "P7C6_CONTINUATION_PASS", "official_p1_delete_status": "DELETE_CONFIRMED",
+        "application_delete_status": "DELETED", "tombstone_present": "YES",
+        "live_dialogue_after_delete": "NO", "persistent_limit_exceeded": "NO",
+        "isolated_limit_exceeded": "NO", "unrelated_baseline_preserved": "PASS",
+        "ownership_envelope_valid": "PASS", "runtime_reacquire_during_interrupt": "NO",
+    }
+    for key, expected in finite.items():
+        if type(value[key]) is not str or value[key] != expected:
+            raise AssertionError("P7C6_PROCESS_RESULT_ENUM_INVALID")
+    for key in PROCESS_RESULT_COUNT_KEYS:
+        if type(value[key]) is not int or value[key] < 0 or value[key] > PROCESS_RESULT_MAX_COUNT:
+            raise AssertionError("P7C6_PROCESS_RESULT_COUNT_INVALID")
+    return dict(value)
+
+
+def _process_result_metadata(value: os.stat_result) -> tuple[int, ...]:
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid, value.st_nlink,
+            value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _write_process_result(path: Path, value: Mapping[str, Any]) -> None:
+    value = _validate_process_result_schema(dict(value))
+    if not _private_directory(path.parent, 0o700) or path.exists():
+        raise ContinuationLatchError("process_result_preflight_invalid")
+    payload = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False) + "\n").encode("utf-8")
+    if len(payload) > PROCESS_RESULT_MAX_BYTES:
+        raise ContinuationLatchError("process_result_limit_exceeded")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(str(path), flags, 0o600)
+    except FileExistsError as error:
+        raise ContinuationLatchExists("process_result_already_exists") from error
+    try:
+        _write_all(fd, payload)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    _fsync_parent(path)
+    if not _private_regular(path, 0o600):
+        raise ContinuationLatchError("process_result_authority_invalid")
+
+
+def read_process_result(path: Path = REAL_PROCESS_RESULT_PATH) -> dict[str, Any]:
+    """Bounded acceptance reader with descriptor and pathname identity checks."""
+    try:
+        before_path = path.lstat()
+        if not _private_regular(path, 0o600):
+            raise ContinuationLatchError("process_result_authority_invalid")
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError as error:
+        raise ContinuationLatchError("process_result_open_failed") from error
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        before_fd = os.fstat(fd)
+        if _process_result_metadata(before_fd) != _process_result_metadata(before_path):
+            raise ContinuationLatchError("process_result_identity_changed")
+        while True:
+            chunk = os.read(fd, min(64 * 1024, PROCESS_RESULT_MAX_BYTES - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > PROCESS_RESULT_MAX_BYTES:
+                raise ContinuationLatchError("process_result_limit_exceeded")
+            chunks.append(chunk)
+        after_fd = os.fstat(fd)
+        after_path = path.lstat()
+        if (_process_result_metadata(after_fd) != _process_result_metadata(before_path)
+                or _process_result_metadata(after_path) != _process_result_metadata(before_path)):
+            raise ContinuationLatchError("process_result_mutated")
+    except (OSError, ContinuationLatchError):
+        raise
+    finally:
+        os.close(fd)
+    try:
+        value = json.loads(b"".join(chunks).decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ContinuationLatchError("process_result_content_invalid") from error
+    try:
+        return _validate_process_result_schema(value)
+    except (AssertionError, TypeError) as error:
+        raise ContinuationLatchError("process_result_schema_invalid") from error
+
+
+def validate_parent_process_result(
+    value: Mapping[str, Any], *, expected_head: str, expected_tree: str,
+    retained_thread_sha256: str,
+) -> dict[str, Any]:
+    result = _validate_process_result_schema(value)
+    if result["accepted_harness_sha"] != expected_head or result["accepted_harness_tree"] != expected_tree:
+        raise AssertionError("P7C6_PROCESS_RESULT_SOURCE_MISMATCH")
+    if result["retained_thread_sha256"] != retained_thread_sha256:
+        raise AssertionError("P7C6_PROCESS_RESULT_RETAINED_THREAD_MISMATCH")
+    for key in (
+        "persistent_thread_residuals", "persistent_marker_residuals", "persistent_scan_errors",
+        "isolated_thread_residuals", "isolated_marker_residuals", "isolated_scan_errors",
+        "postdelete_sqlite_payload_descendants", "postdelete_logs_payload_descendants",
+        "postdelete_isolated_traversal_errors", "thread_start_calls", "thread_read_calls", "thread_list_calls",
+    ):
+        if result[key] != 0:
+            raise AssertionError("P7C6_PROCESS_RESULT_ZERO_GATE_FAILED")
+    expected_counts = {"model_list_calls": 1, "thread_resume_calls": 1, "turn_start_calls": 2,
+                       "approval_responses": 1, "interrupt_calls": 1, "thread_delete_calls": 1}
+    for key, expected in expected_counts.items():
+        if result[key] != expected:
+            raise AssertionError("P7C6_PROCESS_RESULT_DYNAMIC_BUDGET_FAILED")
+    return result
+
+
+def _valid_process_result() -> dict[str, Any]:
+    return {
+        "format": 1, "status": "P7C6_CONTINUATION_PASS",
+        "accepted_harness_sha": "a" * 40, "accepted_harness_tree": "b" * 40,
+        "retained_thread_sha256": "c" * 64,
+        "official_p1_delete_status": "DELETE_CONFIRMED", "application_delete_status": "DELETED",
+        "tombstone_present": "YES", "live_dialogue_after_delete": "NO",
+        "persistent_thread_residuals": 0, "persistent_marker_residuals": 0, "persistent_scan_errors": 0,
+        "persistent_limit_exceeded": "NO", "isolated_thread_residuals": 0, "isolated_marker_residuals": 0,
+        "isolated_scan_errors": 0, "isolated_limit_exceeded": "NO",
+        "postdelete_sqlite_payload_descendants": 0, "postdelete_logs_payload_descendants": 0,
+        "postdelete_isolated_traversal_errors": 0, "unrelated_baseline_preserved": "PASS",
+        "ownership_envelope_valid": "PASS", "model_list_calls": 1, "thread_start_calls": 0,
+        "thread_resume_calls": 1, "turn_start_calls": 2, "approval_responses": 1,
+        "interrupt_calls": 1, "thread_delete_calls": 1, "thread_read_calls": 0,
+        "thread_list_calls": 0, "runtime_reacquire_during_interrupt": "NO",
+    }
+
+
+def _validate_watchdog_bounds(hard_deadline: float, terminate_grace: float, kill_grace: float) -> None:
+    if any(type(value) not in (int, float) or value <= 0 for value in (hard_deadline, terminate_grace, kill_grace)):
+        raise ValueError("PROCESS_WATCHDOG_BOUNDS_INVALID")
+
+
+def watchdog_bounds_for_mode(
+    mode: str, *, hard_deadline: float | None = None,
+    terminate_grace: float | None = None, kill_grace: float | None = None,
+) -> tuple[float, float, float]:
+    if mode == "real":
+        # No caller-visible default can accidentally route real acceptance to
+        # the short synthetic authority. Test cases use synthetic modes only.
+        if any(value is not None for value in (hard_deadline, terminate_grace, kill_grace)):
+            raise ValueError("REAL_WATCHDOG_TEST_OVERRIDE_FORBIDDEN")
+        selected = (REAL_WATCHDOG_HARD_DEADLINE, REAL_WATCHDOG_TERMINATE_GRACE, REAL_WATCHDOG_KILL_GRACE)
+    elif mode in {"synthetic-normal", "synthetic-stubborn", "synthetic-turn4-approval"}:
+        selected = (
+            SYNTHETIC_WATCHDOG_HARD_DEADLINE if hard_deadline is None else hard_deadline,
+            SYNTHETIC_WATCHDOG_TERMINATE_GRACE if terminate_grace is None else terminate_grace,
+            SYNTHETIC_WATCHDOG_KILL_GRACE if kill_grace is None else kill_grace,
+        )
+    else:
+        raise ValueError("PROCESS_CHILD_MODE_INVALID")
+    _validate_watchdog_bounds(*selected)
+    return selected
+
+
+def launch_dedicated_continuation_child(
+    *, mode: str, child_env: Mapping[str, str] | None = None,
+    hard_deadline: float | None = None, terminate_grace: float | None = None,
+    kill_grace: float | None = None,
+) -> dict[str, Any]:
+    """Launch exactly one child and own its finite process lifetime."""
+    hard_deadline, terminate_grace, kill_grace = watchdog_bounds_for_mode(
+        mode, hard_deadline=hard_deadline, terminate_grace=terminate_grace, kill_grace=kill_grace,
+    )
+    if mode == "real":
+        _preflight_absent_path(REAL_PROCESS_RESULT_PATH)
+    environment = os.environ.copy()
+    if child_env:
+        environment.update({str(key): str(value) for key, value in child_env.items()})
+    command = [sys.executable, str(Path(__file__).resolve()), "--codexcontrol-p7c6-child", mode]
+    started = time.monotonic()
+    child = subprocess.Popen(
+        command, cwd=EXPECTED_REPOSITORY, env=environment, stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+    )
+    child_process_count = 1
+    timed_out = False
+    terminated = False
+    try:
+        child.wait(timeout=hard_deadline)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            child.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            child.wait(timeout=terminate_grace)
+            terminated = True
+        except subprocess.TimeoutExpired:
+            try:
+                child.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                child.wait(timeout=kill_grace)
+                terminated = True
+            except subprocess.TimeoutExpired:
+                terminated = child.poll() is not None
+    elapsed = time.monotonic() - started
+    return {
+        "status": "PROCESS_WATCHDOG_TIMEOUT" if timed_out else "PROCESS_COMPLETED",
+        "child_process_count": child_process_count, "second_child_started": "NO",
+        "parent_returned_finitely": elapsed < hard_deadline + terminate_grace + kill_grace + 1.0,
+        "child_terminated": terminated or child.poll() is not None, "returncode": child.returncode,
+        "elapsed_seconds": elapsed,
+    }
+
+
+def _write_synthetic_payload(payload: Mapping[str, Any]) -> None:
+    path_value = os.environ.get("CODEXCONTROL_P7C6_SYNTHETIC_RECOVERY")
+    if not isinstance(path_value, str) or not path_value:
+        raise RuntimeError("SYNTHETIC_RECOVERY_PATH_MISSING")
+    path = Path(path_value)
+    path.write_text(json.dumps(dict(payload), sort_keys=True) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+
+
+async def _synthetic_normal_child() -> None:
+    _write_synthetic_payload({"status": "NORMAL_CHILD_COMPLETED"})
+    await asyncio.sleep(0)
+
+
+async def _synthetic_cancellation_resistant_child() -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    _write_synthetic_payload({"status": "STUBBORN_CHILD_STARTED"})
+    gate = asyncio.Event()
+
+    async def cancellation_resistant_task() -> None:
+        while True:
+            try:
+                await gate.wait()
+            except asyncio.CancelledError:
+                continue
+
+    asyncio.create_task(cancellation_resistant_task())
+    await asyncio.sleep(120)
+
+
+async def _synthetic_turn4_approval_child() -> None:
+    """Synthetic sibling-failure child; it cannot reach any Codex adapter."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    recovery_value = os.environ.get("CODEXCONTROL_P7C6_SYNTHETIC_RECOVERY")
+    if not isinstance(recovery_value, str) or not recovery_value:
+        raise RuntimeError("SYNTHETIC_RECOVERY_PATH_MISSING")
+    journal = ContinuationRecoveryJournal.create(Path(recovery_value), {"status": "TURN4_START_DISPATCHED", "TURN4_START_DISPATCHES": 1})
+    gate = asyncio.Event()
+    allow_emitted: list[str] = []
+    shutdowns = 0
+
+    async def approval() -> None:
+        while True:
+            try:
+                await gate.wait()
+                allow_emitted.append("ALLOW")
+                return
+            except asyncio.CancelledError:
+                continue
+
+    class Manager:
+        async def shutdown_all(self) -> None:
+            nonlocal shutdowns
+            shutdowns += 1
+
+    approval_owner = _create_owned_task(approval(), "synthetic-turn4-approval")
+    await asyncio.sleep(0)
+    try:
+        await _turn4_start_failure_with_approval(
+            RuntimeError("TURN4_START_FAILED"), approval_owner, journal=journal, manager=Manager(),
+            retention={"forensic_retained": False}, timeout=0.01, final_timeout=0.01,
+        )
+    except BaseException:
+        journal.update(status="APPROVAL_BRIDGE_NONCONVERGED", ALLOW_EMITTED=len(allow_emitted),
+                       TURN4_START_DISPATCHES=1, SECOND_TURN4_START=0, RUNTIME_SHUTDOWN_CALLS=shutdowns)
+    await asyncio.sleep(120)
+
+
+def _run_dedicated_child_coroutine(factory: callable, *, mode: str) -> int:
+    """Run a child without asyncio.run teardown, which can await stubborn tasks."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        result = loop.run_until_complete(factory())
+        if mode == "real":
+            _write_process_result(REAL_PROCESS_RESULT_PATH, result)
+        return 0
+    except BaseException:
+        return 1
+    finally:
+        loop.stop()
+        loop.close()
+        asyncio.set_event_loop(None)
+
+
+def _dedicated_child_main(mode: str) -> int:
+    if mode == "synthetic-normal":
+        return _run_dedicated_child_coroutine(_synthetic_normal_child, mode=mode)
+    if mode == "synthetic-stubborn":
+        return _run_dedicated_child_coroutine(_synthetic_cancellation_resistant_child, mode=mode)
+    if mode == "synthetic-turn4-approval":
+        return _run_dedicated_child_coroutine(_synthetic_turn4_approval_child, mode=mode)
+    if mode == "real":
+        return _run_dedicated_child_coroutine(_run_real_continuation, mode=mode)
+    return 2
+
+
 async def _journaled_effect(
     journal: Any, intent: str, result: str, operation: callable,
 ) -> Any:
@@ -1487,9 +1936,9 @@ async def _run_real_continuation() -> dict[str, Any]:
         manager.acquire = counted_acquire
         runtime_task = spawn_owned(manager.acquire(PROFILE_ID), "runtime-acquire")
         runtime = await _await_owned_task(
-            runtime_task, timeout=120, convergence_timeout=30,
+            runtime_task, timeout=_real_wait("runtime_acquire"), convergence_timeout=_real_wait("runtime_acquire_convergence"),
             on_timeout=lambda: progress(RUNTIME_ACQUIRE_DISPATCH_UNCERTAIN="YES"),
-            shutdown=lambda: _bounded_shutdown(manager),
+            shutdown=lambda: _bounded_shutdown(manager, timeout=_real_wait("runtime_shutdown"), final_timeout=_real_wait("runtime_shutdown_final")),
         )
         manifest = manager._installed_manifest
         if manifest is None or manifest.codex_cli_version != SUPPORTED_CODEX_VERSION or manifest.schema_sha256 != SCHEMA_SHA256:
@@ -1498,9 +1947,9 @@ async def _run_real_continuation() -> dict[str, Any]:
         progress(MODEL_LIST_DISPATCH_INTENT="YES")
         catalog_task = spawn_owned(catalog_adapter.get_catalog(PROFILE_ID), "model-list")
         catalog = await _await_owned_task(
-            catalog_task, timeout=120, convergence_timeout=30,
+            catalog_task, timeout=_real_wait("model_list"), convergence_timeout=_real_wait("model_list_convergence"),
             on_timeout=lambda: progress(MODEL_LIST_RESULT="UNKNOWN"),
-            shutdown=lambda: _bounded_shutdown(manager),
+            shutdown=lambda: _bounded_shutdown(manager, timeout=_real_wait("runtime_shutdown"), final_timeout=_real_wait("runtime_shutdown_final")),
         )
         progress(MODEL_LIST_RESULT="FINITE", model_list_calls=counters.get("model/list", 0))
         defaults = tuple(model for model in catalog.models if not model.hidden and model.is_default)
@@ -1514,9 +1963,9 @@ async def _run_real_continuation() -> dict[str, Any]:
         progress(RESUME_DISPATCH_INTENT="YES")
         resume_task = spawn_owned(thread_lifecycle.resume(binding=retained_binding, working_directory=TrustedWorkingDirectory(str(run_root))), "thread-resume")
         resume = await _await_owned_task(
-            resume_task, timeout=120, convergence_timeout=30,
+            resume_task, timeout=_real_wait("thread_resume"), convergence_timeout=_real_wait("thread_resume_convergence"),
             on_timeout=lambda: progress(RESUME_RESULT="UNKNOWN"),
-            shutdown=lambda: _bounded_shutdown(manager),
+            shutdown=lambda: _bounded_shutdown(manager, timeout=_real_wait("runtime_shutdown"), final_timeout=_real_wait("runtime_shutdown_final")),
         )
         progress(resume_status=resume.status.value, RESUME_RESULT=resume.status.value)
         if resume.status is not ThreadOperationStatus.RESUME_CONFIRMED or resume.binding is not retained_binding:
@@ -1539,31 +1988,33 @@ async def _run_real_continuation() -> dict[str, Any]:
         ), "turn4-start")
         try:
             turn4 = await _await_owned_task(
-                turn4_task, timeout=120, convergence_timeout=30,
+                turn4_task, timeout=_real_wait("turn4_start"), convergence_timeout=_real_wait("turn4_start_convergence"),
                 on_timeout=lambda: progress(TURN4_START_RESULT="UNKNOWN"),
-                shutdown=lambda: _bounded_shutdown(manager),
+                shutdown=lambda: _bounded_shutdown(manager, timeout=_real_wait("runtime_shutdown"), final_timeout=_real_wait("runtime_shutdown_final")),
             )
-        except BaseException:
-            forensic_retained = True
-            try:
-                await _cancel_owned_approval(approval_task, timeout=5, final_timeout=5)
-            except BaseException:
-                pass
-            raise
+        except BaseException as error:
+            retention = {"forensic_retained": True}
+            await _turn4_start_failure_with_approval(
+                error, approval_task, journal=journal, manager=manager, retention=retention,
+                timeout=_real_wait("turn4_approval_cancel"), final_timeout=_real_wait("turn4_approval_cancel_final"),
+            )
+            forensic_retained = retention["forensic_retained"]
+            raise AssertionError("P7C6_TURN4_START_FAILURE_HANDLER_RETURNED")
         progress(turn4_start_status=turn4.status.value, TURN4_START_RESULT=turn4.status.value)
         if turn4.status is not TurnStartStatus.CONFIRMED or turn4.binding is None:
             forensic_retained = True
-            await _cancel_owned_approval(approval_task, timeout=5, final_timeout=5)
+            await _cancel_owned_approval(approval_task, timeout=_real_wait("turn4_approval_cancel"), final_timeout=_real_wait("turn4_approval_cancel_final"))
             raise AssertionError("P7C6_TURN4_START_NOT_CONFIRMED")
         turn4_id.set_result(turn4.binding.turn_id)
         progress(turn4_id_sha256=_sha256(turn4.binding.turn_id), turn4_start_dispatched="YES")
         try:
-            approval = await asyncio.wait_for(asyncio.shield(approval_task.task), timeout=90)
+            approval = await asyncio.wait_for(asyncio.shield(approval_task.task), timeout=_real_wait("turn4_approval_wait"))
         except asyncio.TimeoutError:
             forensic_retained = True
             progress(approval_handling_status="TIMEOUT", failure_stage="APPROVAL_TIMEOUT", APPROVAL_RESULT="UNKNOWN")
-            await _cancel_owned_approval(approval_task, timeout=30, final_timeout=30)
+            await _cancel_owned_approval(approval_task, timeout=_real_wait("turn4_approval_cancel"), final_timeout=_real_wait("turn4_approval_cancel_final"))
             raise
+        approval_task.terminalized = True
         progress(
             approval_request_count=len(operator.requests), approval_kind=operator.requests[0].kind.value if operator.requests else None,
             thread_match=bool(operator.results and not (set(operator.results[0].mismatch_flags) & {"THREAD"})),
@@ -1582,9 +2033,9 @@ async def _run_real_continuation() -> dict[str, Any]:
         try:
             terminal4_task = spawn_owned(turn_lifecycle.wait_turn(turn4.binding), "turn4-terminal-waiter")
             terminal4 = await _await_owned_task(
-                terminal4_task, timeout=120, convergence_timeout=30,
+            terminal4_task, timeout=_real_wait("turn4_terminal"), convergence_timeout=_real_wait("turn4_terminal_convergence"),
                 on_timeout=lambda: progress(TURN4_TERMINAL_RESULT="UNKNOWN"),
-                shutdown=lambda: _bounded_shutdown(manager),
+                shutdown=lambda: _bounded_shutdown(manager, timeout=_real_wait("runtime_shutdown"), final_timeout=_real_wait("runtime_shutdown_final")),
             )
         except BaseException:
             forensic_retained = True
@@ -1603,17 +2054,22 @@ async def _run_real_continuation() -> dict[str, Any]:
             user_text=f"Execute exactly `sleep 120` and no additional operation. Interrupt marker: {interrupt_marker}.",
             working_directory=TrustedWorkingDirectory(str(workdir)),
         ), "turn5-start")
-        turn5 = await _await_owned_task(
-            turn5_task, timeout=120, convergence_timeout=30,
-            on_timeout=lambda: progress(TURN5_START_RESULT="UNKNOWN"),
-            shutdown=lambda: _bounded_shutdown(manager),
-        )
+        turn5_retention = {"forensic_retained": False}
+        try:
+            turn5 = await _turn5_start_with_retention(
+                turn5_task, journal=journal, manager=manager, retention=turn5_retention,
+                timeout=_real_wait("turn5_start"), convergence_timeout=_real_wait("turn5_start_convergence"),
+            )
+        except BaseException:
+            forensic_retained = turn5_retention["forensic_retained"]
+            raise
+        forensic_retained = turn5_retention["forensic_retained"]
         progress(turn5_start_status=turn5.status.value, TURN5_START_RESULT=turn5.status.value)
         if turn5.status is not TurnStartStatus.CONFIRMED or turn5.binding is None:
             raise AssertionError("P7C6_TURN5_START_NOT_CONFIRMED")
         terminal5_task = spawn_owned(turn_lifecycle.wait_turn(turn5.binding), "turn5-terminal-waiter")
         try:
-            await asyncio.wait_for(asyncio.shield(terminal5_task.task), timeout=5)
+            await asyncio.wait_for(asyncio.shield(terminal5_task.task), timeout=_real_wait("turn5_active_before_interrupt"))
         except asyncio.TimeoutError:
             progress(turn5_active_before_interrupt="YES")
         except Exception:
@@ -1628,24 +2084,24 @@ async def _run_real_continuation() -> dict[str, Any]:
         interrupt_task = spawn_owned(turn_lifecycle.interrupt_turn(turn5.binding), "interrupt")
         try:
             interrupt = await _await_owned_task(
-                interrupt_task, timeout=90, convergence_timeout=30,
+                interrupt_task, timeout=_real_wait("interrupt"), convergence_timeout=_real_wait("interrupt_convergence"),
                 on_timeout=lambda: progress(INTERRUPT_RESULT="UNKNOWN"),
-                shutdown=lambda: _bounded_shutdown(manager),
+                shutdown=lambda: _bounded_shutdown(manager, timeout=_real_wait("runtime_shutdown"), final_timeout=_real_wait("runtime_shutdown_final")),
             )
         except BaseException:
             forensic_retained = True
             progress(interrupt_status="UNKNOWN", failure_stage="INTERRUPT_UNCERTAIN")
             try:
-                await _bounded_shutdown(manager)
+                await _bounded_shutdown(manager, timeout=_real_wait("runtime_shutdown"), final_timeout=_real_wait("runtime_shutdown_final"))
             finally:
-                await _cancel_owned_approval(terminal5_task, timeout=5, final_timeout=5)
+                await _cancel_owned_approval(terminal5_task, timeout=_real_wait("owned_task_final_cancellation"), final_timeout=_real_wait("owned_task_final_cancellation_final"))
             raise
         acquire_after_interrupt = manager_acquire_count
         try:
             terminal5 = await _await_owned_task(
-                terminal5_task, timeout=90, convergence_timeout=30,
+                terminal5_task, timeout=_real_wait("turn5_terminal"), convergence_timeout=_real_wait("turn5_terminal_convergence"),
                 on_timeout=lambda: progress(TURN5_TERMINAL_RESULT="UNKNOWN"),
-                shutdown=lambda: _bounded_shutdown(manager),
+                shutdown=lambda: _bounded_shutdown(manager, timeout=_real_wait("runtime_shutdown"), final_timeout=_real_wait("runtime_shutdown_final")),
             )
         except BaseException:
             forensic_retained = True
@@ -1661,7 +2117,7 @@ async def _run_real_continuation() -> dict[str, Any]:
             forensic_retained = True
             raise AssertionError("P7C6_TURN5_INTERRUPT_NOT_DEFINITIVE")
         assert_no_reacquire(acquire_before_interrupt, acquire_after_interrupt)
-        await _bounded_shutdown(manager)
+        await _bounded_shutdown(manager, timeout=_real_wait("post_effect_shutdown"), final_timeout=_real_wait("post_effect_shutdown_final"))
         if _continuation_owned_processes(workdir):
             forensic_retained = True
             raise AssertionError("P7C6_DELAYED_PROCESS_REMAINS")
@@ -1692,9 +2148,9 @@ async def _run_real_continuation() -> dict[str, Any]:
         delete_task = spawn_owned(delete_service.delete(DialogueDeleteRequest(created.dialogue_id, created.version)), "delete-service")
         try:
             deleted = await _await_owned_task(
-                delete_task, timeout=180, convergence_timeout=30,
+                delete_task, timeout=_real_wait("official_delete"), convergence_timeout=_real_wait("official_delete_convergence"),
                 on_timeout=lambda: progress(DELETE_RESULT="UNKNOWN", failure_stage="DELETE_UNCERTAIN"),
-                shutdown=lambda: _bounded_shutdown(manager),
+                shutdown=lambda: _bounded_shutdown(manager, timeout=_real_wait("runtime_shutdown"), final_timeout=_real_wait("runtime_shutdown_final")),
             )
         except BaseException:
             forensic_retained = True
@@ -1704,7 +2160,7 @@ async def _run_real_continuation() -> dict[str, Any]:
         if observer.call_count != 1 or observer.status is not ThreadOperationStatus.DELETE_CONFIRMED or deleted.status is not DialogueDeleteStatus.DELETED or deleted.tombstone is None:
             forensic_retained = observer.call_count == 1
             raise AssertionError("P7C6_DELETE_AUTHORITY_NOT_CONFIRMED")
-        await _bounded_shutdown(manager)
+        await _bounded_shutdown(manager, timeout=_real_wait("post_effect_shutdown"), final_timeout=_real_wait("post_effect_shutdown_final"))
         isolated = IsolatedStateRoot(authority)
         isolated.validate(profile)
         isolated_proof = _isolated_payload_proof(state_root)
@@ -1734,22 +2190,43 @@ async def _run_real_continuation() -> dict[str, Any]:
             except Exception:
                 pass
             raise
-        return {
-            "source_sha": source["accepted_harness_sha"], "source_tree": source["accepted_harness_tree"], "retained_thread_sha256": RUN1_THREAD_SHA256,
+        _require_all_owned_tasks_terminal(owned_tasks)
+        return _validate_process_result_schema({
+            "format": 1, "status": "P7C6_CONTINUATION_PASS",
+            "accepted_harness_sha": source["accepted_harness_sha"], "accepted_harness_tree": source["accepted_harness_tree"],
+            "retained_thread_sha256": RUN1_THREAD_SHA256,
             "official_p1_delete_status": observer.status.value, "application_delete_status": deleted.status.value,
-            "model_list_calls": counters.get("model/list", 0), "thread_start_calls": counters.get("thread/start", 0), "thread_resume_calls": counters.get("thread/resume", 0),
-            "turn_start_calls": counters.get("turn/start", 0), "approval_responses": approval_responses, "interrupt_calls": counters.get("turn/interrupt", 0), "thread_delete_calls": counters.get("thread/delete", 0),
-        }
+            "tombstone_present": "YES" if tombstone_after is not None else "NO",
+            "live_dialogue_after_delete": "NO" if live_after is None else "YES",
+            "persistent_thread_residuals": int(postdelete_oracle["thread_count"]),
+            "persistent_marker_residuals": int(postdelete_oracle["marker_count"]),
+            "persistent_scan_errors": int(postdelete.scan_errors) + int(postdelete_oracle["scan_errors"]),
+            "persistent_limit_exceeded": "YES" if postdelete.limit_exceeded or postdelete_oracle["limit_exceeded"] else "NO",
+            "isolated_thread_residuals": 0, "isolated_marker_residuals": 0,
+            "isolated_scan_errors": int(isolated_proof["POSTDELETE_ISOLATED_TRAVERSAL_ERRORS"]),
+            "isolated_limit_exceeded": "NO",
+            "postdelete_sqlite_payload_descendants": int(isolated_proof["POSTDELETE_SQLITE_PAYLOAD_DESCENDANTS"]),
+            "postdelete_logs_payload_descendants": int(isolated_proof["POSTDELETE_LOG_PAYLOAD_DESCENDANTS"]),
+            "postdelete_isolated_traversal_errors": int(isolated_proof["POSTDELETE_ISOLATED_TRAVERSAL_ERRORS"]),
+            "unrelated_baseline_preserved": "PASS" if baseline_result["preserved"] else "FAIL",
+            "ownership_envelope_valid": "PASS",
+            "model_list_calls": counters.get("model/list", 0), "thread_start_calls": counters.get("thread/start", 0),
+            "thread_resume_calls": counters.get("thread/resume", 0), "turn_start_calls": counters.get("turn/start", 0),
+            "approval_responses": approval_responses, "interrupt_calls": counters.get("turn/interrupt", 0),
+            "thread_delete_calls": counters.get("thread/delete", 0), "thread_read_calls": counters.get("thread/read", 0),
+            "thread_list_calls": counters.get("thread/list", 0),
+            "runtime_reacquire_during_interrupt": "NO" if acquire_after_interrupt == acquire_before_interrupt else "YES",
+        })
     except Exception as error:
-        progress(
-            status="FAILURE", failure_stage=type(error).__name__,
-            owned_task_states={name: {"phase": owner.phase, "terminalized": owner.terminalized, "nonconverged": owner.nonconverged} for name, owner in owned_tasks.items()},
-        )
+        try:
+            progress(status="FAILURE", failure_stage=type(error).__name__, owned_task_states=_owned_task_states(owned_tasks))
+        except Exception:
+            pass
         raise
     finally:
         if manager is not None:
             try:
-                await _bounded_shutdown(manager)
+                await _bounded_shutdown(manager, timeout=_real_wait("post_effect_shutdown"), final_timeout=_real_wait("post_effect_shutdown_final"))
             except Exception:
                 pass
         if storage is not None:
@@ -2568,6 +3045,309 @@ class JournalAndAsyncOwnershipOfflineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(unbounded_join_names, [])
 
 
+class ProcessWatchdogOfflineTests(unittest.TestCase):
+    def _child_environment(self, path: Path) -> dict[str, str]:
+        return {"CODEXCONTROL_P7C6_SYNTHETIC_RECOVERY": str(path)}
+
+    def test_normal_synthetic_child_completes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-watchdog-normal-") as directory:
+            recovery = Path(directory) / "recovery.json"
+            result = launch_dedicated_continuation_child(
+                mode="synthetic-normal", child_env=self._child_environment(recovery),
+                hard_deadline=1, terminate_grace=0.1, kill_grace=0.1,
+            )
+            self.assertEqual(result["status"], "PROCESS_COMPLETED")
+            self.assertEqual(result["child_process_count"], 1)
+            self.assertEqual(result["second_child_started"], "NO")
+            self.assertTrue(result["parent_returned_finitely"])
+            self.assertEqual(json.loads(recovery.read_text(encoding="utf-8"))["status"], "NORMAL_CHILD_COMPLETED")
+
+    def test_stubborn_child_is_terminated_finitely_and_recovery_survives(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-watchdog-stubborn-") as directory:
+            recovery = Path(directory) / "recovery.json"
+            result = launch_dedicated_continuation_child(
+                mode="synthetic-stubborn", child_env=self._child_environment(recovery),
+                hard_deadline=0.5, terminate_grace=0.05, kill_grace=0.2,
+            )
+            self.assertEqual(result["status"], "PROCESS_WATCHDOG_TIMEOUT")
+            self.assertEqual(result["child_process_count"], 1)
+            self.assertEqual(result["second_child_started"], "NO")
+            self.assertTrue(result["parent_returned_finitely"] and result["child_terminated"])
+            self.assertEqual(json.loads(recovery.read_text(encoding="utf-8"))["status"], "STUBBORN_CHILD_STARTED")
+
+    def test_watchdog_has_one_process_creation_site_and_no_retry(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-watchdog-site-") as directory:
+            recovery = Path(directory) / "recovery.json"
+            result = launch_dedicated_continuation_child(
+                mode="synthetic-stubborn", child_env=self._child_environment(recovery),
+                hard_deadline=0.2, terminate_grace=0.05, kill_grace=0.05,
+            )
+            self.assertEqual(result["status"], "PROCESS_WATCHDOG_TIMEOUT")
+            self.assertTrue(result["child_terminated"])
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        launcher = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "launch_dedicated_continuation_child")
+        self.assertEqual(sum(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "Popen" for node in ast.walk(launcher)), 1)
+        self.assertFalse(any(isinstance(node, (ast.For, ast.AsyncFor, ast.While)) for node in ast.walk(launcher)))
+
+    def test_real_and_synthetic_watchdog_authorities_are_separate(self) -> None:
+        selected = watchdog_bounds_for_mode("real")
+        self.assertEqual(selected, (REAL_WATCHDOG_HARD_DEADLINE, REAL_WATCHDOG_TERMINATE_GRACE, REAL_WATCHDOG_KILL_GRACE))
+        self.assertGreater(REAL_WATCHDOG_HARD_DEADLINE, REAL_INTERNAL_WORST_CASE_SECONDS + REAL_WATCHDOG_MARGIN_SECONDS)
+        self.assertEqual(watchdog_bounds_for_mode("synthetic-normal", hard_deadline=0.1, terminate_grace=0.01, kill_grace=0.01), (0.1, 0.01, 0.01))
+        self.assertNotEqual(REAL_WATCHDOG_HARD_DEADLINE, 5.0)
+        with self.assertRaises(ValueError):
+            watchdog_bounds_for_mode("real", hard_deadline=5.0)
+
+    def test_changing_internal_timeout_increases_budget(self) -> None:
+        changed = dict(REAL_INTERNAL_WAIT_AUTHORITIES)
+        changed["official_delete"] += 1
+        self.assertGreater(calculate_real_internal_worst_case_seconds(changed), REAL_INTERNAL_WORST_CASE_SECONDS)
+
+    def test_synthetic_children_have_no_real_adapter_calls(self) -> None:
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        names = {"acquire", "resume", "start_turn", "interrupt_turn", "delete", "request", "respond_server_request"}
+        functions = [node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name in {"_synthetic_normal_child", "_synthetic_cancellation_resistant_child", "_synthetic_turn4_approval_child"}]
+        self.assertEqual(len(functions), 3)
+        for function in functions:
+            for node in ast.walk(function):
+                if isinstance(node, ast.Attribute):
+                    self.assertNotIn(node.attr, names, function.name)
+
+
+class ProcessResultOfflineTests(unittest.TestCase):
+    def test_valid_exact_pass_record_and_parent_gates(self) -> None:
+        value = _valid_process_result()
+        with tempfile.TemporaryDirectory(prefix="p7c6-process-result-") as directory:
+            path = Path(directory) / "result.json"
+            _write_process_result(path, value)
+            self.assertEqual(read_process_result(path), value)
+            self.assertEqual(validate_parent_process_result(value, expected_head="a" * 40, expected_tree="b" * 40, retained_thread_sha256="c" * 64), value)
+
+    def test_missing_and_preexisting_result_block_real_launch(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-process-result-preflight-") as directory:
+            path = Path(directory) / "result.json"
+            with self.assertRaises(ContinuationLatchError):
+                read_process_result(path)
+            with mock.patch(__name__ + ".REAL_PROCESS_RESULT_PATH", path), mock.patch(__name__ + ".subprocess.Popen") as popen:
+                popen.return_value.wait.return_value = 0
+                result = launch_dedicated_continuation_child(mode="real")
+                self.assertEqual(result["status"], "PROCESS_COMPLETED")
+                popen.assert_called_once()
+            path.write_text("{}", encoding="utf-8")
+            path.chmod(0o600)
+            with mock.patch(__name__ + ".REAL_PROCESS_RESULT_PATH", path), mock.patch(__name__ + ".subprocess.Popen") as popen:
+                with self.assertRaises(BoundaryPreflightError):
+                    launch_dedicated_continuation_child(mode="real")
+                popen.assert_not_called()
+
+    def test_parent_rejects_each_unsafe_status_count_and_source(self) -> None:
+        base = _valid_process_result()
+        mutations: list[tuple[str, Any]] = [
+            ("accepted_harness_sha", "d" * 40), ("accepted_harness_tree", "d" * 40),
+            ("retained_thread_sha256", "d" * 64), ("official_p1_delete_status", "DELETE_UNKNOWN"),
+            ("application_delete_status", "UNKNOWN"), ("tombstone_present", "NO"),
+            ("live_dialogue_after_delete", "YES"), ("unrelated_baseline_preserved", "FAIL"),
+            ("ownership_envelope_valid", "FAIL"), ("runtime_reacquire_during_interrupt", "YES"),
+            ("model_list_calls", 2), ("thread_start_calls", 1), ("thread_resume_calls", 2),
+            ("turn_start_calls", 1), ("approval_responses", 2), ("interrupt_calls", 2),
+            ("thread_delete_calls", 2), ("thread_read_calls", 1), ("thread_list_calls", 1),
+            ("persistent_limit_exceeded", "YES"), ("isolated_limit_exceeded", "YES"),
+        ]
+        for key, value in mutations:
+            changed = dict(base)
+            changed[key] = value
+            with self.subTest(key=key):
+                with self.assertRaises((AssertionError, ContinuationLatchError)):
+                    validate_parent_process_result(changed, expected_head="a" * 40, expected_tree="b" * 40, retained_thread_sha256="c" * 64)
+        for key in ("persistent_thread_residuals", "persistent_marker_residuals", "persistent_scan_errors", "isolated_thread_residuals", "isolated_marker_residuals", "isolated_scan_errors", "postdelete_sqlite_payload_descendants", "postdelete_logs_payload_descendants", "postdelete_isolated_traversal_errors"):
+            changed = dict(base)
+            changed[key] = 1
+            with self.subTest(key=key):
+                with self.assertRaises(AssertionError):
+                    validate_parent_process_result(changed, expected_head="a" * 40, expected_tree="b" * 40, retained_thread_sha256="c" * 64)
+
+    def test_schema_rejects_missing_extra_malformed_and_raw_shaped_values(self) -> None:
+        value = _valid_process_result()
+        for changed in ({key: item for key, item in value.items() if key != "status"}, {**value, "unexpected": "value"}, {**value, "format": True}, {**value, "model_list_calls": "1"}, {**value, "accepted_harness_sha": "not-a-sha"}, {**value, "retained_thread_sha256": "thread-id"}):
+            with self.assertRaises(AssertionError):
+                _validate_process_result_schema(changed)
+
+    def test_reader_rejects_oversized_malformed_symlink_hardlink_unsafe_mode(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-process-result-reader-") as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            _write_process_result(target, _valid_process_result())
+            for name, operation in (
+                ("symlink.json", lambda path: path.symlink_to(target)),
+                ("hardlink.json", lambda path: os.link(target, path)),
+                ("unsafe.json", lambda path: (path.write_bytes(target.read_bytes()), path.chmod(0o644))),
+                ("malformed.json", lambda path: (path.write_text("{", encoding="utf-8"), path.chmod(0o600))),
+                ("oversized.json", lambda path: (path.write_bytes(b"x" * (PROCESS_RESULT_MAX_BYTES + 1)), path.chmod(0o600))),
+            ):
+                path = root / name
+                operation(path)
+                with self.subTest(name=name), self.assertRaises(ContinuationLatchError):
+                    read_process_result(path)
+
+    def test_reader_rejects_pathname_replacement_and_mutation_during_read(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-process-result-race-") as directory:
+            root = Path(directory)
+            path = root / "result.json"
+            replacement = root / "replacement.json"
+            _write_process_result(path, _valid_process_result())
+            _write_process_result(replacement, _valid_process_result())
+            original_read = os.read
+            swapped = False
+
+            def replacing_read(fd: int, size: int) -> bytes:
+                nonlocal swapped
+                data = original_read(fd, size)
+                if data and not swapped:
+                    swapped = True
+                    os.replace(replacement, path)
+                return data
+
+            with mock.patch("os.read", side_effect=replacing_read):
+                with self.assertRaises(ContinuationLatchError):
+                    read_process_result(path)
+            self.assertTrue(swapped)
+
+            path.unlink()
+            _write_process_result(path, _valid_process_result())
+            mutated = False
+
+            def mutating_read(fd: int, size: int) -> bytes:
+                nonlocal mutated
+                data = original_read(fd, size)
+                if data and not mutated:
+                    mutated = True
+                    os.utime(path, ns=(3, 4))
+                return data
+
+            with mock.patch("os.read", side_effect=mutating_read):
+                with self.assertRaises(ContinuationLatchError):
+                    read_process_result(path)
+            self.assertTrue(mutated)
+
+    def test_child_materializes_pass_only_after_all_gates_callback_returns(self) -> None:
+        async def all_gates_pass() -> dict[str, Any]:
+            return _valid_process_result()
+
+        async def earlier_gate_failed() -> dict[str, Any]:
+            raise AssertionError("INNER_GATE_FAILED")
+
+        with tempfile.TemporaryDirectory(prefix="p7c6-process-result-child-") as directory:
+            path = Path(directory) / "result.json"
+            with mock.patch(__name__ + ".REAL_PROCESS_RESULT_PATH", path):
+                self.assertEqual(_run_dedicated_child_coroutine(all_gates_pass, mode="real"), 0)
+                self.assertEqual(read_process_result(path), _valid_process_result())
+            path.unlink()
+            with mock.patch(__name__ + ".REAL_PROCESS_RESULT_PATH", path):
+                self.assertNotEqual(_run_dedicated_child_coroutine(earlier_gate_failed, mode="real"), 0)
+                self.assertFalse(path.exists())
+
+
+class Repair4FailureEdgeOfflineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_turn5_nonconvergence_retains_paths_and_dispatches_once(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-turn5-uncertain-") as directory:
+            root = Path(directory)
+            journal = ContinuationRecoveryJournal.create(root / "journal.json", {"status": "TURN5_START_DISPATCHED"})
+            gate = asyncio.Event()
+            dispatches = 0
+
+            async def turn5_start() -> str:
+                nonlocal dispatches
+                dispatches += 1
+                while True:
+                    try:
+                        await gate.wait()
+                        return "CONFIRMED"
+                    except asyncio.CancelledError:
+                        continue
+
+            class Manager:
+                shutdown_calls = 0
+
+                async def shutdown_all(self) -> None:
+                    self.shutdown_calls += 1
+
+            manager = Manager()
+            owner = _create_owned_task(turn5_start(), "turn5-start")
+            retention = {"forensic_retained": False}
+            with self.assertRaises(TaskNonconvergedError):
+                await _turn5_start_with_retention(owner, journal=journal, manager=manager, retention=retention, timeout=0.01, convergence_timeout=0.01)
+            self.assertTrue(retention["forensic_retained"])
+            self.assertEqual(dispatches, 1)
+            self.assertGreaterEqual(manager.shutdown_calls, 1)
+            record = _read_private_json(root / "journal.json")
+            self.assertEqual(record["TURN5_START_RESULT"], "UNKNOWN")
+            self.assertEqual(record["failure_stage"], "TURN5_START_UNCERTAIN")
+            gate.set()
+            await asyncio.wait_for(asyncio.shield(owner.task), timeout=0.2)
+
+    async def test_turn4_approval_nonconvergence_shuts_runtime_and_blocks_late_allow(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-turn4-approval-uncertain-") as directory:
+            root = Path(directory)
+            journal = ContinuationRecoveryJournal.create(root / "journal.json", {"status": "TURN4_START_DISPATCHED"})
+            allow_emitted: list[str] = []
+            shutdown_gate = asyncio.Event()
+            approval_gate = asyncio.Event()
+
+            async def approval() -> None:
+                while True:
+                    try:
+                        await approval_gate.wait()
+                        if not shutdown_gate.is_set():
+                            allow_emitted.append("ALLOW")
+                        return
+                    except asyncio.CancelledError:
+                        if shutdown_gate.is_set():
+                            return
+                        continue
+
+            class Manager:
+                shutdown_calls = 0
+
+                async def shutdown_all(self) -> None:
+                    self.shutdown_calls += 1
+                    shutdown_gate.set()
+
+            manager = Manager()
+            approval_owner = _create_owned_task(approval(), "turn4-approval")
+            await asyncio.sleep(0)
+            retention = {"forensic_retained": False}
+            with self.assertRaises(TaskNonconvergedError):
+                await _turn4_start_failure_with_approval(RuntimeError("TURN4_START_FAILED"), approval_owner, journal=journal, manager=manager, retention=retention, timeout=0.01, final_timeout=0.01)
+            self.assertTrue(retention["forensic_retained"])
+            self.assertGreaterEqual(manager.shutdown_calls, 1)
+            approval_gate.set()
+            approval_owner.task.cancel()
+            await asyncio.wait_for(asyncio.shield(approval_owner.task), timeout=0.2)
+            self.assertEqual(allow_emitted, [])
+            record = _read_private_json(root / "journal.json")
+            self.assertEqual(record["failure_stage"], "APPROVAL_BRIDGE_NONCONVERGED")
+
+    def test_turn4_sibling_fixture_watchdogs_without_allow_or_retry(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-turn4-child-") as directory:
+            recovery = Path(directory) / "journal.json"
+            result = launch_dedicated_continuation_child(mode="synthetic-turn4-approval", child_env={"CODEXCONTROL_P7C6_SYNTHETIC_RECOVERY": str(recovery)}, hard_deadline=0.5, terminate_grace=0.05, kill_grace=0.2)
+            self.assertEqual(result["status"], "PROCESS_WATCHDOG_TIMEOUT")
+            self.assertTrue(result["child_terminated"])
+            record = _read_private_json(recovery)
+            self.assertEqual(record["ALLOW_EMITTED"], 0)
+            self.assertEqual(record["TURN4_START_DISPATCHES"], 1)
+            self.assertEqual(record["SECOND_TURN4_START"], 0)
+            self.assertGreaterEqual(record["RUNTIME_SHUTDOWN_CALLS"], 1)
+
+    async def test_success_path_rejects_nonterminal_owned_task(self) -> None:
+        owner = _create_owned_task(asyncio.sleep(0.2), "nonterminal-success-owner")
+        with self.assertRaisesRegex(AssertionError, "SUCCESS_REQUIRES_ALL_OWNERS_TERMINAL"):
+            _require_all_owned_tasks_terminal({owner.name: owner})
+        owner.task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await owner.task
+
+
 class FailureRetentionOfflineTests(unittest.TestCase):
     def test_ambiguous_approval_does_not_erase_forensic_paths(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c6-retain-approval-") as directory:
@@ -2650,6 +3430,8 @@ class ContinuationStaticGateTests(unittest.TestCase):
         tree = ast.parse(source)
         self.assertNotIn("thread_lifecycle." + "start(", source.replace('"thread_lifecycle." + "start("', ""))
         self.assertNotEqual(os.environ.get("CODEXCONTROL_P7C6_SAME_THREAD_CONTINUATION"), AUTHORIZATION)
+        self.assertIsNone(os.environ.get(EXPECTED_HEAD_ENV))
+        self.assertIsNone(os.environ.get(EXPECTED_TREE_ENV))
         for node in ast.walk(tree):
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "start":
                 self.assertFalse(isinstance(node.func.value, ast.Name) and node.func.value.id == "CodexThreadLifecycleAdapter")
@@ -2658,9 +3440,25 @@ class ContinuationStaticGateTests(unittest.TestCase):
 class P7C6SameThreadContinuationAcceptance(unittest.IsolatedAsyncioTestCase):
     @unittest.skipUnless(os.environ.get("CODEXCONTROL_P7C6_SAME_THREAD_CONTINUATION") == AUTHORIZATION, "gated real P7.C6 same-thread continuation")
     async def test_real_same_thread_continuation(self) -> None:
-        report = await _run_real_continuation()
-        print("P7C6_CONTINUATION_SANITIZED_REPORT=" + json.dumps(report, sort_keys=True))
+        result = launch_dedicated_continuation_child(mode="real")
+        self.assertEqual(result["status"], "PROCESS_COMPLETED", result)
+        self.assertEqual(result["child_process_count"], 1)
+        self.assertEqual(result["second_child_started"], "NO")
+        self.assertEqual(result["returncode"], 0, result)
+        self.assertTrue(result["child_terminated"] and result["parent_returned_finitely"])
+        self.assertTrue(REAL_PROCESS_RESULT_PATH.is_file())
+        expected_head = os.environ.get(EXPECTED_HEAD_ENV)
+        expected_tree = os.environ.get(EXPECTED_TREE_ENV)
+        self.assertIsInstance(expected_head, str)
+        self.assertIsInstance(expected_tree, str)
+        report = validate_parent_process_result(
+            read_process_result(), expected_head=expected_head, expected_tree=expected_tree,
+            retained_thread_sha256=RUN1_THREAD_SHA256,
+        )
+        print("P7C6_CONTINUATION_PROCESS_RESULT=" + json.dumps(report, sort_keys=True))
 
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--codexcontrol-p7c6-child":
+        raise SystemExit(_dedicated_child_main(sys.argv[2]))
     unittest.main()

@@ -1,0 +1,81 @@
+# CODEXCONTROL P7.C6 SAME-THREAD PREP-V2 REPAIR-5 EVIDENCE
+
+Status: ZERO-REAL-EFFECT / REPAIR-ONLY / REAL CONTINUATION NOT AUTHORIZED
+
+ARCHITECT_BASE_SHA=3d0d575a6dedb0d5c7383c763d12de46f5cef7b4
+ARCHITECT_BASE_TREE=a64a63e703a6e0c8ab044efb3cb453015c7ed588
+REPAIR4_CANDIDATE=a55a765cdfb0d51e956045a238d4ecb5a237a5fe
+
+REAL_EFFECTS_DURING_REPAIR5=0
+
+REAL_WATCHDOG_SEPARATED=PASS
+REAL_INTERNAL_WORST_CASE_SECONDS=1627.0
+REAL_WATCHDOG_MARGIN_SECONDS=30.0
+REAL_WATCHDOG_HARD_DEADLINE=1717.0
+REAL_WATCHDOG_DOMINATES_INTERNAL_BUDGET=PASS
+
+REAL_MODE_USES_REAL_WATCHDOG=PASS
+SYNTHETIC_SHORT_WATCHDOG_TESTS=PASS
+
+PROCESS_RESULT_AUTHORITY=/root/.codexcontrol/p7c6-same-thread-continuation-process-result.json
+PROCESS_RESULT_EXCLUSIVE_CREATE=PASS
+PROCESS_RESULT_BOUNDED_READER=PASS
+PROCESS_RESULT_EXACT_SCHEMA=PASS
+PROCESS_RESULT_PARENT_PASS_GATE=PASS
+PROCESS_RESULT_FAILURE_NO_FILE=PASS
+PROCESS_RESULT_PREEXISTING_BLOCKS_LAUNCH=PASS
+
+WATCHDOG_SINGLE_CHILD=PASS
+WATCHDOG_NO_RETRY=PASS
+
+SUCCESS_REQUIRES_ALL_OWNERS_TERMINAL=PASS
+
+EXACT_SENTINEL_EQUALITY=PASS
+BASELINE_SCAN_IDENTITY_ATOMICITY=PASS
+POSTDELETE_UNRELATED_SAFE_AUTHORITY=PASS
+
+DYNAMIC_BUDGET_GATE=PASS
+UNKNOWN_RPC_REJECTION=PASS
+
+OFFICIAL_DELETE_OBSERVER=PASS
+OFFICIAL_DELETE_UNKNOWN=PASS
+
+STRUCTURAL_MATCHER_ALLOW_CASES=13
+STRUCTURAL_MATCHER_DENY_CASES=18
+
+CONTINUATION_NEW_THREAD_PATH_PRESENT=NO
+REAL_METHOD_GATE_DISABLED=PASS
+
+EXPLICIT_REAL_FILE_TESTS=69
+EXPLICIT_REAL_FILE_SKIPPED=1
+EXPLICIT_REAL_FILE_FAILURES=0
+EXPLICIT_REAL_FILE_ERRORS=0
+
+FOCUSED_TESTS=106
+FOCUSED_FAILURES=0
+FOCUSED_ERRORS=0
+
+FULL_TESTS=1065
+FULL_FAILURES=0
+FULL_ERRORS=0
+
+P7C6_REAL_CONTINUATION_AUTHORIZED=NO
+
+P8_STARTED=NO
+P9_STARTED=NO
+
+The Repair-5 harness uses named finite wait authorities for the frozen real
+flow and calculates the watchdog budget by conservative summation. Synthetic
+children accept short explicit bounds; real mode selects the separate real
+watchdog authority and rejects test-bound overrides.
+
+The real child preserves the sanitized result returned only after the existing
+success gates pass. It validates the exact finite schema, creates the result
+file exclusively with bounded durable writes, and exits successfully only
+after materialization. The parent performs bounded no-follow identity-safe
+reading and validates source, retained identity, lifecycle statuses, residuals,
+limits, ownership, and dynamic counters before process PASS.
+
+No real Codex process, app server, model, thread, turn, approval, interrupt,
+delete, read, list, or Telegram effect was executed during Repair-5. The real
+authorization and expected source variables remained unset.
