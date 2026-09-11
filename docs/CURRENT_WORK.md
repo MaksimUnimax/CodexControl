@@ -72,9 +72,7 @@ Architect acceptance:
 
 `docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_ARCHITECT_ACCEPTANCE_2026-09-11.md`
 
-Accepted P7.C9 authority includes production-only state-root provision/validate, explicit state-root worker ownership, fail-closed parent reconstruction, bounded runtime acquisition, DENY-only handling, exact normal `1/1/1`, zero resume/interrupt/delete/read/list, one child/no retry, immutable journal and exact process-group authority.
-
-The one-shot real P7.C9 probe has now executed exactly once and is permanently consumed. Sanitized evidence commit: `bf7f870c6df640bb26e51fa9c05a2b55e44e5489`.
+The one-shot real P7.C9 probe executed exactly once and is permanently consumed. Sanitized evidence commit: `bf7f870c6df640bb26e51fa9c05a2b55e44e5489`.
 
 Durable parent facts establish:
 
@@ -86,15 +84,19 @@ Durable parent facts establish:
 - process group quiescent, no TERM/KILL, one child, zero retries;
 - normal result and child result absent.
 
-The exact post-acquire failure stage is not established by the global parent outcome. No fresh-thread disposition may be inferred from absence of the normal result.
+Architect review:
+
+`docs/evidence/p7c9/P7C9_CONSUMED_REAL_DENY_ONLY_APPROVAL_PROBE_ARCHITECT_REVIEW_2026-09-11.md`
+
+The exact post-acquire failure stage remains not established by the global parent outcome. No fresh-thread, Turn, approval, wire or sentinel fact may be inferred from the missing normal result.
 
 ## Current executable slice
 
 **P7.C9 consumed real probe — ZERO-EFFECT RETAINED-RUN FORENSIC NEXT.**
 
-The real probe is permanently consumed. No rerun, new thread, new Turn, approval response, app-server read/list or cleanup is authorized.
+The real probe is permanently consumed. No rerun, new thread, new Turn, approval response, app-server read/list, process signal or retained-state cleanup is authorized.
 
-The next slice must inspect only retained P7.C9 recovery/session/filesystem evidence to identify the last durable stage after runtime acquisition.
+The forensic must inspect only retained P7.C9 recovery journal, safe filesystem state, isolated logs/SQLite where read-only, and exact filesystem correlation into persistent Codex session artifacts. Its purpose is to determine the last durable post-acquire stage and fresh-thread/approval disposition without any new Codex effect.
 
 `P7C9_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
