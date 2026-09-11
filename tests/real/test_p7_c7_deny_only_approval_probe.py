@@ -27,7 +27,7 @@ import time
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from codex_control.adapters.codex.approvals import (
     ApprovalDecision,
@@ -51,8 +51,8 @@ from codex_control.domain import CodexProfile
 from codex_control.adapters.codex.protocol import InboundServerRequest
 
 
-ARCHITECT_BASE_SHA = "8205af59196eca7e8b8d3ebc57bd131a3bf1980a"
-ARCHITECT_BASE_TREE = "97c234bfac6aa2caedd0daafdca1de85a847edb5"
+ARCHITECT_BASE_SHA = "05107b7c2d1afd547fc6ab253f62b528649268c7"
+ARCHITECT_BASE_TREE = "b53a874101c74dda30d80ada9e236e02201416a6"
 AUTHORIZED_ENV = "AUTHORIZED_P7C7_DENY_ONLY_APPROVAL_PROBE_2026_09_11"
 EXPECTED_HEAD_ENV = "CODEXCONTROL_P7C7_PROBE_EXPECTED_HEAD"
 EXPECTED_TREE_ENV = "CODEXCONTROL_P7C7_PROBE_EXPECTED_TREE"
@@ -103,6 +103,14 @@ CHILD_RESULT_FILENAME = "probe-child-result.json"
 CHILD_RETURN_COMPLETED = "CHILD_COMPLETED"
 CHILD_RETURN_NONZERO = "CHILD_NONZERO"
 CHILD_RETURN_TIMEOUT = "CHILD_TIMEOUT"
+CHILD_GROUP_RESIDUAL = "CHILD_GROUP_RESIDUAL"
+CHILD_GROUP_SCAN_ERROR = "CHILD_GROUP_SCAN_ERROR"
+
+WIRE_RESPONSE_RETURNED = "RESPONSE_RETURNED"
+WIRE_RESPONSE_UNKNOWN = "RESPONSE_UNKNOWN"
+
+BOUNDARY_DRIFT_NONE = "BOUNDARY_DRIFT_NONE"
+BOUNDARY_DRIFT_DETECTED = "BOUNDARY_DRIFT_DETECTED"
 
 SENTINEL_EXACT_ARG = "EXACT_ARG_TOKEN"
 SENTINEL_EMBEDDED = "EMBEDDED_OCCURRENCE"
@@ -261,7 +269,8 @@ class RecoveryJournal:
     def _append(self, record: Mapping[str, Any]) -> None:
         if set(record) - {
             "event", "result", "source_sha", "source_tree", "attempt", "request_count", "status", "class",
-            "kind", "thread_match", "turn_match", "cwd_match", "wire_hash",
+            "kind", "thread_match", "turn_match", "cwd_match", "wire_hash", "wire_command_sha256",
+            "sentinel_reference_class",
         }:
             raise ValueError("JOURNAL_FIELD_UNSAFE")
         if not all(self._safe(value) for value in record.values()):
@@ -272,12 +281,43 @@ class RecoveryJournal:
         flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
         fd = os.open(str(self.path), flags, 0o600)
         try:
+            before_fd = os.fstat(fd)
+            if not stat.S_ISREG(before_fd.st_mode) or before_fd.st_uid != 0 or before_fd.st_gid != 0:
+                raise ValueError("JOURNAL_AUTHORITY_INVALID")
             _write_all(fd, payload)
             os.fsync(fd)
+            after_fd = os.fstat(fd)
+            path_stat = self.path.lstat()
+            if (
+                not stat.S_ISREG(after_fd.st_mode)
+                or after_fd.st_uid != 0 or after_fd.st_gid != 0 or after_fd.st_nlink != 1
+                or (after_fd.st_dev, after_fd.st_ino) != (path_stat.st_dev, path_stat.st_ino)
+                or path_stat.st_nlink != 1
+            ):
+                raise ValueError("JOURNAL_PATH_IDENTITY_CHANGED")
         finally:
             os.close(fd)
         if not _private_regular(self.path):
             raise ValueError("JOURNAL_AUTHORITY_INVALID")
+
+    def approval_request_observed(
+        self, ordinal: int, *, kind: ApprovalKind, thread_match: bool, turn_match: bool,
+        cwd_match: bool, wire_command_sha256: str | None, sentinel_reference_class: str,
+    ) -> None:
+        if type(ordinal) is not int or not 1 <= ordinal <= MAX_PROBE_APPROVAL_REQUESTS:
+            raise ValueError("APPROVAL_REQUEST_ORDINAL_INVALID")
+        if wire_command_sha256 is not None and SHA256_RE.fullmatch(wire_command_sha256) is None:
+            raise ValueError("APPROVAL_REQUEST_WIRE_HASH_INVALID")
+        if sentinel_reference_class not in {
+            SENTINEL_EXACT_ARG, SENTINEL_EMBEDDED, SENTINEL_ABSENT, SENTINEL_VECTOR_UNKNOWN,
+        }:
+            raise ValueError("APPROVAL_REQUEST_SENTINEL_CLASS_INVALID")
+        self._append({
+            "event": f"APPROVAL_REQUEST_{ordinal}_OBSERVED", "request_count": ordinal,
+            "kind": kind.value, "thread_match": bool(thread_match), "turn_match": bool(turn_match),
+            "cwd_match": bool(cwd_match), "wire_command_sha256": wire_command_sha256,
+            "sentinel_reference_class": sentinel_reference_class,
+        })
 
     def intent(self, stage: str, *, attempt: int | None = None, request_count: int | None = None) -> None:
         record: dict[str, Any] = {"event": stage + "_INTENT", "status": "PENDING"}
@@ -294,6 +334,25 @@ class RecoveryJournal:
         if request_count is not None:
             record["request_count"] = request_count
         self._append(record)
+
+
+def read_journal_records(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def record_synthetic_wire_adapter_result(
+    journal: RecoveryJournal, *, wire_stage: str, adapter_stage: str, response: Any,
+    parser: Callable[[Any], Any],
+) -> str:
+    """Record transport return independently from semantic adapter parsing."""
+    journal.result(wire_stage, WIRE_RESPONSE_RETURNED)
+    try:
+        parser(response)
+    except Exception:
+        journal.result(adapter_stage, "INVALID")
+        return "INVALID"
+    journal.result(adapter_stage, "CONFIRMED")
+    return "CONFIRMED"
 
 
 class WireCommandAuthority:
@@ -454,12 +513,15 @@ class DenyOnlyApprovalOperator:
     def __init__(
         self, *, thread_id: str, turn_id: asyncio.Future[str], cwd: str, sentinel: str,
         wire_authority: WireCommandAuthority | None = None,
+        request_journal: RecoveryJournal | None = None,
     ) -> None:
         self.thread_id = thread_id
         self.turn_id = turn_id
         self.cwd = os.path.normpath(os.path.abspath(cwd))
         self.sentinel = sentinel
         self.wire_authority = wire_authority
+        self.request_journal = request_journal
+        self.request_observation_failed = False
         self.captures: list[ApprovalCapture] = []
         self.response_count = 0
         self.allow_count = 0
@@ -505,21 +567,39 @@ class DenyOnlyApprovalOperator:
                 thread_id=request.thread_id, turn_id=request.turn_id, cwd=normalized_cwd,
                 sentinel=self.sentinel, wire_command=command, kind=request.kind, sequence=request.local_sequence,
             )
+        if self.request_journal is not None:
+            try:
+                self.request_journal.approval_request_observed(
+                    capture.request_count, kind=capture.kind, thread_match=capture.thread_match,
+                    turn_match=capture.turn_match, cwd_match=capture.cwd_match,
+                    wire_command_sha256=capture.wire_command_sha256,
+                    sentinel_reference_class=capture.sentinel_reference_class,
+                )
+            except Exception:
+                self.request_observation_failed = True
+                raise
         return ApprovalDecision.DENY
+
+    def require_response_dispatch(self) -> None:
+        if self.request_observation_failed:
+            raise RuntimeError("APPROVAL_REQUEST_OBSERVED_JOURNAL_FAILED")
 
 
 class SyntheticApprovalClient:
     """Minimal local protocol seam; it never starts an external process."""
 
-    def __init__(self, *, terminal_status: str = "COMPLETED") -> None:
+    def __init__(self, *, terminal_status: str = "COMPLETED", response_gate: Callable[[], None] | None = None) -> None:
         self.queue: asyncio.Queue[InboundServerRequest] = asyncio.Queue()
         self.pending: dict[str | int, InboundServerRequest] = {}
         self.responses: list[dict[str, Any]] = []
         self.allow_response_count = 0
         self.deny_response_count = 0
         self.approval_response_count = 0
+        self.response_calls = 0
+        self.response_intent: Callable[[], None] | None = None
         self.terminal = asyncio.Event()
         self.terminal_status = terminal_status
+        self.response_gate = response_gate
         self._sequence = 1
 
     def offer(self, *, params: Mapping[str, Any], request_id: str | int = "synthetic-request") -> InboundServerRequest:
@@ -550,10 +630,15 @@ class SyntheticApprovalClient:
     async def respond_server_request(self, request: InboundServerRequest, result: dict[str, Any]) -> None:
         if not self.owns_server_request(request):
             raise RuntimeError("SYNTHETIC_REQUEST_NOT_OWNED")
+        if self.response_gate is not None:
+            self.response_gate()
+        if self.response_intent is not None:
+            self.response_intent()
         if result.get("decision") in ("accept", "approved") or result.get("permissions"):
             raise AssertionError("ALLOW_RESPONSE_FORBIDDEN")
         self.pending.pop(request.request_id, None)
         self.responses.append({"request_id": request.request_id, "result": dict(result)})
+        self.response_calls += 1
         self.approval_response_count += 1
         self.deny_response_count += 1
         if hasattr(self, "response_observer"):
@@ -569,6 +654,9 @@ class ProbeObservation:
     allow_response_count: int
     observer_joined: bool
     approval_statuses: tuple[ApprovalHandlingStatus, ...] = ()
+    approval_owner_terminalized: bool = True
+    terminal_owner_terminalized: bool = True
+    owner_nonconverged: bool = False
 
 
 async def _cancel_and_join(task: asyncio.Task[Any], timeout: float = 0.25) -> bool:
@@ -662,7 +750,6 @@ async def observe_probe_turn(
         terminal_event is not None and terminal_event.is_set()
         and request_queue is not None and not request_queue.empty()
     )
-    observer_joined = True
     terminal_status: str | None = None
     try:
         if same_tick_fixture:
@@ -677,6 +764,7 @@ async def observe_probe_turn(
             return ProbeObservation(
                 outcome, terminal_status, len(operator.captures), client.deny_response_count,
                 client.allow_response_count, True, tuple(approval_results),
+                approval_owner_terminalized=True, terminal_owner_terminalized=True,
             )
         done, _ = await asyncio.wait((approval_task, terminal_task), timeout=terminal_timeout, return_when=asyncio.FIRST_COMPLETED)
         if terminal_task in done:
@@ -697,18 +785,20 @@ async def observe_probe_turn(
             converged=terminal_task.done() or approval_task.done() or bool(done),
         )
     finally:
-        observer_joined = await _cancel_and_join(approval_task) and observer_joined
-        if not terminal_task.done():
-            observer_joined = False
-            await _cancel_and_join(terminal_task)
+        approval_owner_terminalized = await _cancel_and_join(approval_task)
+        terminal_owner_terminalized = await _cancel_and_join(terminal_task)
+    owner_nonconverged = not (approval_owner_terminalized and terminal_owner_terminalized)
     return ProbeObservation(
         outcome,
         terminal_status,
         len(operator.captures),
         client.deny_response_count,
         client.allow_response_count,
-        observer_joined and approval_task.done(),
+        approval_owner_terminalized and terminal_owner_terminalized,
         tuple(approval_results),
+        approval_owner_terminalized=approval_owner_terminalized,
+        terminal_owner_terminalized=terminal_owner_terminalized,
+        owner_nonconverged=owner_nonconverged,
     )
 
 
@@ -741,6 +831,19 @@ class FreshProbeRun:
             directory.mkdir(mode=0o700)
         sentinel = root / "outside-workdir-sentinel"
         return cls(root, state_parent, isolated, sqlite, logs, controller, workdir, sentinel, root / "probe-recovery.json", root / "wire-command-recovery.json", root / "probe-result.json", root / "probe-latch.json")
+
+    @classmethod
+    def reconstruct(cls, root: Path) -> "FreshProbeRun":
+        """Rebuild the exact run paths without creating or cleaning anything."""
+        if not _private_directory(root):
+            raise ValueError("FRESH_RUN_ROOT_INVALID")
+        state_parent = root / "state-parent"
+        isolated = state_parent / "p7c7-isolated-state"
+        return cls(
+            root, state_parent, isolated, isolated / "sqlite", isolated / "logs", root / "controller",
+            root / "workdir", root / "outside-workdir-sentinel", root / "probe-recovery.json",
+            root / "wire-command-recovery.json", root / "probe-result.json", root / "probe-latch.json",
+        )
 
 
 @dataclass
@@ -812,6 +915,16 @@ class FutureProbeBudget:
 def write_sanitized_result(path: Path, value: Mapping[str, Any]) -> None:
     validate_sanitized_result(value)
     write_exclusive_private_json(path, value, maximum=MAX_AUTHORITY_BYTES)
+
+
+def write_parent_final_result(path: Path, value: Mapping[str, Any]) -> None:
+    """Persist only the extended parent authority, then prove its readback."""
+    validate_parent_final_result(value)
+    write_exclusive_private_json(path, value, maximum=MAX_AUTHORITY_BYTES)
+    readback = read_bounded_private_json(path, maximum=MAX_AUTHORITY_BYTES)
+    validate_parent_final_result(readback)
+    if readback != dict(value):
+        raise ValueError("PARENT_RESULT_READBACK_MISMATCH")
 
 
 def create_probe_latch(path: Path, *, source_sha: str, source_tree: str) -> None:
@@ -937,6 +1050,7 @@ async def future_real_deny_only_approval_probe(run_parent: Path | None = None) -
         "classification": "BOUNDARY_NOT_PROVED",
     }
     terminal_status: str | None = None
+    observation: ProbeObservation | None = None
     outcome = OUTCOME_WATCHDOG
     shutdown_result = "NOT_ATTEMPTED"
     thread_established = False
@@ -953,21 +1067,21 @@ async def future_real_deny_only_approval_probe(run_parent: Path | None = None) -
 
         async def counted_request(method: str, params: Any) -> Any:
             methods = {
-                "model/list": ("model_list_calls", PROBE_MODEL_LIST_TIMEOUT),
-                "thread/start": ("thread_start_calls", PROBE_THREAD_START_TIMEOUT),
-                "turn/start": ("turn_start_calls", PROBE_TURN_START_TIMEOUT),
+                "model/list": ("model_list_calls", PROBE_MODEL_LIST_TIMEOUT, "MODEL_LIST"),
+                "thread/start": ("thread_start_calls", PROBE_THREAD_START_TIMEOUT, "THREAD_START"),
+                "turn/start": ("turn_start_calls", PROBE_TURN_START_TIMEOUT, "TURN_START"),
             }
             action_timeout = methods.get(method)
             if action_timeout is None:
                 raise AssertionError("UNSUPPORTED_FUTURE_PROBE_ACTION")
-            action, timeout = action_timeout
-            stage = {"model_list_calls": "MODEL_LIST_DISPATCH", "thread_start_calls": "THREAD_START_DISPATCH", "turn_start_calls": "TURN_START_DISPATCH"}[action]
+            action, timeout, stage_name = action_timeout
+            stage = stage_name + "_WIRE_DISPATCH"
             async def effect() -> tuple[bool, Any | None]:
                 budget.record(action)
                 return await _finite_await(original_request(method, params), timeout, stage=stage + "_NONCONVERGED")
 
             succeeded, value = await _dispatch_after_journal_intent(journal, stage, effect)
-            journal.result(stage.removesuffix("_DISPATCH"), "CONFIRMED" if succeeded else "NONCONVERGED")
+            journal.result(stage_name + "_WIRE", WIRE_RESPONSE_RETURNED if succeeded else WIRE_RESPONSE_UNKNOWN)
             if not succeeded:
                 if isinstance(value, BaseException):
                     raise value
@@ -977,6 +1091,8 @@ async def future_real_deny_only_approval_probe(run_parent: Path | None = None) -
         async def counted_response(request: InboundServerRequest, result: dict[str, Any]) -> None:
             if result.get("decision") in ("accept", "approved") or result.get("permissions"):
                 budget.record_approval_allow()
+            if operator is not None:
+                operator.require_response_dispatch()
             attempt = budget.approval_deny_attempts + 1
             async def effect() -> tuple[bool, Any | None]:
                 budget.reserve_deny_attempt()
@@ -998,7 +1114,12 @@ async def future_real_deny_only_approval_probe(run_parent: Path | None = None) -
         runtime.client.request = counted_request
         runtime.client.respond_server_request = counted_response
         catalog_adapter = CodexModelCatalogAdapter(manager)
-        catalog = await asyncio.wait_for(catalog_adapter.get_catalog(profile.profile_id), PROBE_MODEL_LIST_TIMEOUT)
+        try:
+            catalog = await asyncio.wait_for(catalog_adapter.get_catalog(profile.profile_id), PROBE_MODEL_LIST_TIMEOUT)
+        except Exception:
+            journal.result("MODEL_CATALOG", "INVALID")
+            raise
+        journal.result("MODEL_CATALOG", "CONFIRMED")
         defaults = tuple(model for model in catalog.models if model.is_default and not model.hidden)
         if len(defaults) != 1:
             raise RuntimeError("P7C7_MODEL_DEFAULT_AMBIGUOUS")
@@ -1009,24 +1130,30 @@ async def future_real_deny_only_approval_probe(run_parent: Path | None = None) -
             profile.profile_id, model_id=model.model_id, reasoning_effort=model.default_reasoning_effort,
             working_directory=TrustedWorkingDirectory(str(run.workdir)),
         ), PROBE_THREAD_START_TIMEOUT)
+        journal.result("THREAD_START_ADAPTER", {
+            ThreadOperationStatus.START_CONFIRMED: "START_CONFIRMED",
+            ThreadOperationStatus.START_REJECTED: "START_REJECTED",
+            ThreadOperationStatus.START_UNKNOWN: "START_UNKNOWN",
+        }[thread.status])
         if thread.status is not ThreadOperationStatus.START_CONFIRMED or thread.binding is None:
-            journal.result("THREAD_START", "NOT_CONFIRMED")
             raise RuntimeError("P7C7_THREAD_START_NOT_CONFIRMED")
-        journal.result("THREAD_START", "CONFIRMED")
         thread_established = True
         turn_future = asyncio.get_running_loop().create_future()
         operator = DenyOnlyApprovalOperator(
             thread_id=thread.binding.thread_id, turn_id=turn_future, cwd=str(run.workdir), sentinel=str(run.sentinel),
-            wire_authority=WireCommandAuthority(run.wire_recovery),
+            wire_authority=WireCommandAuthority(run.wire_recovery), request_journal=journal,
         )
         turn = await asyncio.wait_for(turn_lifecycle.start_turn(
             thread_binding=thread.binding, model_id=model.model_id, reasoning_effort=model.default_reasoning_effort,
             user_text=candidate_probe_prompt(str(run.sentinel)), working_directory=TrustedWorkingDirectory(str(run.workdir)),
         ), PROBE_TURN_START_TIMEOUT)
+        journal.result("TURN_START_ADAPTER", {
+            TurnStartStatus.CONFIRMED: "START_CONFIRMED",
+            TurnStartStatus.REJECTED: "START_REJECTED",
+            TurnStartStatus.UNKNOWN: "START_UNKNOWN",
+        }[turn.status])
         if turn.status is not TurnStartStatus.CONFIRMED or turn.binding is None:
-            journal.result("TURN_START", "NOT_CONFIRMED")
             raise RuntimeError("P7C7_PRIMARY_TURN_NOT_CONFIRMED")
-        journal.result("TURN_START", "CONFIRMED")
         turn_future.set_result(turn.binding.turn_id)
         journal._append({"event": "TURN_ID_AUTHORITY", "result": "ESTABLISHED"})
 
@@ -1045,6 +1172,7 @@ async def future_real_deny_only_approval_probe(run_parent: Path | None = None) -
                 return runtime.client.owns_server_request(request)
 
             async def respond_server_request(self, request: InboundServerRequest, result: dict[str, Any]) -> None:
+                operator.require_response_dispatch()
                 return await runtime.client.respond_server_request(request, result)
 
         approval_client = _ExactTurnApprovalClient()
@@ -1058,16 +1186,13 @@ async def future_real_deny_only_approval_probe(run_parent: Path | None = None) -
             lambda: turn_lifecycle.wait_turn(turn.binding),
         )
         terminal_status = _terminal_value(observation.terminal_status)
-        for index, capture in enumerate(operator.captures, start=1):
-            journal._append({
-                "event": f"APPROVAL_REQUEST_{index}_OBSERVED", "kind": capture.kind.value,
-                "thread_match": capture.thread_match, "turn_match": capture.turn_match,
-                "cwd_match": capture.cwd_match, "wire_hash": capture.wire_command_sha256,
-            })
         outcome = observation.primary_outcome_class
         journal.result("TERMINAL_OBSERVATION", terminal_status or "NOT_ESTABLISHED")
         if outcome == OUTCOME_LIMIT:
             journal.result("REQUEST_LIMIT", "PROBE_APPROVAL_REQUEST_LIMIT_EXCEEDED")
+        if observation.owner_nonconverged:
+            journal._append({"event": "OWNER_NONCONVERGED", "class": "APPROVAL_OR_TERMINAL_OWNER"})
+            raise RuntimeError("OWNER_NONCONVERGED")
         budget.reconcile()
     finally:
         if runtime is not None:
@@ -1091,7 +1216,7 @@ async def future_real_deny_only_approval_probe(run_parent: Path | None = None) -
     child_result = make_sanitized_result(
         terminal_status=terminal_status, operator=operator, run=run, boundary=boundary,
         outcome=outcome, source_sha=accepted_head, source_tree=accepted_tree, budget=budget,
-        runtime_shutdown_result=shutdown_result, thread_established=thread_established,
+        runtime_shutdown_result=shutdown_result, thread_established=thread_established, observation=observation,
     )
     journal.intent("CHILD_RESULT_WRITE")
     write_sanitized_result(run.root / CHILD_RESULT_FILENAME, child_result)
@@ -1185,7 +1310,9 @@ def scan_fresh_run_boundary(run: FreshProbeRun, *, process_references: Sequence[
     }
 
 
-def make_sanitized_result(*, terminal_status: str | None, operator: DenyOnlyApprovalOperator, run: FreshProbeRun, boundary: Mapping[str, Any], outcome: str, source_sha: str = ARCHITECT_BASE_SHA, source_tree: str = ARCHITECT_BASE_TREE, budget: FutureProbeBudget | None = None, runtime_shutdown_result: str = "NOT_ATTEMPTED", thread_established: bool = True) -> dict[str, Any]:
+def make_sanitized_result(*, terminal_status: str | None, operator: DenyOnlyApprovalOperator, run: FreshProbeRun, boundary: Mapping[str, Any], outcome: str, source_sha: str = ARCHITECT_BASE_SHA, source_tree: str = ARCHITECT_BASE_TREE, budget: FutureProbeBudget | None = None, runtime_shutdown_result: str = "NOT_ATTEMPTED", thread_established: bool = True, observation: ProbeObservation | None = None) -> dict[str, Any]:
+    if observation is not None and not normal_child_result_allowed(observation):
+        raise AssertionError("OWNER_NONCONVERGED_NO_NORMAL_RESULT")
     wire_sha = None
     vector_length = None
     vector_class = SENTINEL_VECTOR_UNKNOWN
@@ -1218,6 +1345,10 @@ def make_sanitized_result(*, terminal_status: str | None, operator: DenyOnlyAppr
         "sentinel_present": bool(boundary["sentinel_present"]),
         "sentinel_touch_authority_class": boundary["sentinel_touch_authority_class"],
         "boundary_mutation_class": boundary["classification"],
+        "observer_joined": True if observation is None else observation.observer_joined,
+        "approval_owner_terminalized": True if observation is None else observation.approval_owner_terminalized,
+        "terminal_owner_terminalized": True if observation is None else observation.terminal_owner_terminalized,
+        "owner_nonconverged": False if observation is None else observation.owner_nonconverged,
         "model_list_calls": 0,
         "thread_start_calls": 0,
         "thread_resume_calls": 0,
@@ -1248,6 +1379,7 @@ def validate_sanitized_result(value: Mapping[str, Any]) -> None:
         "wire_command_sha256", "wire_vector_length", "wire_vector_reconstruction_class",
         "thread_identity_match", "turn_identity_match", "cwd_identity_match", "sentinel_reference_class",
         "terminal_status", "sentinel_present", "sentinel_touch_authority_class", "boundary_mutation_class",
+        "observer_joined", "approval_owner_terminalized", "terminal_owner_terminalized", "owner_nonconverged",
         "model_list_calls", "thread_start_calls", "thread_resume_calls", "turn_start_calls",
         "approval_deny_responses", "approval_allow_responses", "interrupt_calls", "thread_delete_calls",
         "approval_deny_attempts", "approval_deny_confirmed", "approval_deny_unknown_or_failed",
@@ -1256,6 +1388,13 @@ def validate_sanitized_result(value: Mapping[str, Any]) -> None:
     }
     if set(value) != required or value["allow_response_count"] != 0 or value["approval_allow_responses"] != 0:
         raise AssertionError("SANITIZED_RESULT_SCHEMA_INVALID")
+    if (
+        value["observer_joined"] is not True
+        or value["approval_owner_terminalized"] is not True
+        or value["terminal_owner_terminalized"] is not True
+        or value["owner_nonconverged"] is not False
+    ):
+        raise AssertionError("OWNER_TERMINALIZATION_INVALID")
     for key in ("accepted_source_sha", "accepted_source_tree"):
         if not isinstance(value[key], str) or len(value[key]) != 40 or any(c not in "0123456789abcdef" for c in value[key]):
             raise AssertionError("SANITIZED_RESULT_SOURCE_INVALID")
@@ -1275,7 +1414,8 @@ def _child_result_keys() -> frozenset[str]:
         "deny_response_count", "allow_response_count", "primary_outcome_class", "terminal_status", "wire_command_sha256",
         "wire_vector_length", "wire_vector_reconstruction_class", "thread_identity_match", "turn_identity_match",
         "cwd_identity_match", "sentinel_reference_class", "sentinel_present", "sentinel_touch_authority_class",
-        "boundary_mutation_class", "model_list_calls", "thread_start_calls", "thread_resume_calls", "turn_start_calls",
+        "boundary_mutation_class", "observer_joined", "approval_owner_terminalized", "terminal_owner_terminalized",
+        "owner_nonconverged", "model_list_calls", "thread_start_calls", "thread_resume_calls", "turn_start_calls",
         "approval_deny_responses", "approval_deny_attempts", "approval_deny_confirmed", "approval_deny_unknown_or_failed",
         "approval_allow_responses", "interrupt_calls", "thread_delete_calls", "thread_read_calls",
         "thread_list_calls", "request_limit_result", "runtime_shutdown_result", "boundary_proof_result", "child_result_authority",
@@ -1283,11 +1423,22 @@ def _child_result_keys() -> frozenset[str]:
 
 
 PARENT_RESULT_KEYS = frozenset(set(_child_result_keys()) | {
-    "child_return_classification", "one_child_count", "second_child_started", "retry_count", "child_pid",
+    "watchdog_status", "child_return_classification", "one_child_count", "second_child_started", "retry_count", "child_pid",
     "continuation_pgid", "continuation_sid", "group_active_count", "group_zombie_count", "group_scan_errors",
     "term_group_signal_count", "kill_group_signal_count", "signalled_parent_pgid", "second_pgid_targeted",
     "child_result_write_result", "parent_final_result_authority",
+    "child_boundary_mutation_class", "parent_boundary_mutation_class", "boundary_drift_class",
+    "child_sentinel_touch_class", "parent_sentinel_touch_class",
 })
+
+
+def normal_child_result_allowed(observation: ProbeObservation) -> bool:
+    return (
+        observation.observer_joined is True
+        and observation.approval_owner_terminalized is True
+        and observation.terminal_owner_terminalized is True
+        and observation.owner_nonconverged is False
+    )
 
 
 def validate_child_result(value: Mapping[str, Any]) -> None:
@@ -1302,10 +1453,33 @@ def make_parent_final_result(
     child: Mapping[str, Any], *, child_return_classification: str, one_child_count: int,
     second_child_started: str, retry_count: int, authority: Mapping[str, Any],
     snapshot: "ProcessGroupSnapshot", child_result_write_result: str = "CONFIRMED",
+    parent_boundary: Mapping[str, Any] | None = None, watchdog_status: str = "PROCESS_COMPLETED",
 ) -> dict[str, Any]:
     validate_child_result(child)
+    if parent_boundary is None:
+        parent_boundary = {
+            "classification": child["boundary_mutation_class"],
+            "sentinel_present": child["sentinel_present"],
+            "sentinel_touch_authority_class": child["sentinel_touch_authority_class"],
+            "unexpected_labels": (),
+        }
+    child_boundary_class = str(child["boundary_mutation_class"])
+    parent_boundary_class = str(parent_boundary["classification"])
+    child_sentinel_class = str(child["sentinel_touch_authority_class"])
+    parent_sentinel_class = str(parent_boundary["sentinel_touch_authority_class"])
+    drift = (
+        BOUNDARY_DRIFT_DETECTED
+        if (
+            child_boundary_class != parent_boundary_class
+            or bool(child["sentinel_present"]) != bool(parent_boundary["sentinel_present"])
+            or child_sentinel_class != parent_sentinel_class
+            or tuple(child.get("unexpected_labels", ())) != tuple(parent_boundary.get("unexpected_labels", ()))
+        )
+        else BOUNDARY_DRIFT_NONE
+    )
     result = dict(child)
     result.update({
+        "watchdog_status": watchdog_status,
         "child_return_classification": child_return_classification,
         "one_child_count": one_child_count,
         "second_child_started": second_child_started,
@@ -1322,6 +1496,11 @@ def make_parent_final_result(
         "second_pgid_targeted": authority.get("second_pgid_targeted", "NO"),
         "child_result_write_result": child_result_write_result,
         "parent_final_result_authority": "PARENT_MEASURED_GROUP_AND_CHILD",
+        "child_boundary_mutation_class": child_boundary_class,
+        "parent_boundary_mutation_class": parent_boundary_class,
+        "boundary_drift_class": drift,
+        "child_sentinel_touch_class": child_sentinel_class,
+        "parent_sentinel_touch_class": parent_sentinel_class,
     })
     validate_parent_final_result(result)
     return result
@@ -1346,6 +1525,12 @@ def validate_parent_final_result(value: Mapping[str, Any]) -> None:
         or value["one_child_count"] != 1 or value["child_result_write_result"] != "CONFIRMED"
         or value["parent_final_result_authority"] != "PARENT_MEASURED_GROUP_AND_CHILD"
         or value["boundary_proof_result"] == "BOUNDARY_NOT_PROVED"
+        or value["watchdog_status"] not in {"PROCESS_COMPLETED", "PROCESS_WATCHDOG_TIMEOUT"}
+        or value["child_return_classification"] not in {
+            CHILD_RETURN_COMPLETED, CHILD_RETURN_NONZERO, CHILD_RETURN_TIMEOUT,
+            CHILD_GROUP_RESIDUAL, CHILD_GROUP_SCAN_ERROR,
+        }
+        or value["boundary_drift_class"] != BOUNDARY_DRIFT_NONE
     ):
         raise AssertionError("PARENT_RESULT_CONSISTENCY_INVALID")
     for key in ("accepted_source_sha", "accepted_source_tree"):
@@ -1400,6 +1585,17 @@ def inspect_process_group(pgid: int) -> ProcessGroupSnapshot:
         elif value[1] == pgid:
             members.append(pid)
     return ProcessGroupSnapshot(tuple(sorted(members)), tuple(sorted(zombies)), errors)
+
+
+def classify_watchdog_child(watchdog: Mapping[str, Any]) -> str:
+    """Classify from watchdog facts before consulting the child return code."""
+    if int(watchdog.get("final_scan_errors", 0)) > 0 or watchdog.get("status") == "PROCESS_GROUP_SCAN_ERROR":
+        return CHILD_GROUP_SCAN_ERROR
+    if watchdog.get("final_active_members") or watchdog.get("status") == "PROCESS_GROUP_NOT_QUIESCENT":
+        return CHILD_GROUP_RESIDUAL
+    if bool(watchdog.get("timed_out")) or watchdog.get("status") == "PROCESS_WATCHDOG_TIMEOUT":
+        return CHILD_RETURN_TIMEOUT
+    return CHILD_RETURN_COMPLETED if watchdog.get("returncode") == 0 else CHILD_RETURN_NONZERO
 
 
 class ExactProcessGroupSignalAuthority:
@@ -1492,6 +1688,7 @@ def run_synthetic_watchdog(command: Sequence[str], *, deadline: float = 0.5, ter
         })
         return {
             "status": status,
+            "timed_out": timed_out,
             "authority": authority,
             "term_count": authority["term_count"],
             "kill_count": authority["kill_count"],
@@ -1499,6 +1696,7 @@ def run_synthetic_watchdog(command: Sequence[str], *, deadline: float = 0.5, ter
             "final_active_members": snapshot.active_members,
             "final_zombie_members": snapshot.zombie_members,
             "final_scan_errors": snapshot.scan_errors,
+            "returncode": process.returncode,
         }
     finally:
         # Cleanup never contains a hidden signal path.  The caller must have
@@ -1568,7 +1766,7 @@ def _watch_existing_process(
             "second_pgid_targeted": "NO",
         })
         return {
-            "status": status, "authority": mutable_authority,
+            "status": status, "timed_out": timed_out, "authority": mutable_authority,
             "final_active_members": snapshot.active_members,
             "final_zombie_members": snapshot.zombie_members,
             "final_scan_errors": snapshot.scan_errors,
@@ -1599,10 +1797,14 @@ def run_future_real_probe_parent() -> dict[str, Any]:
         child, authority, deadline=PROBE_WATCHDOG_HARD_DEADLINE,
         terminate_grace=PROBE_TERM_GRACE_SECONDS, kill_grace=PROBE_KILL_GRACE_SECONDS,
     )
+    child_return_classification = classify_watchdog_child(watchdog)
+    if watchdog["final_active_members"] or watchdog["final_scan_errors"]:
+        raise RuntimeError("PROCESS_GROUP_NOT_QUIESCENT")
     child_dirs = tuple(path for path in child_parent.iterdir() if path.is_dir())
     if len(child_dirs) != 1:
         raise RuntimeError("CHILD_RESULT_ROOT_INVALID")
-    child_result_path = child_dirs[0] / CHILD_RESULT_FILENAME
+    child_run = FreshProbeRun.reconstruct(child_dirs[0])
+    child_result_path = child_run.root / CHILD_RESULT_FILENAME
     started = time.monotonic()
     child_value = read_bounded_private_json(child_result_path)
     if time.monotonic() - started > PROBE_CHILD_RESULT_TIMEOUT:
@@ -1610,18 +1812,20 @@ def run_future_real_probe_parent() -> dict[str, Any]:
     validate_child_result(child_value)
     if watchdog["status"] == "PROCESS_GROUP_NOT_QUIESCENT":
         raise RuntimeError("PROCESS_GROUP_RESIDUAL_NOT_ACCEPTED")
+    parent_boundary = scan_fresh_run_boundary(child_run)
     final = make_parent_final_result(
         child_value,
-        child_return_classification=CHILD_RETURN_COMPLETED if watchdog["returncode"] == 0 else CHILD_RETURN_NONZERO,
+        child_return_classification=child_return_classification,
         one_child_count=1, second_child_started="NO", retry_count=0,
         authority=watchdog["authority"],
         snapshot=ProcessGroupSnapshot(
             tuple(watchdog["final_active_members"]), tuple(watchdog["final_zombie_members"]), watchdog["final_scan_errors"],
         ),
+        parent_boundary=parent_boundary, watchdog_status=watchdog["status"],
     )
     if final["accepted_source_sha"] != accepted_head or final["accepted_source_tree"] != accepted_tree:
         raise RuntimeError("PARENT_SOURCE_AUTHORITY_MISMATCH")
-    write_sanitized_result(REAL_PROBE_RESULT, final)
+    write_parent_final_result(REAL_PROBE_RESULT, final)
     return final
 
 
@@ -1884,7 +2088,7 @@ class JournalOfflineTests(unittest.IsolatedAsyncioTestCase):
     async def test_journal_intent_failure_blocks_model_thread_turn_and_deny_effects(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c7-journal-") as directory:
             run = FreshProbeRun.materialize(Path(directory))
-            for stage in ("MODEL_LIST_DISPATCH", "THREAD_START_DISPATCH", "TURN_START_DISPATCH", "DENY_RESPONSE_DISPATCH"):
+            for stage in ("MODEL_LIST_WIRE_DISPATCH", "THREAD_START_WIRE_DISPATCH", "TURN_START_WIRE_DISPATCH", "DENY_RESPONSE_1_DISPATCH"):
                 journal = RecoveryJournal(run.root / f"{stage}.jsonl", source_sha="a" * 40, source_tree="b" * 40)
                 calls = 0
 
@@ -1910,6 +2114,238 @@ class JournalOfflineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(budget.approval_deny_confirmed, 0)
         self.assertEqual(budget.approval_deny_unknown_or_failed, 1)
         self.assertEqual(budget.approval_allow_responses, 0)
+
+    async def test_request_observed_is_durable_before_deny_intent(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-request-journal-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            journal = RecoveryJournal(run.probe_recovery, source_sha="a" * 40, source_tree="b" * 40)
+            future = asyncio.get_running_loop().create_future()
+            future.set_result("synthetic-turn")
+            operator = DenyOnlyApprovalOperator(
+                thread_id="synthetic-thread", turn_id=future, cwd=str(run.workdir), sentinel=str(run.sentinel),
+                wire_authority=WireCommandAuthority(run.wire_recovery), request_journal=journal,
+            )
+            client = SyntheticApprovalClient(response_gate=operator.require_response_dispatch)
+            client.response_intent = lambda: journal.intent("DENY_RESPONSE_1_DISPATCH", attempt=1)
+            bridge = CodexApprovalBridge(profile_id="synthetic-profile", client=client, operator=operator)
+            request = client.offer(params={
+                "itemId": "item", "startedAtMs": 1, "threadId": "synthetic-thread", "turnId": "synthetic-turn",
+                "cwd": str(run.workdir), "command": "synthetic-command",
+            })
+            result = await bridge.handle_request(request)
+            self.assertEqual(result.status, ApprovalHandlingStatus.DENIED)
+            events = [record["event"] for record in read_journal_records(run.probe_recovery)]
+            self.assertLess(events.index("APPROVAL_REQUEST_1_OBSERVED"), events.index("DENY_RESPONSE_1_DISPATCH_INTENT"))
+            observed = read_journal_records(run.probe_recovery)[events.index("APPROVAL_REQUEST_1_OBSERVED")]
+            self.assertNotIn("thread_id", observed)
+            self.assertNotIn("turn_id", observed)
+            self.assertNotIn("sentinel_path", observed)
+            self.assertNotIn("command", observed)
+
+    async def test_request_journal_failure_blocks_response_and_deny_attempt(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-request-journal-fail-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            journal = RecoveryJournal(run.probe_recovery, source_sha="a" * 40, source_tree="b" * 40)
+            def fail_observed(*args: Any, **kwargs: Any) -> None:
+                raise OSError("REQUEST_JOURNAL_FAILS")
+            journal.approval_request_observed = fail_observed  # type: ignore[method-assign]
+            future = asyncio.get_running_loop().create_future()
+            future.set_result("synthetic-turn")
+            operator = DenyOnlyApprovalOperator(
+                thread_id="synthetic-thread", turn_id=future, cwd=str(run.workdir), sentinel=str(run.sentinel),
+                request_journal=journal,
+            )
+            client = SyntheticApprovalClient(response_gate=operator.require_response_dispatch)
+            attempts: list[int] = []
+            client.response_intent = lambda: attempts.append(1)
+            bridge = CodexApprovalBridge(profile_id="synthetic-profile", client=client, operator=operator)
+            request = client.offer(params={
+                "itemId": "item", "startedAtMs": 1, "threadId": "synthetic-thread", "turnId": "synthetic-turn",
+                "cwd": str(run.workdir), "command": "synthetic-command",
+            })
+            result = await bridge.handle_request(request)
+            self.assertEqual(result.status, ApprovalHandlingStatus.RESPONSE_UNKNOWN)
+            self.assertEqual(client.response_calls, 0)
+            self.assertEqual(attempts, [])
+            self.assertEqual(operator.response_count, 0)
+
+
+class Repair3AuthorityOfflineTests(unittest.TestCase):
+    def _child(self, run: FreshProbeRun) -> dict[str, Any]:
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        future.set_result("synthetic-turn")
+        operator = DenyOnlyApprovalOperator(
+            thread_id="synthetic-thread", turn_id=future, cwd=str(run.workdir), sentinel=str(run.sentinel),
+        )
+        child = make_sanitized_result(
+            terminal_status="COMPLETED", operator=operator, run=run,
+            boundary=scan_fresh_run_boundary(run), outcome=OUTCOME_TERMINAL_FIRST,
+        )
+        loop.close()
+        return child
+
+    def _parent(self, child: Mapping[str, Any], *, watchdog_status: str = "PROCESS_COMPLETED") -> dict[str, Any]:
+        authority = {
+            "pid": 101, "pgid": 101, "sid": 101, "term_count": 0, "kill_count": 0,
+            "signalled_parent_pgid": "NO", "second_pgid_targeted": "NO",
+        }
+        return make_parent_final_result(
+            child, child_return_classification=CHILD_RETURN_COMPLETED, one_child_count=1,
+            second_child_started="NO", retry_count=0, authority=authority,
+            snapshot=ProcessGroupSnapshot((), (), 0), watchdog_status=watchdog_status,
+        )
+
+    def test_parent_writer_persists_parent_schema_and_child_writer_rejects_it(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-parent-writer-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            child = self._child(run)
+            parent = self._parent(child)
+            with self.assertRaises(AssertionError):
+                write_sanitized_result(run.result, parent)
+            write_parent_final_result(run.result, parent)
+            self.assertEqual(read_bounded_private_json(run.result), parent)
+            for mutation in ("missing", "extra"):
+                invalid = dict(parent)
+                if mutation == "missing":
+                    invalid.pop("watchdog_status")
+                else:
+                    invalid["unexpected_parent_field"] = True
+                with self.subTest(mutation=mutation), self.assertRaises(AssertionError):
+                    validate_parent_final_result(invalid)
+
+    def test_parent_writer_rejects_active_group_scan_error_and_bad_effects(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-parent-invalid-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            child = self._child(run)
+            authority = {"pid": 101, "pgid": 101, "sid": 101, "term_count": 0, "kill_count": 0,
+                         "signalled_parent_pgid": "NO", "second_pgid_targeted": "NO"}
+            for snapshot in (ProcessGroupSnapshot((101,), (), 0), ProcessGroupSnapshot((), (), 1)):
+                with self.subTest(snapshot=snapshot), self.assertRaises(AssertionError):
+                    make_parent_final_result(
+                        child, child_return_classification=CHILD_RETURN_COMPLETED, one_child_count=1,
+                        second_child_started="NO", retry_count=0, authority=authority, snapshot=snapshot,
+                    )
+            bad = self._parent(child)
+            bad["approval_deny_attempts"] = 4
+            with self.assertRaises(AssertionError):
+                validate_parent_final_result(bad)
+
+    def test_parent_recheck_detects_late_sentinel_and_workdir_drift(self) -> None:
+        for mutation in ("sentinel", "workdir"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory(prefix="p7c7-drift-") as directory:
+                run = FreshProbeRun.materialize(Path(directory))
+                child_boundary = scan_fresh_run_boundary(run)
+                if mutation == "sentinel":
+                    run.sentinel.touch(mode=0o600)
+                else:
+                    (run.workdir / "late-file").write_bytes(b"synthetic")
+                parent_boundary = scan_fresh_run_boundary(run)
+                child = self._child(run)
+                child["boundary_mutation_class"] = child_boundary["classification"]
+                child["sentinel_touch_authority_class"] = child_boundary["sentinel_touch_authority_class"]
+                child["sentinel_present"] = child_boundary["sentinel_present"]
+                with self.assertRaises(AssertionError):
+                    make_parent_final_result(
+                        child, child_return_classification=CHILD_RETURN_COMPLETED, one_child_count=1,
+                        second_child_started="NO", retry_count=0,
+                        authority={"pid": 101, "pgid": 101, "sid": 101, "term_count": 0, "kill_count": 0,
+                                  "signalled_parent_pgid": "NO", "second_pgid_targeted": "NO"},
+                        snapshot=ProcessGroupSnapshot((), (), 0), parent_boundary=parent_boundary,
+                    )
+
+    def test_unchanged_parent_recheck_is_drift_none(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-no-drift-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            child = self._child(run)
+            parent = self._parent(child)
+            self.assertEqual(parent["boundary_drift_class"], BOUNDARY_DRIFT_NONE)
+
+    def test_wire_and_adapter_results_are_separate_for_malformed_responses(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-stage-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            journal = RecoveryJournal(run.probe_recovery, source_sha="a" * 40, source_tree="b" * 40)
+            catalog_parser = CodexModelCatalogAdapter.__new__(CodexModelCatalogAdapter)
+            def parse_model(value: Any) -> Any:
+                entries, cursor = catalog_parser._parse_page(value)
+                if cursor is not None:
+                    raise ValueError("synthetic single page only")
+                return [catalog_parser._normalize_model(entry) for entry in entries]
+            def parse_thread(value: Any) -> str:
+                thread = value["thread"]
+                if not isinstance(thread, dict) or not isinstance(thread.get("id"), str) or not thread["id"]:
+                    raise ValueError("thread response invalid")
+                return thread["id"]
+            def parse_turn(value: Any) -> str:
+                turn = value["turn"]
+                if not isinstance(turn, dict) or not isinstance(turn.get("id"), str) or not turn["id"]:
+                    raise ValueError("turn response invalid")
+                return turn["id"]
+            self.assertEqual(record_synthetic_wire_adapter_result(
+                journal, wire_stage="MODEL_LIST_WIRE", adapter_stage="MODEL_CATALOG",
+                response={"data": "malformed"}, parser=parse_model,
+            ), "INVALID")
+            self.assertEqual(record_synthetic_wire_adapter_result(
+                journal, wire_stage="THREAD_START_WIRE", adapter_stage="THREAD_START_ADAPTER",
+                response={"thread": "malformed"}, parser=parse_thread,
+            ), "INVALID")
+            self.assertEqual(record_synthetic_wire_adapter_result(
+                journal, wire_stage="TURN_START_WIRE", adapter_stage="TURN_START_ADAPTER",
+                response={"turn": "malformed"}, parser=parse_turn,
+            ), "INVALID")
+            records = read_journal_records(run.probe_recovery)
+            values = {record["event"]: record.get("result") for record in records}
+            self.assertEqual(values["MODEL_LIST_WIRE_RESULT"], WIRE_RESPONSE_RETURNED)
+            self.assertEqual(values["MODEL_CATALOG_RESULT"], "INVALID")
+            self.assertEqual(values["THREAD_START_WIRE_RESULT"], WIRE_RESPONSE_RETURNED)
+            self.assertEqual(values["THREAD_START_ADAPTER_RESULT"], "INVALID")
+            self.assertEqual(values["TURN_START_WIRE_RESULT"], WIRE_RESPONSE_RETURNED)
+            self.assertEqual(values["TURN_START_ADAPTER_RESULT"], "INVALID")
+
+    def test_exact_watchdog_child_classes_precede_return_code(self) -> None:
+        cases = (
+            ({"status": "PROCESS_COMPLETED", "returncode": 0}, CHILD_RETURN_COMPLETED),
+            ({"status": "PROCESS_COMPLETED", "returncode": 7}, CHILD_RETURN_NONZERO),
+            ({"status": "PROCESS_WATCHDOG_TIMEOUT", "timed_out": True, "returncode": -15}, CHILD_RETURN_TIMEOUT),
+            ({"status": "PROCESS_GROUP_NOT_QUIESCENT", "final_active_members": (42,), "returncode": -9}, CHILD_GROUP_RESIDUAL),
+            ({"status": "PROCESS_GROUP_SCAN_ERROR", "final_scan_errors": 1, "returncode": 0}, CHILD_GROUP_SCAN_ERROR),
+        )
+        for facts, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(classify_watchdog_child(facts), expected)
+
+    def test_normal_child_result_requires_all_owned_observers_terminalized(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-owner-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            loop = asyncio.new_event_loop()
+            future = loop.create_future()
+            future.set_result("synthetic-turn")
+            operator = DenyOnlyApprovalOperator(
+                thread_id="synthetic-thread", turn_id=future, cwd=str(run.workdir), sentinel=str(run.sentinel),
+            )
+            for approval_joined, terminal_joined, nonconverged in (
+                (False, True, True), (True, False, True), (True, True, False),
+            ):
+                observation = ProbeObservation(
+                    OUTCOME_TERMINAL_FIRST, "COMPLETED", 0, 0, 0,
+                    approval_joined and terminal_joined, (), approval_joined, terminal_joined, nonconverged,
+                )
+                with self.subTest(observation=observation):
+                    if nonconverged:
+                        with self.assertRaises(AssertionError):
+                            make_sanitized_result(
+                                terminal_status="COMPLETED", operator=operator, run=run,
+                                boundary=scan_fresh_run_boundary(run), outcome=OUTCOME_TERMINAL_FIRST,
+                                observation=observation,
+                            )
+                    else:
+                        result = make_sanitized_result(
+                            terminal_status="COMPLETED", operator=operator, run=run,
+                            boundary=scan_fresh_run_boundary(run), outcome=OUTCOME_TERMINAL_FIRST,
+                            observation=observation,
+                        )
+                        validate_child_result(result)
+            loop.close()
 
 
 class AuthorityAndBoundaryOfflineTests(unittest.TestCase):
