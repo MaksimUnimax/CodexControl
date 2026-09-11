@@ -67,9 +67,9 @@ AUTHORIZATION = "AUTHORIZED_RETAINED_THREAD_T4_T5_DELETE_2026_09_10"
 EXPECTED_HEAD_ENV = "CODEXCONTROL_P7C6_CONTINUATION_EXPECTED_HEAD"
 EXPECTED_TREE_ENV = "CODEXCONTROL_P7C6_CONTINUATION_EXPECTED_TREE"
 EXPECTED_REPOSITORY = "/opt/codex-control"
-ARCHITECT_BASE_SHA = "3d0d575a6dedb0d5c7383c763d12de46f5cef7b4"
-ARCHITECT_BASE_TREE = "a64a63e703a6e0c8ab044efb3cb453015c7ed588"
-REVIEWED_CANDIDATE = "a55a765cdfb0d51e956045a238d4ecb5a237a5fe"
+ARCHITECT_BASE_SHA = "b3fef78c9b11b71efb28f7edb40cbc26ece90a34"
+ARCHITECT_BASE_TREE = "c694a328e4901473e2f9e1bf082ab2bbf6316679"
+REVIEWED_CANDIDATE = "01994403110f19e323dffd693f226b18bdcb73c7"
 PROFILE_ID = "server-80-codexcontrol"
 SERVER_ID = "server-80"
 PERSISTENT_HOME = "/root/.codex_second"
@@ -92,6 +92,7 @@ ORACLE_CHUNK_BYTES = 64 * 1024
 SYNTHETIC_WATCHDOG_HARD_DEADLINE = 5.0
 SYNTHETIC_WATCHDOG_TERMINATE_GRACE = 1.0
 SYNTHETIC_WATCHDOG_KILL_GRACE = 1.0
+PROCESS_GROUP_OBSERVATION_SLICE = 0.02
 REAL_PROCESS_RESULT_PATH = Path("/root/.codexcontrol/p7c6-same-thread-continuation-process-result.json")
 PROCESS_RESULT_MAX_BYTES = 64 * 1024
 
@@ -1643,7 +1644,7 @@ def watchdog_bounds_for_mode(
         if any(value is not None for value in (hard_deadline, terminate_grace, kill_grace)):
             raise ValueError("REAL_WATCHDOG_TEST_OVERRIDE_FORBIDDEN")
         selected = (REAL_WATCHDOG_HARD_DEADLINE, REAL_WATCHDOG_TERMINATE_GRACE, REAL_WATCHDOG_KILL_GRACE)
-    elif mode in {"synthetic-normal", "synthetic-stubborn", "synthetic-turn4-approval"}:
+    elif mode in {"synthetic-normal", "synthetic-stubborn", "synthetic-tree-stubborn", "synthetic-tree-residual", "synthetic-turn4-approval"}:
         selected = (
             SYNTHETIC_WATCHDOG_HARD_DEADLINE if hard_deadline is None else hard_deadline,
             SYNTHETIC_WATCHDOG_TERMINATE_GRACE if terminate_grace is None else terminate_grace,
@@ -1655,10 +1656,188 @@ def watchdog_bounds_for_mode(
     return selected
 
 
+@dataclass(frozen=True)
+class ProcessGroupSnapshot:
+    """Finite /proc observation of one exact process group."""
+
+    active_members: tuple[dict[str, int | str], ...]
+    zombie_members: tuple[dict[str, int | str], ...]
+    scan_errors: int
+    observed_pids: int
+
+
+def _read_proc_stat(pid: int) -> tuple[str, int]:
+    """Read only state and PGID from one bounded /proc/<pid>/stat record."""
+    raw = Path("/proc").joinpath(str(pid), "stat").read_bytes()
+    closing = raw.rfind(b") ")
+    if closing <= 0:
+        raise ValueError("PROCESS_STAT_INVALID")
+    fields = raw[closing + 2:].split()
+    if len(fields) < 4 or len(fields[0]) != 1:
+        raise ValueError("PROCESS_STAT_INVALID")
+    return chr(fields[0][0]), int(fields[2])
+
+
+def inspect_process_group(pgid: int) -> ProcessGroupSnapshot:
+    """Inspect one PGID using the finite PID set captured at scan start."""
+    if type(pgid) is not int or pgid <= 1:
+        raise ValueError("PROCESS_GROUP_AUTHORITY_INVALID")
+    try:
+        observed = tuple(int(name) for name in os.listdir("/proc") if name.isdigit())
+    except OSError as error:
+        raise AssertionError("PROCESS_GROUP_AUTHORITY_INVALID") from error
+    active: list[dict[str, int | str]] = []
+    zombies: list[dict[str, int | str]] = []
+    errors = 0
+    for pid in observed:
+        try:
+            state, member_pgid = _read_proc_stat(pid)
+        except FileNotFoundError:
+            # A process that exited after the finite PID snapshot is terminal.
+            continue
+        except (OSError, ValueError, UnicodeError):
+            errors += 1
+            continue
+        if member_pgid != pgid:
+            continue
+        member = {"pid": pid, "state": state, "pgid": member_pgid}
+        (zombies if state == "Z" else active).append(member)
+    return ProcessGroupSnapshot(tuple(active), tuple(zombies), errors, len(observed))
+
+
+def _leader_state(pid: int) -> str:
+    try:
+        state, _ = _read_proc_stat(pid)
+    except FileNotFoundError:
+        return "ABSENT"
+    except (OSError, ValueError, UnicodeError):
+        return "UNREADABLE"
+    return "ZOMBIE" if state == "Z" else state
+
+
+def _derive_process_group_authority(child_pid: int, parent_pgid: int | None = None) -> dict[str, int | str]:
+    """Prove the launched child owns one isolated session and process group."""
+    parent_group = os.getpgrp() if parent_pgid is None else parent_pgid
+    if type(child_pid) is not int or child_pid <= 1 or type(parent_group) is not int:
+        raise AssertionError("PROCESS_GROUP_AUTHORITY_INVALID")
+    try:
+        continuation_pgid = os.getpgid(child_pid)
+        continuation_sid = os.getsid(child_pid)
+    except OSError as error:
+        raise AssertionError("PROCESS_GROUP_AUTHORITY_INVALID") from error
+    if (
+        continuation_pgid != child_pid
+        or continuation_sid != child_pid
+        or continuation_pgid == parent_group
+        or continuation_pgid <= 1
+    ):
+        raise AssertionError("PROCESS_GROUP_AUTHORITY_INVALID")
+    return {
+        "child_pid": child_pid,
+        "continuation_pgid": continuation_pgid,
+        "continuation_sid": continuation_sid,
+        "parent_pgid": parent_group,
+        "authority": "PASS",
+    }
+
+
+def _send_exact_process_group_signal(
+    *, signal_number: int, continuation_pgid: int, continuation_sid: int,
+    child_pid: int, parent_pgid: int, accounting: dict[str, Any],
+) -> bool:
+    """Signal only the already-recorded isolated PGID, at most once per kind."""
+    if (
+        continuation_pgid != child_pid
+        or continuation_sid != child_pid
+        or continuation_pgid == parent_pgid
+        or continuation_pgid <= 1
+        or os.getpgrp() == continuation_pgid
+    ):
+        raise AssertionError("PROCESS_GROUP_AUTHORITY_INVALID")
+    if signal_number not in (signal.SIGTERM, signal.SIGKILL):
+        raise AssertionError("PROCESS_GROUP_SIGNAL_INVALID")
+    key = "term_group_signal_count" if signal_number == signal.SIGTERM else "kill_group_signal_count"
+    if key not in {"term_group_signal_count", "kill_group_signal_count"} or accounting.get(key, 0) >= 1:
+        raise AssertionError("PROCESS_GROUP_SIGNAL_RETRY")
+    snapshot = inspect_process_group(continuation_pgid)
+    if snapshot.scan_errors or not snapshot.active_members:
+        return False
+    try:
+        os.killpg(continuation_pgid, signal_number)
+    except ProcessLookupError:
+        return False
+    accounting[key] = accounting.get(key, 0) + 1
+    accounting["signalled_pgid"] = continuation_pgid
+    accounting["signalled_parent_pgid"] = "NO"
+    accounting["second_pgid_targeted"] = "NO"
+    return True
+
+
+def _wait_leader_and_observe_group(child: subprocess.Popen[Any], pgid: int, grace: float) -> ProcessGroupSnapshot:
+    """Use one finite grace for leader observation and one bounded group scan."""
+    started = time.monotonic()
+    try:
+        child.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        pass
+    remaining = grace - (time.monotonic() - started)
+    if remaining > 0:
+        time.sleep(remaining)
+    return inspect_process_group(pgid)
+
+
+def _observe_group_quiescence(pgid: int, observation_seconds: float) -> ProcessGroupSnapshot:
+    """Perform a short, finite observation without following process contents."""
+    if type(observation_seconds) not in (int, float) or observation_seconds <= 0:
+        raise ValueError("PROCESS_GROUP_OBSERVATION_INVALID")
+    deadline = time.monotonic() + observation_seconds
+    snapshot = inspect_process_group(pgid)
+    while snapshot.active_members and time.monotonic() < deadline:
+        time.sleep(min(PROCESS_GROUP_OBSERVATION_SLICE, max(0.0, deadline - time.monotonic())))
+        snapshot = inspect_process_group(pgid)
+    return snapshot
+
+
+def _terminate_exact_process_group(
+    child: subprocess.Popen[Any], authority: Mapping[str, int | str],
+    *, terminate_grace: float, kill_grace: float,
+) -> dict[str, Any]:
+    """Converge one exact group with one TERM and, if needed, one KILL."""
+    accounting: dict[str, Any] = {
+        "term_group_signal_count": 0, "kill_group_signal_count": 0,
+        "signalled_pgid": None, "signalled_parent_pgid": "NO", "second_pgid_targeted": "NO",
+    }
+    pgid = int(authority["continuation_pgid"])
+    child_pid = int(authority["child_pid"])
+    sid = int(authority["continuation_sid"])
+    parent_pgid = int(authority["parent_pgid"])
+    _send_exact_process_group_signal(
+        signal_number=signal.SIGTERM, continuation_pgid=pgid, continuation_sid=sid,
+        child_pid=child_pid, parent_pgid=parent_pgid, accounting=accounting,
+    )
+    after_term = _wait_leader_and_observe_group(child, pgid, terminate_grace)
+    kill_sent = False
+    if after_term.active_members:
+        kill_sent = _send_exact_process_group_signal(
+            signal_number=signal.SIGKILL, continuation_pgid=pgid, continuation_sid=sid,
+            child_pid=child_pid, parent_pgid=parent_pgid, accounting=accounting,
+        )
+    after_kill = _wait_leader_and_observe_group(child, pgid, kill_grace) if kill_sent else after_term
+    accounting.update({
+        "leader_state": _leader_state(child_pid),
+        "term_group_converged": "YES" if not after_term.active_members and not after_term.scan_errors else "NO",
+        "kill_group_converged": "YES" if kill_sent and not after_kill.active_members and not after_kill.scan_errors else "NO",
+        "process_group_active_members_after_kill": len(after_kill.active_members),
+        "process_group_zombie_members_after_kill": len(after_kill.zombie_members),
+        "process_group_scan_errors_after_kill": after_kill.scan_errors,
+    })
+    return accounting
+
+
 def launch_dedicated_continuation_child(
     *, mode: str, child_env: Mapping[str, str] | None = None,
     hard_deadline: float | None = None, terminate_grace: float | None = None,
-    kill_grace: float | None = None,
+    kill_grace: float | None = None, before_wait: callable | None = None,
 ) -> dict[str, Any]:
     """Launch exactly one child and own its finite process lifetime."""
     hard_deadline, terminate_grace, kill_grace = watchdog_bounds_for_mode(
@@ -1674,38 +1853,66 @@ def launch_dedicated_continuation_child(
     child = subprocess.Popen(
         command, cwd=EXPECTED_REPOSITORY, env=environment, stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+        start_new_session=True,
     )
+    authority = _derive_process_group_authority(child.pid)
+    if before_wait is not None:
+        before_wait(child, authority)
     child_process_count = 1
     timed_out = False
     terminated = False
+    normal_group_residual = False
+    unexpected_active_group_members_after_child_exit = 0
+    group_result: dict[str, Any] = {
+        "term_group_signal_count": 0, "kill_group_signal_count": 0,
+        "signalled_pgid": None, "signalled_parent_pgid": "NO", "second_pgid_targeted": "NO",
+        "process_group_active_members_after_kill": 0, "process_group_zombie_members_after_kill": 0,
+        "process_group_scan_errors_after_kill": 0, "leader_state": _leader_state(child.pid),
+        "term_group_converged": "NO", "kill_group_converged": "NO",
+    }
     try:
         child.wait(timeout=hard_deadline)
     except subprocess.TimeoutExpired:
         timed_out = True
-        try:
-            child.terminate()
-        except ProcessLookupError:
-            pass
-        try:
-            child.wait(timeout=terminate_grace)
-            terminated = True
-        except subprocess.TimeoutExpired:
-            try:
-                child.kill()
-            except ProcessLookupError:
-                pass
-            try:
-                child.wait(timeout=kill_grace)
-                terminated = True
-            except subprocess.TimeoutExpired:
-                terminated = child.poll() is not None
+        group_result = _terminate_exact_process_group(
+            child, authority, terminate_grace=terminate_grace, kill_grace=kill_grace,
+        )
+        terminated = child.poll() is not None
+    else:
+        after_normal = _observe_group_quiescence(int(authority["continuation_pgid"]), PROCESS_GROUP_OBSERVATION_SLICE * 5)
+        unexpected_active_group_members_after_child_exit = len(after_normal.active_members)
+        normal_group_residual = bool(after_normal.active_members or after_normal.scan_errors)
+        group_result.update({
+            "process_group_active_members_after_kill": len(after_normal.active_members),
+            "process_group_zombie_members_after_kill": len(after_normal.zombie_members),
+            "process_group_scan_errors_after_kill": after_normal.scan_errors,
+            "leader_state": _leader_state(child.pid),
+        })
+        if after_normal.active_members:
+            group_result.update(_terminate_exact_process_group(
+                child, authority, terminate_grace=terminate_grace, kill_grace=kill_grace,
+            ))
     elapsed = time.monotonic() - started
+    active_members = int(group_result["process_group_active_members_after_kill"])
+    if normal_group_residual:
+        group_status = "PROCESS_GROUP_RESIDUAL_AFTER_CHILD_EXIT"
+    else:
+        group_status = "PROCESS_GROUP_NONQUIESCENT" if active_members or group_result["process_group_scan_errors_after_kill"] else "PASS"
+    status = "PROCESS_WATCHDOG_TIMEOUT" if timed_out else "PROCESS_COMPLETED"
+    if not timed_out and normal_group_residual:
+        status = "PROCESS_GROUP_RESIDUAL_AFTER_CHILD_EXIT"
     return {
-        "status": "PROCESS_WATCHDOG_TIMEOUT" if timed_out else "PROCESS_COMPLETED",
+        "status": status,
         "child_process_count": child_process_count, "second_child_started": "NO",
         "parent_returned_finitely": elapsed < hard_deadline + terminate_grace + kill_grace + 1.0,
         "child_terminated": terminated or child.poll() is not None, "returncode": child.returncode,
         "elapsed_seconds": elapsed,
+        "continuation_pid": authority["child_pid"], "continuation_pgid": authority["continuation_pgid"],
+        "continuation_sid": authority["continuation_sid"], "parent_pgid": authority["parent_pgid"],
+        "process_group_authority": authority["authority"], "process_group_status": group_status,
+        "unexpected_active_group_members_after_child_exit": unexpected_active_group_members_after_child_exit,
+        "process_group_active_members_at_final_parent_pass": active_members,
+        **group_result,
     }
 
 
@@ -1737,6 +1944,60 @@ async def _synthetic_cancellation_resistant_child() -> None:
 
     asyncio.create_task(cancellation_resistant_task())
     await asyncio.sleep(120)
+
+
+def _synthetic_tree_wait_forever() -> None:
+    """Keep a harmless synthetic tree member alive until the group is killed."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    while True:
+        signal.pause()
+
+
+async def _synthetic_tree_stubborn_child() -> None:
+    """Create leader -> descendant -> grandchild without any Codex adapter."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    recovery_value = os.environ.get("CODEXCONTROL_P7C6_SYNTHETIC_RECOVERY")
+    if not isinstance(recovery_value, str) or not recovery_value:
+        raise RuntimeError("SYNTHETIC_RECOVERY_PATH_MISSING")
+    descendant_pid = os.fork()
+    if descendant_pid == 0:
+        grandchild_pid = os.fork()
+        if grandchild_pid == 0:
+            _synthetic_tree_wait_forever()
+            return
+        record = {
+            "leader_pid": os.getppid(), "leader_pgid": os.getpgrp(), "leader_sid": os.getsid(0),
+            "descendant_pid": os.getpid(), "descendant_pgid": os.getpgrp(),
+            "grandchild_pid": grandchild_pid, "grandchild_pgid": os.getpgrp(),
+            "status": "SYNTHETIC_TREE_READY",
+        }
+        _write_synthetic_payload(record)
+        _synthetic_tree_wait_forever()
+        return
+    await asyncio.sleep(120)
+
+
+async def _synthetic_tree_residual_child() -> None:
+    """Exit the leader successfully while descendants remain in its group."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    recovery_value = os.environ.get("CODEXCONTROL_P7C6_SYNTHETIC_RECOVERY")
+    if not isinstance(recovery_value, str) or not recovery_value:
+        raise RuntimeError("SYNTHETIC_RECOVERY_PATH_MISSING")
+    descendant_pid = os.fork()
+    if descendant_pid == 0:
+        grandchild_pid = os.fork()
+        if grandchild_pid == 0:
+            _synthetic_tree_wait_forever()
+            return
+        _write_synthetic_payload({
+            "leader_pid": os.getppid(), "leader_pgid": os.getpgrp(), "leader_sid": os.getsid(0),
+            "descendant_pid": os.getpid(), "descendant_pgid": os.getpgrp(),
+            "grandchild_pid": grandchild_pid, "grandchild_pgid": os.getpgrp(),
+            "status": "SYNTHETIC_TREE_READY",
+        })
+        _synthetic_tree_wait_forever()
+        return
+    await asyncio.sleep(0)
 
 
 async def _synthetic_turn4_approval_child() -> None:
@@ -1799,6 +2060,10 @@ def _dedicated_child_main(mode: str) -> int:
         return _run_dedicated_child_coroutine(_synthetic_normal_child, mode=mode)
     if mode == "synthetic-stubborn":
         return _run_dedicated_child_coroutine(_synthetic_cancellation_resistant_child, mode=mode)
+    if mode == "synthetic-tree-stubborn":
+        return _run_dedicated_child_coroutine(_synthetic_tree_stubborn_child, mode=mode)
+    if mode == "synthetic-tree-residual":
+        return _run_dedicated_child_coroutine(_synthetic_tree_residual_child, mode=mode)
     if mode == "synthetic-turn4-approval":
         return _run_dedicated_child_coroutine(_synthetic_turn4_approval_child, mode=mode)
     if mode == "real":
@@ -3075,6 +3340,113 @@ class ProcessWatchdogOfflineTests(unittest.TestCase):
             self.assertTrue(result["parent_returned_finitely"] and result["child_terminated"])
             self.assertEqual(json.loads(recovery.read_text(encoding="utf-8"))["status"], "STUBBORN_CHILD_STARTED")
 
+    def test_tree_watchdog_kills_exact_group_and_preserves_unrelated_process(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-watchdog-tree-") as directory:
+            root = Path(directory)
+            recovery = root / "tree-recovery.json"
+            unrelated_count = root / "unrelated-signal-count"
+            unrelated_count.write_text("0", encoding="ascii")
+            unrelated_code = (
+                "import os, signal, time\n"
+                "path = os.environ['P7C6_UNRELATED_SIGNAL_COUNT']\n"
+                "def received(_signum, _frame):\n"
+                "    with open(path, 'w', encoding='ascii') as handle: handle.write('1')\n"
+                "signal.signal(signal.SIGTERM, received)\n"
+                "while True: time.sleep(1)\n"
+            )
+            unrelated_env = os.environ.copy()
+            unrelated_env["P7C6_UNRELATED_SIGNAL_COUNT"] = str(unrelated_count)
+            unrelated = subprocess.Popen(
+                [sys.executable, "-c", unrelated_code], env=unrelated_env,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True, start_new_session=True,
+            )
+            unrelated_pgid = os.getpgid(unrelated.pid)
+            try:
+                def wait_for_ready(_child: subprocess.Popen[Any], authority: Mapping[str, int | str]) -> None:
+                    deadline = time.monotonic() + 1.0
+                    while time.monotonic() < deadline:
+                        try:
+                            record = json.loads(recovery.read_text(encoding="utf-8"))
+                        except (FileNotFoundError, json.JSONDecodeError):
+                            time.sleep(0.01)
+                            continue
+                        self.assertEqual(record.get("status"), "SYNTHETIC_TREE_READY")
+                        self.assertEqual(record.get("leader_pid"), authority["child_pid"])
+                        self.assertEqual(record.get("leader_pgid"), authority["continuation_pgid"])
+                        self.assertEqual(record.get("leader_sid"), authority["continuation_sid"])
+                        return
+                    self.fail("SYNTHETIC_TREE_READY_NOT_OBSERVED")
+
+                result = launch_dedicated_continuation_child(
+                    mode="synthetic-tree-stubborn", child_env=self._child_environment(recovery),
+                    hard_deadline=0.2, terminate_grace=0.05, kill_grace=0.2,
+                    before_wait=wait_for_ready,
+                )
+                record = json.loads(recovery.read_text(encoding="utf-8"))
+                continuation_pgid = result["continuation_pgid"]
+                self.assertEqual(result["status"], "PROCESS_WATCHDOG_TIMEOUT")
+                self.assertEqual(result["child_process_count"], 1)
+                self.assertEqual(result["second_child_started"], "NO")
+                self.assertEqual(record["leader_pid"], record["leader_pgid"])
+                self.assertEqual(record["leader_pid"], record["leader_sid"])
+                self.assertEqual(record["descendant_pgid"], continuation_pgid)
+                self.assertEqual(record["grandchild_pgid"], continuation_pgid)
+                self.assertNotEqual(unrelated_pgid, continuation_pgid)
+                self.assertEqual(result["term_group_signal_count"], 1)
+                self.assertEqual(result["kill_group_signal_count"], 1)
+                self.assertEqual(result["signalled_pgid"], continuation_pgid)
+                self.assertEqual(result["signalled_parent_pgid"], "NO")
+                self.assertEqual(result["second_pgid_targeted"], "NO")
+                self.assertEqual(result["process_group_active_members_after_kill"], 0)
+                self.assertEqual(result["process_group_scan_errors_after_kill"], 0)
+                self.assertEqual(result["leader_state"], "ABSENT")
+                for key in ("descendant_pid", "grandchild_pid"):
+                    self.assertIn(_leader_state(record[key]), ("ABSENT", "ZOMBIE"))
+                self.assertTrue(result["parent_returned_finitely"])
+                self.assertIsNone(unrelated.poll())
+                self.assertEqual(unrelated_count.read_text(encoding="ascii"), "0")
+            finally:
+                if unrelated.poll() is None:
+                    unrelated.kill()
+                    unrelated.wait(timeout=1.0)
+
+    def test_normal_exit_requires_process_group_quiescence(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-watchdog-quiescence-") as directory:
+            recovery = Path(directory) / "recovery.json"
+            result = launch_dedicated_continuation_child(
+                mode="synthetic-normal", child_env=self._child_environment(recovery),
+                hard_deadline=1, terminate_grace=0.1, kill_grace=0.1,
+            )
+            self.assertEqual(result["status"], "PROCESS_COMPLETED")
+            self.assertEqual(result["process_group_active_members_after_kill"], 0)
+            self.assertEqual(result["process_group_status"], "PASS")
+
+    def test_normal_leader_exit_with_residual_group_is_not_pass(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c6-watchdog-residual-") as directory:
+            root = Path(directory)
+            recovery = root / "tree-recovery.json"
+
+            def wait_for_ready(_child: subprocess.Popen[Any], _authority: Mapping[str, int | str]) -> None:
+                deadline = time.monotonic() + 1.0
+                while time.monotonic() < deadline:
+                    try:
+                        if json.loads(recovery.read_text(encoding="utf-8")).get("status") == "SYNTHETIC_TREE_READY":
+                            return
+                    except (FileNotFoundError, json.JSONDecodeError):
+                        pass
+                    time.sleep(0.01)
+                self.fail("SYNTHETIC_TREE_READY_NOT_OBSERVED")
+
+            result = launch_dedicated_continuation_child(
+                mode="synthetic-tree-residual", child_env=self._child_environment(recovery),
+                hard_deadline=1, terminate_grace=0.05, kill_grace=0.2, before_wait=wait_for_ready,
+            )
+            self.assertEqual(result["returncode"], 0)
+            self.assertEqual(result["status"], "PROCESS_GROUP_RESIDUAL_AFTER_CHILD_EXIT")
+            self.assertEqual(result["process_group_active_members_after_kill"], 0)
+            self.assertEqual(result["kill_group_signal_count"], 1)
+
     def test_watchdog_has_one_process_creation_site_and_no_retry(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c6-watchdog-site-") as directory:
             recovery = Path(directory) / "recovery.json"
@@ -3088,6 +3460,10 @@ class ProcessWatchdogOfflineTests(unittest.TestCase):
         launcher = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "launch_dedicated_continuation_child")
         self.assertEqual(sum(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "Popen" for node in ast.walk(launcher)), 1)
         self.assertFalse(any(isinstance(node, (ast.For, ast.AsyncFor, ast.While)) for node in ast.walk(launcher)))
+        popen_call = next(node for node in ast.walk(launcher) if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "Popen")
+        self.assertTrue(any(keyword.arg == "start_new_session" and isinstance(keyword.value, ast.Constant) and keyword.value.value is True for keyword in popen_call.keywords))
+        self.assertFalse(any(isinstance(node, ast.Attribute) and node.attr in {"terminate", "kill"} for node in ast.walk(launcher)))
+        self.assertFalse(any(isinstance(node, ast.keyword) and node.arg == "shell" and isinstance(node.value, ast.Constant) and node.value.value is True for node in ast.walk(launcher)))
 
     def test_real_and_synthetic_watchdog_authorities_are_separate(self) -> None:
         selected = watchdog_bounds_for_mode("real")
@@ -3106,8 +3482,8 @@ class ProcessWatchdogOfflineTests(unittest.TestCase):
     def test_synthetic_children_have_no_real_adapter_calls(self) -> None:
         tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
         names = {"acquire", "resume", "start_turn", "interrupt_turn", "delete", "request", "respond_server_request"}
-        functions = [node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name in {"_synthetic_normal_child", "_synthetic_cancellation_resistant_child", "_synthetic_turn4_approval_child"}]
-        self.assertEqual(len(functions), 3)
+        functions = [node for node in tree.body if isinstance(node, ast.AsyncFunctionDef) and node.name in {"_synthetic_normal_child", "_synthetic_cancellation_resistant_child", "_synthetic_tree_stubborn_child", "_synthetic_tree_residual_child", "_synthetic_turn4_approval_child"}]
+        self.assertEqual(len(functions), 5)
         for function in functions:
             for node in ast.walk(function):
                 if isinstance(node, ast.Attribute):
@@ -3129,8 +3505,15 @@ class ProcessResultOfflineTests(unittest.TestCase):
             with self.assertRaises(ContinuationLatchError):
                 read_process_result(path)
             with mock.patch(__name__ + ".REAL_PROCESS_RESULT_PATH", path), mock.patch(__name__ + ".subprocess.Popen") as popen:
+                fake_authority = {
+                    "child_pid": 12345, "continuation_pgid": 12345, "continuation_sid": 12345,
+                    "parent_pgid": 123, "authority": "PASS",
+                }
                 popen.return_value.wait.return_value = 0
-                result = launch_dedicated_continuation_child(mode="real")
+                with mock.patch(__name__ + "._derive_process_group_authority", return_value=fake_authority), mock.patch(
+                    __name__ + ".inspect_process_group", return_value=ProcessGroupSnapshot((), (), 0, 0),
+                ), mock.patch(__name__ + "._leader_state", return_value="ABSENT"):
+                    result = launch_dedicated_continuation_child(mode="real")
                 self.assertEqual(result["status"], "PROCESS_COMPLETED")
                 popen.assert_called_once()
             path.write_text("{}", encoding="utf-8")
@@ -3446,6 +3829,12 @@ class P7C6SameThreadContinuationAcceptance(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["second_child_started"], "NO")
         self.assertEqual(result["returncode"], 0, result)
         self.assertTrue(result["child_terminated"] and result["parent_returned_finitely"])
+        self.assertEqual(result["process_group_authority"], "PASS", result)
+        self.assertEqual(result["process_group_status"], "PASS", result)
+        self.assertEqual(result["unexpected_active_group_members_after_child_exit"], 0, result)
+        self.assertEqual(result["process_group_active_members_after_kill"], 0, result)
+        self.assertEqual(result["process_group_active_members_at_final_parent_pass"], 0, result)
+        self.assertEqual(result["process_group_scan_errors_after_kill"], 0, result)
         self.assertTrue(REAL_PROCESS_RESULT_PATH.is_file())
         expected_head = os.environ.get(EXPECTED_HEAD_ENV)
         expected_tree = os.environ.get(EXPECTED_TREE_ENV)
