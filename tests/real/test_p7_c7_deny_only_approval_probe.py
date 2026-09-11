@@ -51,8 +51,8 @@ from codex_control.domain import CodexProfile
 from codex_control.adapters.codex.protocol import InboundServerRequest
 
 
-ARCHITECT_BASE_SHA = "735eb4b17b9160b9d3d687812624e71a7fdb1c91"
-ARCHITECT_BASE_TREE = "9333a68f5fb3d5835fd24882d65bd67662baf493"
+ARCHITECT_BASE_SHA = "9acd8238092bfb351c093209e7fa6c40951d4b47"
+ARCHITECT_BASE_TREE = "54e6168e5f8bd9ba3ed7afc118dd30b79dab1545"
 AUTHORIZED_ENV = "AUTHORIZED_P7C7_DENY_ONLY_APPROVAL_PROBE_2026_09_11"
 EXPECTED_HEAD_ENV = "CODEXCONTROL_P7C7_PROBE_EXPECTED_HEAD"
 EXPECTED_TREE_ENV = "CODEXCONTROL_P7C7_PROBE_EXPECTED_TREE"
@@ -129,6 +129,13 @@ PARENT_EXECUTION_CLASSES = frozenset({
     "PARENT_BOUNDARY_INVALID_OR_DRIFTED",
     "PARENT_FINAL_RESULT_CONFIRMED",
 })
+CHILD_EXECUTION_CLASSES = frozenset({
+    CHILD_RETURN_COMPLETED,
+    CHILD_RETURN_NONZERO,
+    CHILD_RETURN_TIMEOUT,
+    CHILD_GROUP_RESIDUAL,
+    CHILD_GROUP_SCAN_ERROR,
+})
 PARENT_OUTCOME_WATCHDOG_STATUSES = frozenset({
     "PROCESS_COMPLETED", "PROCESS_WATCHDOG_TIMEOUT", "PROCESS_GROUP_NOT_QUIESCENT",
     "PROCESS_GROUP_SCAN_ERROR", "NOT_ESTABLISHED",
@@ -141,7 +148,13 @@ PARENT_OUTCOME_KEYS = frozenset({
     "child_returncode_class", "child_result_present", "child_result_valid", "parent_boundary_class",
     "boundary_drift_class", "group_active_count", "group_zombie_count", "group_scan_errors",
     "term_group_signal_count", "kill_group_signal_count", "one_child_count", "second_child_started",
-    "retry_count", "global_latch_present", "normal_final_result_present",
+    "retry_count", "global_latch_present", "normal_final_result_present", "child_result_discovery_class",
+})
+CHILD_RESULT_DISCOVERY_CLASSES = frozenset({
+    "CHILD_RESULT_DISCOVERY_CONFIRMED",
+    "CHILD_RESULT_DISCOVERY_MISSING",
+    "CHILD_RESULT_DISCOVERY_AMBIGUOUS",
+    "CHILD_RESULT_DISCOVERY_UNREADABLE",
 })
 
 SENTINEL_EXACT_ARG = "EXACT_ARG_TOKEN"
@@ -279,6 +292,8 @@ class RecoveryJournal:
         if not re.fullmatch(r"[0-9a-f]{40}", source_sha) or not re.fullmatch(r"[0-9a-f]{40}", source_tree):
             raise ValueError("JOURNAL_SOURCE_INVALID")
         self.path = path
+        self._original_identity: tuple[int, int] | None = None
+        self._identity_fd: int | None = None
         self._append({"event": "SOURCE_GATE", "result": "PASS", "source_sha": source_sha, "source_tree": source_tree})
 
     @staticmethod
@@ -310,27 +325,89 @@ class RecoveryJournal:
         payload = (json.dumps(dict(record), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
         if len(payload) > 4096:
             raise ValueError("JOURNAL_RECORD_OVERSIZE")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-        fd = os.open(str(self.path), flags, 0o600)
+        initial_create = self._original_identity is None
+        if initial_create:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            fd = os.open(str(self.path), flags, 0o600)
+        else:
+            before_path = self._validated_path_identity()
+            flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            try:
+                fd = os.open(str(self.path), flags)
+            except FileNotFoundError as error:
+                raise ValueError("JOURNAL_PATH_MISSING") from error
         try:
             before_fd = os.fstat(fd)
-            if not stat.S_ISREG(before_fd.st_mode) or before_fd.st_uid != 0 or before_fd.st_gid != 0:
-                raise ValueError("JOURNAL_AUTHORITY_INVALID")
+            self._require_journal_metadata(before_fd)
+            if not initial_create and (before_fd.st_dev, before_fd.st_ino) != self._original_identity:
+                raise ValueError("JOURNAL_IDENTITY_CHANGED")
+            current_path = self.path.lstat()
+            self._require_journal_metadata(current_path)
+            if (before_fd.st_dev, before_fd.st_ino) != (current_path.st_dev, current_path.st_ino):
+                raise ValueError("JOURNAL_PATH_IDENTITY_CHANGED")
             _write_all(fd, payload)
             os.fsync(fd)
             after_fd = os.fstat(fd)
             path_stat = self.path.lstat()
+            self._require_journal_metadata(after_fd)
+            self._require_journal_metadata(path_stat)
+            expected_identity = self._original_identity or (before_fd.st_dev, before_fd.st_ino)
             if (
-                not stat.S_ISREG(after_fd.st_mode)
-                or after_fd.st_uid != 0 or after_fd.st_gid != 0 or after_fd.st_nlink != 1
-                or (after_fd.st_dev, after_fd.st_ino) != (path_stat.st_dev, path_stat.st_ino)
-                or path_stat.st_nlink != 1
+                (after_fd.st_dev, after_fd.st_ino) != expected_identity
+                or (path_stat.st_dev, path_stat.st_ino) != expected_identity
             ):
                 raise ValueError("JOURNAL_PATH_IDENTITY_CHANGED")
         finally:
             os.close(fd)
-        if not _private_regular(self.path):
+        if initial_create:
+            final_path = self.path.lstat()
+            self._require_journal_metadata(final_path)
+            self._original_identity = (final_path.st_dev, final_path.st_ino)
+            identity_fd = os.open(
+                str(self.path), os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+            try:
+                identity_stat = os.fstat(identity_fd)
+                self._require_journal_metadata(identity_stat)
+                if (identity_stat.st_dev, identity_stat.st_ino) != self._original_identity:
+                    raise ValueError("JOURNAL_IDENTITY_CHANGED")
+            except BaseException:
+                os.close(identity_fd)
+                raise
+            self._identity_fd = identity_fd
+            _fsync_parent(self.path)
+
+    @staticmethod
+    def _require_journal_metadata(value: os.stat_result) -> None:
+        if (
+            not stat.S_ISREG(value.st_mode)
+            or value.st_uid != 0 or value.st_gid != 0
+            or stat.S_IMODE(value.st_mode) != 0o600
+            or value.st_nlink != 1
+        ):
             raise ValueError("JOURNAL_AUTHORITY_INVALID")
+
+    def _validated_path_identity(self) -> os.stat_result:
+        try:
+            value = self.path.lstat()
+        except FileNotFoundError as error:
+            raise ValueError("JOURNAL_PATH_MISSING") from error
+        except OSError as error:
+            raise ValueError("JOURNAL_PATH_UNREADABLE") from error
+        self._require_journal_metadata(value)
+        if self._original_identity != (value.st_dev, value.st_ino):
+            raise ValueError("JOURNAL_IDENTITY_CHANGED")
+        if self._identity_fd is not None:
+            identity_stat = os.fstat(self._identity_fd)
+            self._require_journal_metadata(identity_stat)
+            if (identity_stat.st_dev, identity_stat.st_ino) != self._original_identity:
+                raise ValueError("JOURNAL_IDENTITY_CHANGED")
+        return value
+
+    def assert_continuity(self) -> None:
+        """Perform a bounded read-only path/identity check before an effect."""
+        self._validated_path_identity()
 
     def approval_request_observed(
         self, ordinal: int, *, kind: ApprovalKind, thread_match: bool, turn_match: bool,
@@ -722,6 +799,7 @@ async def _finite_await(awaitable: Any, timeout: float, *, stage: str) -> tuple[
 async def _dispatch_after_journal_intent(journal: RecoveryJournal, stage: str, effect: Any, **kwargs: Any) -> Any:
     """The only ordering allowed for a future external effect."""
     journal.intent(stage, **kwargs)
+    journal.assert_continuity()
     return await effect()
 
 
@@ -878,6 +956,70 @@ class FreshProbeRun:
         )
 
 
+@dataclass(frozen=True)
+class ChildResultDiscovery:
+    run: FreshProbeRun | None
+    present: bool
+    valid: bool
+    classification: str
+
+
+def discover_child_result(parent: Path, *, timeout: float = PROBE_CHILD_RESULT_TIMEOUT) -> ChildResultDiscovery:
+    """Perform bounded, read-only discovery of one child root and result."""
+    started = time.monotonic()
+    if not _private_directory(parent):
+        return ChildResultDiscovery(None, False, False, "CHILD_RESULT_DISCOVERY_UNREADABLE")
+    try:
+        entries: list[Path] = []
+        with os.scandir(parent) as scan:
+            for entry in scan:
+                if time.monotonic() - started > timeout:
+                    return ChildResultDiscovery(None, False, False, "CHILD_RESULT_DISCOVERY_UNREADABLE")
+                entries.append(Path(entry.path))
+                if len(entries) > 1:
+                    return ChildResultDiscovery(None, False, False, "CHILD_RESULT_DISCOVERY_AMBIGUOUS")
+    except OSError:
+        return ChildResultDiscovery(None, False, False, "CHILD_RESULT_DISCOVERY_UNREADABLE")
+    if time.monotonic() - started > timeout:
+        return ChildResultDiscovery(None, False, False, "CHILD_RESULT_DISCOVERY_UNREADABLE")
+    if not entries:
+        return ChildResultDiscovery(None, False, False, "CHILD_RESULT_DISCOVERY_MISSING")
+    if len(entries) != 1:
+        return ChildResultDiscovery(None, False, False, "CHILD_RESULT_DISCOVERY_AMBIGUOUS")
+    root = entries[0]
+    try:
+        root_stat = root.lstat()
+    except OSError:
+        return ChildResultDiscovery(None, False, False, "CHILD_RESULT_DISCOVERY_UNREADABLE")
+    if not (
+        stat.S_ISDIR(root_stat.st_mode)
+        and root_stat.st_uid == 0 and root_stat.st_gid == 0
+        and stat.S_IMODE(root_stat.st_mode) == 0o700
+    ):
+        return ChildResultDiscovery(None, False, False, "CHILD_RESULT_DISCOVERY_AMBIGUOUS")
+    try:
+        run = FreshProbeRun.reconstruct(root)
+    except (OSError, ValueError):
+        return ChildResultDiscovery(None, False, False, "CHILD_RESULT_DISCOVERY_UNREADABLE")
+    if time.monotonic() - started > timeout:
+        return ChildResultDiscovery(None, False, False, "CHILD_RESULT_DISCOVERY_UNREADABLE")
+    result_path = run.root / CHILD_RESULT_FILENAME
+    try:
+        result_path.lstat()
+    except FileNotFoundError:
+        return ChildResultDiscovery(run, False, False, "CHILD_RESULT_DISCOVERY_MISSING")
+    except OSError:
+        return ChildResultDiscovery(run, True, False, "CHILD_RESULT_DISCOVERY_UNREADABLE")
+    try:
+        value = read_bounded_private_json(result_path)
+        if time.monotonic() - started > timeout:
+            raise ValueError("CHILD_RESULT_READ_TIMEOUT")
+        validate_child_result(value)
+    except (OSError, ValueError, AssertionError):
+        return ChildResultDiscovery(run, True, False, "CHILD_RESULT_DISCOVERY_UNREADABLE")
+    return ChildResultDiscovery(run, True, True, "CHILD_RESULT_DISCOVERY_CONFIRMED")
+
+
 @dataclass
 class FutureProbeBudget:
     """Call budget for a future authorized run; no RPC is made here."""
@@ -1004,6 +1146,11 @@ def _authority_path_present(path: Path) -> bool:
     except OSError:
         return True
     return True
+
+
+def measure_parent_authority_presence(*paths: Path) -> tuple[bool, ...]:
+    """Measure durable path presence without creating or following paths."""
+    return tuple(_authority_path_present(path) for path in paths)
 
 
 def require_parent_execution_authorities_absent(
@@ -1637,7 +1784,9 @@ def make_parent_execution_outcome(
     group_scan_errors: int = 0, term_group_signal_count: int = 0,
     kill_group_signal_count: int = 0, one_child_count: int = 1,
     second_child_started: str = "NO", retry_count: int = 0,
-    global_latch_present: bool = True, normal_final_result_present: bool = False,
+    global_latch_present: bool,
+    normal_final_result_present: bool,
+    child_result_discovery_class: str,
 ) -> dict[str, Any]:
     """Build the distinct, sanitized parent execution-outcome authority."""
     value = {
@@ -1661,13 +1810,14 @@ def make_parent_execution_outcome(
         "retry_count": retry_count,
         "global_latch_present": global_latch_present,
         "normal_final_result_present": normal_final_result_present,
+        "child_result_discovery_class": child_result_discovery_class,
     }
     validate_parent_execution_outcome(value)
     return value
 
 
 def validate_parent_execution_outcome(value: Mapping[str, Any]) -> None:
-    """Validate exact finite parent outcome fields, with no observational payload."""
+    """Validate exact finite parent outcome fields and their fact matrix."""
     if set(value) != PARENT_OUTCOME_KEYS:
         raise AssertionError("PARENT_OUTCOME_SCHEMA_INVALID")
     if type(value["format"]) is not int or value["format"] != 1:
@@ -1679,7 +1829,7 @@ def validate_parent_execution_outcome(value: Mapping[str, Any]) -> None:
         raise AssertionError("PARENT_OUTCOME_CLASS_INVALID")
     if value["watchdog_status"] not in PARENT_OUTCOME_WATCHDOG_STATUSES:
         raise AssertionError("PARENT_OUTCOME_WATCHDOG_INVALID")
-    if value["child_returncode_class"] not in PARENT_EXECUTION_CLASSES:
+    if value["child_returncode_class"] not in CHILD_EXECUTION_CLASSES:
         raise AssertionError("PARENT_OUTCOME_CHILD_CLASS_INVALID")
     if type(value["child_result_present"]) is not bool or type(value["child_result_valid"]) is not bool:
         raise AssertionError("PARENT_OUTCOME_CHILD_RESULT_FLAGS_INVALID")
@@ -1689,6 +1839,15 @@ def validate_parent_execution_outcome(value: Mapping[str, Any]) -> None:
         raise AssertionError("PARENT_OUTCOME_BOUNDARY_INVALID")
     if value["boundary_drift_class"] not in {BOUNDARY_DRIFT_NONE, BOUNDARY_DRIFT_DETECTED}:
         raise AssertionError("PARENT_OUTCOME_DRIFT_INVALID")
+    if value["child_result_discovery_class"] not in CHILD_RESULT_DISCOVERY_CLASSES:
+        raise AssertionError("PARENT_OUTCOME_DISCOVERY_INVALID")
+    if value["child_result_valid"] and value["child_result_discovery_class"] != "CHILD_RESULT_DISCOVERY_CONFIRMED":
+        raise AssertionError("PARENT_OUTCOME_DISCOVERY_FACTS_INVALID")
+    if value["child_result_present"] and not value["child_result_valid"]:
+        if value["child_result_discovery_class"] != "CHILD_RESULT_DISCOVERY_UNREADABLE":
+            raise AssertionError("PARENT_OUTCOME_DISCOVERY_FACTS_INVALID")
+    if not value["child_result_present"] and value["child_result_discovery_class"] == "CHILD_RESULT_DISCOVERY_CONFIRMED":
+        raise AssertionError("PARENT_OUTCOME_DISCOVERY_FACTS_INVALID")
     for key in (
         "group_active_count", "group_zombie_count", "group_scan_errors",
         "term_group_signal_count", "kill_group_signal_count", "one_child_count", "retry_count",
@@ -1697,17 +1856,81 @@ def validate_parent_execution_outcome(value: Mapping[str, Any]) -> None:
             raise AssertionError("PARENT_OUTCOME_COUNT_INVALID")
     if value["term_group_signal_count"] > 1 or value["kill_group_signal_count"] > 1:
         raise AssertionError("PARENT_OUTCOME_SIGNAL_COUNT_INVALID")
-    if value["second_child_started"] != "NO" or value["retry_count"] != 0 or value["one_child_count"] not in (0, 1):
+    if (
+        value["second_child_started"] != "NO"
+        or value["retry_count"] != 0
+        or value["one_child_count"] != 1
+    ):
         raise AssertionError("PARENT_OUTCOME_ONE_SHOT_INVALID")
     if type(value["global_latch_present"]) is not bool or type(value["normal_final_result_present"]) is not bool:
         raise AssertionError("PARENT_OUTCOME_AUTHORITY_FLAGS_INVALID")
     if value["execution_class"] == "PARENT_FINAL_RESULT_CONFIRMED":
-        if not value["normal_final_result_present"] or not value["child_result_present"] or not value["child_result_valid"]:
-            raise AssertionError("PARENT_OUTCOME_SUCCESS_FLAGS_INVALID")
-        if value["boundary_drift_class"] != BOUNDARY_DRIFT_NONE or value["parent_boundary_class"] != "BOUNDARY_ONLY_EXPECTED_MUTATION":
-            raise AssertionError("PARENT_OUTCOME_SUCCESS_BOUNDARY_INVALID")
+        required = (
+            value["watchdog_status"] == "PROCESS_COMPLETED",
+            value["child_returncode_class"] == CHILD_RETURN_COMPLETED,
+            value["child_result_present"] is True,
+            value["child_result_valid"] is True,
+            value["normal_final_result_present"] is True,
+            value["global_latch_present"] is True,
+            value["group_active_count"] == 0,
+            value["group_scan_errors"] == 0,
+            value["parent_boundary_class"] == "BOUNDARY_ONLY_EXPECTED_MUTATION",
+            value["boundary_drift_class"] == BOUNDARY_DRIFT_NONE,
+            value["child_result_discovery_class"] == "CHILD_RESULT_DISCOVERY_CONFIRMED",
+        )
+        if not all(required):
+            raise AssertionError("PARENT_OUTCOME_SUCCESS_FACTS_INVALID")
     elif value["normal_final_result_present"]:
         raise AssertionError("PARENT_OUTCOME_FAILURE_CLAIMS_NORMAL_RESULT")
+
+    child_class = value["child_returncode_class"]
+    execution_class = value["execution_class"]
+    if execution_class == CHILD_RETURN_TIMEOUT:
+        if child_class != CHILD_RETURN_TIMEOUT or value["watchdog_status"] != "PROCESS_WATCHDOG_TIMEOUT":
+            raise AssertionError("PARENT_OUTCOME_TIMEOUT_FACTS_INVALID")
+    elif execution_class == CHILD_GROUP_RESIDUAL:
+        if child_class != CHILD_GROUP_RESIDUAL or value["watchdog_status"] != "PROCESS_GROUP_NOT_QUIESCENT":
+            raise AssertionError("PARENT_OUTCOME_RESIDUAL_FACTS_INVALID")
+    elif execution_class == CHILD_GROUP_SCAN_ERROR:
+        if (
+            child_class != CHILD_GROUP_SCAN_ERROR
+            or value["watchdog_status"] != "PROCESS_GROUP_SCAN_ERROR"
+            or value["group_scan_errors"] <= 0
+        ):
+            raise AssertionError("PARENT_OUTCOME_SCAN_FACTS_INVALID")
+    elif execution_class == CHILD_RETURN_NONZERO:
+        if (
+            child_class != CHILD_RETURN_NONZERO
+            or value["watchdog_status"] != "PROCESS_COMPLETED"
+            or value["group_active_count"] != 0
+            or value["group_scan_errors"] != 0
+        ):
+            raise AssertionError("PARENT_OUTCOME_NONZERO_FACTS_INVALID")
+    elif execution_class == "CHILD_RESULT_MISSING_OR_INVALID":
+        if (
+            child_class != CHILD_RETURN_COMPLETED
+            or value["watchdog_status"] != "PROCESS_COMPLETED"
+            or value["normal_final_result_present"]
+            or (value["child_result_present"] and value["child_result_valid"])
+        ):
+            raise AssertionError("PARENT_OUTCOME_CHILD_RESULT_FACTS_INVALID")
+    elif execution_class == "PARENT_BOUNDARY_INVALID_OR_DRIFTED":
+        if (
+            child_class != CHILD_RETURN_COMPLETED
+            or value["watchdog_status"] != "PROCESS_COMPLETED"
+            or value["child_result_present"] is not True
+            or value["child_result_valid"] is not True
+            or value["normal_final_result_present"]
+            or (
+                value["parent_boundary_class"] == "BOUNDARY_ONLY_EXPECTED_MUTATION"
+                and value["boundary_drift_class"] != BOUNDARY_DRIFT_DETECTED
+            )
+        ):
+            raise AssertionError("PARENT_OUTCOME_BOUNDARY_FACTS_INVALID")
+    elif execution_class == CHILD_RETURN_COMPLETED:
+        raise AssertionError("PARENT_OUTCOME_COMPLETED_CLASS_INVALID")
+    elif execution_class != "PARENT_FINAL_RESULT_CONFIRMED":
+        raise AssertionError("PARENT_OUTCOME_CLASS_MATRIX_INVALID")
     if any(key in value for key in (
         "thread_id", "turn_id", "wire_command", "wire_command_plaintext", "sentinel_path", "prompt", "response",
         "credentials", "tokens",
@@ -1980,10 +2203,16 @@ def run_future_real_probe_parent() -> dict[str, Any]:
     snapshot = ProcessGroupSnapshot(
         tuple(watchdog["final_active_members"]), tuple(watchdog["final_zombie_members"]), watchdog["final_scan_errors"],
     )
+    discovery = discover_child_result(child_parent)
 
-    def persist_failure(execution_class: str, *, child_result_present: bool = False,
-                        child_result_valid: bool = False, parent_boundary_class: str = "BOUNDARY_NOT_PROVED",
+    def persist_failure(execution_class: str, *, child_result_present: bool = discovery.present,
+                        child_result_valid: bool = discovery.valid,
+                        child_result_discovery_class: str = discovery.classification,
+                        parent_boundary_class: str = "BOUNDARY_NOT_PROVED",
                         boundary_drift_class: str = BOUNDARY_DRIFT_DETECTED) -> dict[str, Any]:
+        latch_present, normal_result_present = measure_parent_authority_presence(
+            REAL_PROBE_LATCH, REAL_PROBE_RESULT,
+        )
         outcome = make_parent_execution_outcome(
             accepted_source_sha=accepted_head, accepted_source_tree=accepted_tree,
             execution_class=execution_class, watchdog_status=watchdog["status"],
@@ -1994,6 +2223,10 @@ def run_future_real_probe_parent() -> dict[str, Any]:
             group_scan_errors=snapshot.scan_errors,
             term_group_signal_count=watchdog["authority"].get("term_count", 0),
             kill_group_signal_count=watchdog["authority"].get("kill_count", 0),
+            one_child_count=1, second_child_started="NO", retry_count=0,
+            global_latch_present=latch_present,
+            normal_final_result_present=normal_result_present,
+            child_result_discovery_class=child_result_discovery_class,
         )
         # Exactly one exclusive persistence attempt.  A persistence failure
         # is returned as a finite failure without retrying the probe.
@@ -2006,40 +2239,33 @@ def run_future_real_probe_parent() -> dict[str, Any]:
     if child_return_classification != CHILD_RETURN_COMPLETED:
         return persist_failure(child_return_classification)
 
-    try:
-        child_dirs = tuple(path for path in child_parent.iterdir() if path.is_dir())
-    except OSError:
-        return persist_failure("CHILD_RESULT_MISSING_OR_INVALID")
-    if len(child_dirs) != 1:
-        return persist_failure("CHILD_RESULT_MISSING_OR_INVALID")
-    try:
-        child_run = FreshProbeRun.reconstruct(child_dirs[0])
-    except (OSError, ValueError):
-        return persist_failure("CHILD_RESULT_MISSING_OR_INVALID")
+    if not discovery.valid or discovery.run is None:
+        return persist_failure(
+            "CHILD_RESULT_MISSING_OR_INVALID", child_result_present=discovery.present,
+            child_result_valid=discovery.valid,
+        )
+    child_run = discovery.run
     child_result_path = child_run.root / CHILD_RESULT_FILENAME
-    child_result_present = False
     try:
-        child_result_path.lstat()
-        child_result_present = True
-        started = time.monotonic()
         child_value = read_bounded_private_json(child_result_path)
-        if time.monotonic() - started > PROBE_CHILD_RESULT_TIMEOUT:
-            raise ValueError("CHILD_RESULT_READ_TIMEOUT")
         validate_child_result(child_value)
     except (OSError, ValueError, AssertionError):
         return persist_failure(
-            "CHILD_RESULT_MISSING_OR_INVALID", child_result_present=child_result_present,
+            "CHILD_RESULT_MISSING_OR_INVALID", child_result_present=True,
+            child_result_valid=False, child_result_discovery_class="CHILD_RESULT_DISCOVERY_UNREADABLE",
         )
     try:
         parent_boundary = scan_fresh_run_boundary(child_run, phase=PARENT_POST_QUIESCENCE)
     except (OSError, ValueError):
         return persist_failure(
             "PARENT_BOUNDARY_INVALID_OR_DRIFTED", child_result_present=True, child_result_valid=True,
+            child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
         )
     if parent_boundary["classification"] != "BOUNDARY_ONLY_EXPECTED_MUTATION":
         return persist_failure(
             "PARENT_BOUNDARY_INVALID_OR_DRIFTED", child_result_present=True, child_result_valid=True,
             parent_boundary_class=parent_boundary["classification"],
+            child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
         )
     try:
         final = make_parent_final_result(
@@ -2053,14 +2279,19 @@ def run_future_real_probe_parent() -> dict[str, Any]:
         return persist_failure(
             "PARENT_BOUNDARY_INVALID_OR_DRIFTED", child_result_present=True, child_result_valid=True,
             parent_boundary_class=parent_boundary["classification"],
+            child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
         )
     if final["accepted_source_sha"] != accepted_head or final["accepted_source_tree"] != accepted_tree:
         return persist_failure(
             "PARENT_BOUNDARY_INVALID_OR_DRIFTED", child_result_present=True, child_result_valid=True,
             parent_boundary_class=parent_boundary["classification"],
+            child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
         )
     try:
         write_parent_final_result(REAL_PROBE_RESULT, final)
+        global_latch_present, normal_final_result_present = measure_parent_authority_presence(
+            REAL_PROBE_LATCH, REAL_PROBE_RESULT,
+        )
         confirmed = make_parent_execution_outcome(
             accepted_source_sha=accepted_head, accepted_source_tree=accepted_tree,
             execution_class="PARENT_FINAL_RESULT_CONFIRMED", watchdog_status="PROCESS_COMPLETED",
@@ -2070,7 +2301,10 @@ def run_future_real_probe_parent() -> dict[str, Any]:
             group_zombie_count=len(snapshot.zombie_members), group_scan_errors=0,
             term_group_signal_count=watchdog["authority"].get("term_count", 0),
             kill_group_signal_count=watchdog["authority"].get("kill_count", 0),
-            normal_final_result_present=True,
+            one_child_count=1, second_child_started="NO", retry_count=0,
+            global_latch_present=global_latch_present,
+            normal_final_result_present=normal_final_result_present,
+            child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
         )
         write_parent_execution_outcome(REAL_PROBE_OUTCOME, confirmed)
     except Exception as error:
@@ -2334,6 +2568,94 @@ class RaceOfflineTests(unittest.IsolatedAsyncioTestCase):
 
 
 class JournalOfflineTests(unittest.IsolatedAsyncioTestCase):
+    async def test_journal_identity_continuity_matrix_is_fail_closed(self) -> None:
+        import unittest.mock as mock
+
+        with tempfile.TemporaryDirectory(prefix="p7c7-journal-continuity-") as directory:
+            root = Path(directory)
+            path = root / "recovery.jsonl"
+            journal = RecoveryJournal(path, source_sha="a" * 40, source_tree="b" * 40)
+            original_identity = journal._original_identity
+            self.assertIsNotNone(original_identity)
+            journal.intent("FIRST")
+            journal.result("FIRST", "CONFIRMED")
+            self.assertEqual(
+                journal._original_identity,
+                (path.stat().st_dev, path.stat().st_ino),
+            )
+            self.assertEqual(path.stat().st_nlink, 1)
+
+            for replacement in ("unlink", "regular", "symlink", "hardlink", "mode", "owner"):
+                with self.subTest(replacement=replacement):
+                    case_root = root / replacement
+                    case_root.mkdir(mode=0o700)
+                    case_path = case_root / "recovery.jsonl"
+                    case_journal = RecoveryJournal(case_path, source_sha="a" * 40, source_tree="b" * 40)
+                    replacement_source: Path | None = None
+                    if replacement == "regular":
+                        replacement_source = case_root / "regular-target"
+                        write_exclusive_private_json(replacement_source, {"synthetic": "replacement"})
+                    if case_path.exists() or case_path.is_symlink():
+                        case_path.unlink()
+                    if replacement == "unlink":
+                        pass
+                    elif replacement == "regular":
+                        assert replacement_source is not None
+                        os.replace(replacement_source, case_path)
+                    elif replacement == "symlink":
+                        target = case_root / "symlink-target"
+                        write_exclusive_private_json(target, {"synthetic": "target"})
+                        case_path.symlink_to(target)
+                    elif replacement == "hardlink":
+                        target = case_root / "hardlink-target"
+                        write_exclusive_private_json(target, {"synthetic": "target"})
+                        os.link(target, case_path)
+                    elif replacement == "mode":
+                        write_exclusive_private_json(case_path, {"synthetic": "mode"})
+                        case_path.chmod(0o640)
+                    else:
+                        write_exclusive_private_json(case_path, {"synthetic": "owner"})
+                        if hasattr(os, "chown"):
+                            os.chown(case_path, 65534, 65534)
+                        else:
+                            self.skipTest("owner mutation unavailable")
+                    with self.assertRaises((OSError, ValueError)):
+                        case_journal.result("REPLACEMENT", "MUST_NOT_APPEND")
+                    if replacement == "unlink":
+                        self.assertFalse(case_path.exists())
+
+            swap_root = root / "swap"
+            swap_root.mkdir(mode=0o700)
+            swap_path = swap_root / "recovery.jsonl"
+            swap_journal = RecoveryJournal(swap_path, source_sha="a" * 40, source_tree="b" * 40)
+            replacement_path = swap_root / "swap-target"
+            write_exclusive_private_json(replacement_path, {"synthetic": "swap-target"})
+            original_write_all = _write_all
+            swapped = False
+
+            def swap_before_write(fd: int, payload: bytes) -> None:
+                nonlocal swapped
+                os.replace(replacement_path, swap_path)
+                swapped = True
+                original_write_all(fd, payload)
+
+            with mock.patch(__name__ + "._write_all", side_effect=swap_before_write):
+                with self.assertRaises(ValueError):
+                    swap_journal.result("PATH_SWAP", "MUST_FAIL")
+            self.assertTrue(swapped)
+
+    async def test_journal_initial_creation_is_exclusive_and_appends_keep_identity(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-journal-create-") as directory:
+            path = Path(directory) / "recovery.jsonl"
+            journal = RecoveryJournal(path, source_sha="a" * 40, source_tree="b" * 40)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.stat().st_nlink, 1)
+            identity = journal._original_identity
+            for index in range(3):
+                journal.result(f"SEQUENTIAL_{index}", "CONFIRMED")
+                self.assertEqual(journal._original_identity, identity)
+                self.assertEqual((path.stat().st_dev, path.stat().st_ino), identity)
+
     async def test_journal_intent_failure_blocks_model_thread_turn_and_deny_effects(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c7-journal-") as directory:
             run = FreshProbeRun.materialize(Path(directory))
@@ -2353,6 +2675,21 @@ class JournalOfflineTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(OSError):
                     await _dispatch_after_journal_intent(journal, stage, effect)
                 self.assertEqual(calls, 0, stage)
+
+    async def test_journal_continuity_failure_does_not_dispatch_effect(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-journal-effect-") as directory:
+            run = FreshProbeRun.materialize(Path(directory))
+            journal = RecoveryJournal(run.probe_recovery, source_sha="a" * 40, source_tree="b" * 40)
+            journal.path.unlink()
+            calls = 0
+
+            async def effect() -> None:
+                nonlocal calls
+                calls += 1
+
+            with self.assertRaises(ValueError):
+                await _dispatch_after_journal_intent(journal, "MUST_NOT_DISPATCH", effect)
+            self.assertEqual(calls, 0)
 
     async def test_ambiguous_deny_consumes_one_authoritative_attempt(self) -> None:
         budget = FutureProbeBudget()
@@ -2747,30 +3084,38 @@ class Repair4AuthorityOfflineTests(unittest.TestCase):
     def _make_outcome(self, run: FreshProbeRun, execution_class: str, *, boundary: str = "BOUNDARY_NOT_PROVED",
                  drift: str = BOUNDARY_DRIFT_DETECTED, watchdog: str = "PROCESS_COMPLETED",
                  child_class: str = CHILD_RETURN_COMPLETED, child_present: bool = False,
-                 child_valid: bool = False) -> dict[str, Any]:
+                 child_valid: bool = False, latch_present: bool = False,
+                 normal_present: bool = False,
+                 discovery: str = "CHILD_RESULT_DISCOVERY_MISSING", group_active_count: int = 0,
+                 group_scan_errors: int = 0) -> dict[str, Any]:
         return make_parent_execution_outcome(
             execution_class=execution_class, watchdog_status=watchdog,
             child_returncode_class=child_class, child_result_present=child_present,
             child_result_valid=child_valid, parent_boundary_class=boundary,
             boundary_drift_class=drift, accepted_source_sha=ARCHITECT_BASE_SHA,
             accepted_source_tree=ARCHITECT_BASE_TREE,
+            global_latch_present=latch_present, normal_final_result_present=normal_present,
+            child_result_discovery_class=discovery, group_active_count=group_active_count,
+            group_scan_errors=group_scan_errors,
         )
 
     def test_each_failure_class_persists_one_exact_outcome_authority(self) -> None:
         cases = (
-            (CHILD_RETURN_TIMEOUT, "PROCESS_WATCHDOG_TIMEOUT", CHILD_RETURN_TIMEOUT),
-            (CHILD_RETURN_NONZERO, "PROCESS_COMPLETED", CHILD_RETURN_NONZERO),
-            (CHILD_GROUP_RESIDUAL, "PROCESS_GROUP_NOT_QUIESCENT", CHILD_GROUP_RESIDUAL),
-            (CHILD_GROUP_SCAN_ERROR, "PROCESS_GROUP_SCAN_ERROR", CHILD_GROUP_SCAN_ERROR),
-            ("CHILD_RESULT_MISSING_OR_INVALID", "PROCESS_COMPLETED", CHILD_RETURN_COMPLETED),
-            ("PARENT_BOUNDARY_INVALID_OR_DRIFTED", "PROCESS_COMPLETED", CHILD_RETURN_COMPLETED),
+            (CHILD_RETURN_TIMEOUT, "PROCESS_WATCHDOG_TIMEOUT", CHILD_RETURN_TIMEOUT, {}, "MISSING"),
+            (CHILD_RETURN_NONZERO, "PROCESS_COMPLETED", CHILD_RETURN_NONZERO, {}, "MISSING"),
+            (CHILD_GROUP_RESIDUAL, "PROCESS_GROUP_NOT_QUIESCENT", CHILD_GROUP_RESIDUAL, {"group_active_count": 1}, "MISSING"),
+            (CHILD_GROUP_SCAN_ERROR, "PROCESS_GROUP_SCAN_ERROR", CHILD_GROUP_SCAN_ERROR, {"group_scan_errors": 1}, "MISSING"),
+            ("CHILD_RESULT_MISSING_OR_INVALID", "PROCESS_COMPLETED", CHILD_RETURN_COMPLETED, {}, "MISSING"),
+            ("PARENT_BOUNDARY_INVALID_OR_DRIFTED", "PROCESS_COMPLETED", CHILD_RETURN_COMPLETED, {
+                "child_present": True, "child_valid": True, "boundary": "UNEXPECTED_PROBE_MUTATION",
+            }, "CONFIRMED"),
         )
-        for execution_class, watchdog, child_class in cases:
+        for execution_class, watchdog, child_class, extra, discovery in cases:
             with self.subTest(execution_class=execution_class), tempfile.TemporaryDirectory(prefix="p7c7-r4-outcome-") as directory:
                 run = FreshProbeRun.materialize(Path(directory))
                 outcome = self._make_outcome(
                     run, execution_class, watchdog=watchdog, child_class=child_class,
-                    boundary="UNEXPECTED_PROBE_MUTATION" if execution_class.startswith("PARENT_") else "BOUNDARY_NOT_PROVED",
+                    **extra, discovery=f"CHILD_RESULT_DISCOVERY_{discovery}",
                 )
                 path = run.root / "parent-execution-outcome.json"
                 write_parent_execution_outcome(path, outcome)
@@ -2803,6 +3148,7 @@ class Repair4AuthorityOfflineTests(unittest.TestCase):
                 child_returncode_class=CHILD_RETURN_COMPLETED, child_result_present=True,
                 child_result_valid=True, parent_boundary_class="BOUNDARY_ONLY_EXPECTED_MUTATION",
                 boundary_drift_class=BOUNDARY_DRIFT_NONE, normal_final_result_present=True,
+                global_latch_present=True, child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
             )
             outcome_path = run.root / "parent-execution-outcome.json"
             write_parent_execution_outcome(outcome_path, outcome)
@@ -2991,6 +3337,169 @@ class AuthorityAndBoundaryOfflineTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 validate_child_result(invalid)
             future.get_loop().close()
+
+
+class Repair5AuthorityOfflineTests(unittest.TestCase):
+    def _child(self, run: FreshProbeRun) -> dict[str, Any]:
+        loop = asyncio.new_event_loop()
+        future = loop.create_future()
+        future.set_result("synthetic-turn")
+        operator = DenyOnlyApprovalOperator(
+            thread_id="synthetic-thread", turn_id=future, cwd=str(run.workdir), sentinel=str(run.sentinel),
+        )
+        child = make_sanitized_result(
+            terminal_status="COMPLETED", operator=operator, run=run,
+            boundary=scan_fresh_run_boundary(run), outcome=OUTCOME_TERMINAL_FIRST,
+        )
+        loop.close()
+        return child
+
+    def _make_r5_outcome(self, execution_class: str, **changes: Any) -> dict[str, Any]:
+        defaults: dict[str, Any] = {
+            "execution_class": execution_class,
+            "watchdog_status": "PROCESS_COMPLETED",
+            "child_returncode_class": CHILD_RETURN_NONZERO,
+            "child_result_present": False,
+            "child_result_valid": False,
+            "parent_boundary_class": "BOUNDARY_NOT_PROVED",
+            "boundary_drift_class": BOUNDARY_DRIFT_DETECTED,
+            "group_active_count": 0,
+            "group_scan_errors": 0,
+            "global_latch_present": False,
+            "normal_final_result_present": False,
+            "child_result_discovery_class": "CHILD_RESULT_DISCOVERY_MISSING",
+        }
+        if execution_class == "PARENT_FINAL_RESULT_CONFIRMED":
+            defaults.update(
+                watchdog_status="PROCESS_COMPLETED", child_returncode_class=CHILD_RETURN_COMPLETED,
+                child_result_present=True, child_result_valid=True,
+                parent_boundary_class="BOUNDARY_ONLY_EXPECTED_MUTATION",
+                boundary_drift_class=BOUNDARY_DRIFT_NONE, global_latch_present=True,
+                normal_final_result_present=True,
+                child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
+            )
+        elif execution_class == CHILD_RETURN_TIMEOUT:
+            defaults.update(watchdog_status="PROCESS_WATCHDOG_TIMEOUT", child_returncode_class=CHILD_RETURN_TIMEOUT)
+        elif execution_class == CHILD_GROUP_RESIDUAL:
+            defaults.update(
+                watchdog_status="PROCESS_GROUP_NOT_QUIESCENT", child_returncode_class=CHILD_GROUP_RESIDUAL,
+                group_active_count=1,
+            )
+        elif execution_class == CHILD_GROUP_SCAN_ERROR:
+            defaults.update(
+                watchdog_status="PROCESS_GROUP_SCAN_ERROR", child_returncode_class=CHILD_GROUP_SCAN_ERROR,
+                group_scan_errors=1,
+            )
+        elif execution_class == "CHILD_RESULT_MISSING_OR_INVALID":
+            defaults.update(child_returncode_class=CHILD_RETURN_COMPLETED)
+        elif execution_class == "PARENT_BOUNDARY_INVALID_OR_DRIFTED":
+            defaults.update(
+                child_returncode_class=CHILD_RETURN_COMPLETED, child_result_present=True,
+                child_result_valid=True, parent_boundary_class="UNEXPECTED_PROBE_MUTATION",
+                child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
+            )
+        defaults.update(changes)
+        return make_parent_execution_outcome(
+            accepted_source_sha=ARCHITECT_BASE_SHA, accepted_source_tree=ARCHITECT_BASE_TREE,
+            **defaults,
+        )
+
+    def test_child_result_discovery_is_bounded_read_only_and_factful(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-r5-discovery-") as directory:
+            parent = Path(directory)
+            self.assertEqual(
+                discover_child_result(parent).classification,
+                "CHILD_RESULT_DISCOVERY_MISSING",
+            )
+            run = FreshProbeRun.materialize(parent)
+            child = self._child(run)
+            write_sanitized_result(run.root / CHILD_RESULT_FILENAME, child)
+            discovered = discover_child_result(parent)
+            self.assertEqual((discovered.present, discovered.valid), (True, True))
+            self.assertEqual(discovered.classification, "CHILD_RESULT_DISCOVERY_CONFIRMED")
+            malformed = run.root / CHILD_RESULT_FILENAME
+            malformed.write_bytes(b"{")
+            malformed.chmod(0o600)
+            invalid = discover_child_result(parent)
+            self.assertEqual((invalid.present, invalid.valid), (True, False))
+            self.assertEqual(invalid.classification, "CHILD_RESULT_DISCOVERY_UNREADABLE")
+
+    def test_ambiguous_child_root_does_not_invent_absent_result_fact(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-r5-ambiguous-") as directory:
+            parent = Path(directory)
+            FreshProbeRun.materialize(parent)
+            FreshProbeRun.materialize(parent)
+            discovered = discover_child_result(parent)
+            self.assertEqual(discovered.classification, "CHILD_RESULT_DISCOVERY_AMBIGUOUS")
+            self.assertFalse(discovered.valid)
+
+    def test_latch_presence_is_measured_before_and_after_failure(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c7-r5-latch-") as directory:
+            latch = Path(directory) / "latch.json"
+            outcome_before = self._make_r5_outcome(CHILD_RETURN_NONZERO, global_latch_present=measure_parent_authority_presence(latch)[0])
+            self.assertFalse(outcome_before["global_latch_present"])
+            write_exclusive_private_json(latch, {"synthetic": "latch"})
+            outcome_after = self._make_r5_outcome(CHILD_RETURN_NONZERO, global_latch_present=measure_parent_authority_presence(latch)[0])
+            self.assertTrue(outcome_after["global_latch_present"])
+
+    def test_valid_canonical_parent_outcome_exists_for_each_allowed_execution_class(self) -> None:
+        for execution_class in (
+            "PARENT_FINAL_RESULT_CONFIRMED", CHILD_RETURN_NONZERO, CHILD_RETURN_TIMEOUT,
+            CHILD_GROUP_RESIDUAL, CHILD_GROUP_SCAN_ERROR,
+            "CHILD_RESULT_MISSING_OR_INVALID", "PARENT_BOUNDARY_INVALID_OR_DRIFTED",
+        ):
+            with self.subTest(execution_class=execution_class):
+                validate_parent_execution_outcome(self._make_r5_outcome(execution_class))
+
+    def test_timeout_residual_and_scan_error_retain_valid_child_facts(self) -> None:
+        for execution_class in (CHILD_RETURN_TIMEOUT, CHILD_GROUP_RESIDUAL, CHILD_GROUP_SCAN_ERROR):
+            with self.subTest(execution_class=execution_class):
+                outcome = self._make_r5_outcome(
+                    execution_class, child_result_present=True, child_result_valid=True,
+                    child_result_discovery_class="CHILD_RESULT_DISCOVERY_CONFIRMED",
+                )
+                self.assertTrue(outcome["child_result_present"])
+                self.assertTrue(outcome["child_result_valid"])
+                self.assertEqual(outcome["execution_class"], execution_class)
+
+    def test_completed_missing_malformed_and_boundary_drift_classes_are_exact(self) -> None:
+        missing = self._make_r5_outcome("CHILD_RESULT_MISSING_OR_INVALID")
+        malformed = self._make_r5_outcome(
+            "CHILD_RESULT_MISSING_OR_INVALID", child_result_present=True,
+            child_result_discovery_class="CHILD_RESULT_DISCOVERY_UNREADABLE",
+        )
+        boundary = self._make_r5_outcome(
+            "PARENT_BOUNDARY_INVALID_OR_DRIFTED", parent_boundary_class="BOUNDARY_ONLY_EXPECTED_MUTATION",
+            boundary_drift_class=BOUNDARY_DRIFT_DETECTED,
+        )
+        for value in (missing, malformed, boundary):
+            validate_parent_execution_outcome(value)
+
+    def test_parent_outcome_semantic_matrix_rejects_contradictions(self) -> None:
+        mutations = (
+            {"watchdog_status": "PROCESS_WATCHDOG_TIMEOUT"},
+            {"child_returncode_class": CHILD_RETURN_NONZERO},
+            {"group_active_count": 1},
+            {"group_scan_errors": 1},
+            {"global_latch_present": False},
+            {"normal_final_result_present": False},
+            {"one_child_count": 0},
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                with self.assertRaises(AssertionError):
+                    self._make_r5_outcome("PARENT_FINAL_RESULT_CONFIRMED", **mutation)
+
+    def test_parent_outcome_validator_rejects_invalid_child_class_names(self) -> None:
+        valid = self._make_r5_outcome(CHILD_RETURN_NONZERO)
+        for child_class in ("PARENT_FINAL_RESULT_CONFIRMED", "CHILD_RESULT_MISSING_OR_INVALID", "UNKNOWN"):
+            invalid = dict(valid, child_returncode_class=child_class)
+            with self.subTest(child_class=child_class), self.assertRaises(AssertionError):
+                validate_parent_execution_outcome(invalid)
+
+    def test_post_child_outcome_requires_exactly_one_child(self) -> None:
+        with self.assertRaises(AssertionError):
+            self._make_r5_outcome(CHILD_RETURN_NONZERO, one_child_count=0)
 
 
 class RawWireAuthorityOfflineTests(unittest.TestCase):
