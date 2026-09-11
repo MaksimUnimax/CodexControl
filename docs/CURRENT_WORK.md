@@ -15,8 +15,6 @@ Date: 2026-09-11
 
 The P7.C6 retained thread is permanently forensic-only. The consumed real continuation was architect-reviewed as a harness approval-stimulus failure: Turn-4 completed with exact sentinel proof but emitted no approval request; Turn-5 and official delete were never reached.
 
-Final P7.C6 classifications:
-
 `LAST_DURABLY_ESTABLISHED_STAGE=TURN4_COMPLETED_SENTINEL_PROVED`
 
 `OFFICIAL_P1_DELETE_CLASS=NOT_DISPATCHED_PROVED`
@@ -41,47 +39,45 @@ Exact upstream `rust-v0.144.6` release commit `5d1fbf26c43abc65a203928b2e31561cb
 
 ## P7.C7 DENY-only approval-probe preparation
 
-Initial prep `e4bcdf43ba3f5c50a65f7f1085781eec41770ede`, Repair-1 `bffe4d05340545edd44d503c9a16f1128c65ca7d`, Repair-2 `388b1a1bf46b56bc1734bbf2e3eb630266b822a7`, Repair-3 `6cb422b5ef6dc5ad0a63580fa052f298f940c5fc`, and Repair-4 `96738658cfb59b50c541997eb4fc66a5fb9740ce` are architect-reviewed harness-only candidates. None authorizes real execution.
+Initial prep through Repair-4 are architect-reviewed REWORK_REQUIRED harness-only candidates.
 
-Repair-4 tree:
+Repair-5 candidate:
 
-`539dbc8ad624a6c5722b1d6040cca4324d43a58f`
+`b78b9fe93423c456e4557926745f9109e3992ea8`
 
-Repair-4 evidence:
+Repair-5 tree:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR4_EVIDENCE_2026-09-11.md`
+`d395857adabf8e19c7524566258614c4180bdd4b`
 
-Repair-4 architect review:
+Repair-5 evidence:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR4_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR5_EVIDENCE_2026-09-11.md`
 
-Repair-4 useful improvements are retained: harness-owned child-result boundary authority, a 100-second real observation horizon for the frozen 30-second stimulus, a 165-second process watchdog over a 146-second internal budget, and a distinct root-only parent execution-outcome authority. All prior DENY-only, Turn-before-dequeue, queued-request capture, request-before-response journal, wire/adapter stage separation, owner terminalization, source authority and process-group ownership gates remain present.
+Repair-5 architect review:
 
-Repair-4 remains **REWORK_REQUIRED** before any real fresh thread can be authorized.
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR5_ARCHITECT_REVIEW_2026-09-11.md`
 
-Remaining harness/evidence-only blockers:
+Repair-5 materially fixes the Repair-4 durable-authority defects: parent outcome facts are measured rather than optimistically defaulted; child-result discovery is factful across failure classes; child execution classes and parent outcome combinations are narrowed; and RecoveryJournal binds later appends to one retained creation identity and fails closed on replacement/unlink/mode/hardlink drift.
 
-- parent execution outcomes use optimistic/default facts (`global_latch_present=True`, child-result absent/invalid on early failure paths) instead of measuring the actual retained authorities;
-- the parent outcome validator permits semantically contradictory combinations and uses the broad parent execution enum for `child_returncode_class`;
-- `RecoveryJournal` does not retain creation-time `(dev, ino)` across appends, so unlink/replacement between stages can silently create/accept a new journal and lose earlier chronology.
+Repair-5 remains **REWORK_REQUIRED** before any real fresh thread can be authorized because the normal child result still emits false zero counts for `model_list_calls`, `thread_start_calls`, and `turn_start_calls` instead of the already-authoritative `FutureProbeBudget` counts. The normal parent-final validator also accepts those zeroes because it only rejects values greater than one.
 
 No production `src/**` defect is established.
 
-Binding Repair-5 contract:
+Binding Repair-6 contract:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR5_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_CONTRACT_2026-09-11.md`
 
 ## Current executable slice
 
-**P7.C7 DENY-only approval-probe prep Repair-5 — NEXT / ZERO REAL EFFECT.**
+**P7.C7 DENY-only approval-probe prep Repair-6 — NEXT / ZERO REAL EFFECT.**
 
-Repair-5 is harness/tests/evidence only. It must preserve all accepted Repair-4 execution safety while making every parent outcome fact measured and internally consistent and binding the recovery journal to one immutable creation-time inode across its complete chronology.
+Repair-6 is limited to normal child/final effect-ledger truthfulness. It must project the authoritative budget into the durable child result, require exact `model/list=1`, `thread/start=1`, `turn/start=1` plus non-null thread/Turn hashes for normal observational authority, preserve every Repair-5 outcome/journal/process safety gate, and perform zero real effects.
 
-No fresh real thread, app-server, approval response or real P7.C7 latch/result/outcome authority is authorized during Repair-5.
+No fresh real thread, app-server, approval response or real P7.C7 latch/result/outcome authority is authorized during Repair-6.
 
-`P7C7_DENY_ONLY_PROBE_PREP_REPAIR4=REWORK_REQUIRED`
+`P7C7_DENY_ONLY_PROBE_PREP_REPAIR5=REWORK_REQUIRED`
 
-`P7C7_DENY_ONLY_PROBE_PREP_REPAIR5=NEXT_ZERO_REAL_EFFECT`
+`P7C7_DENY_ONLY_PROBE_PREP_REPAIR6=NEXT_ZERO_REAL_EFFECT`
 
 `P7C7_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
 
