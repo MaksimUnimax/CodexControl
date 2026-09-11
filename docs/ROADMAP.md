@@ -44,19 +44,20 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [REWORK_REQUIRED / ZERO EFFECT] Initial prep `e4bcdf43ba3f5c50a65f7f1085781eec41770ede`.
 - [REWORK_REQUIRED / ZERO EFFECT] Repair-1 `bffe4d05340545edd44d503c9a16f1128c65ca7d`, tree `2378c6f0c2b605413cd36c8383d01ee5f0c8f887`.
 - [REWORK_REQUIRED / ZERO EFFECT] Repair-2 `388b1a1bf46b56bc1734bbf2e3eb630266b822a7`, tree `45cfb17776d70d41cef9b1b503ffd7dbf6bed088`.
+- [REWORK_REQUIRED / ZERO EFFECT] Repair-3 `6cb422b5ef6dc5ad0a63580fa052f298f940c5fc`, tree `ff73a49f45ec654e6fad6c7eaa6c8667dde15789`.
 
-Repair-2 architect review:
+Repair-3 architect review:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR2_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR3_ARCHITECT_REVIEW_2026-09-11.md`
 
-Repair-2 retains useful safety properties but still cannot be real-authorized because parent-final persistence uses the child-schema writer; request-observed journal chronology follows possible DENY dispatch; wire vs adapter result semantics are conflated; child boundary proof can become stale before parent group quiescence; watchdog timeout classification is collapsed; and owner-task nonconvergence does not block normal child-result publication.
+Repair-3 closes its targeted parent-writer/journal/stage-split/boundary-recheck/watchdog/owner-terminalization defects, but three final harness blockers remain: the parent scanner false-fails on the legitimate `probe-child-result.json`; the 10-second real observation horizon cannot cover the frozen `sleep 30` no-approval branch; and parent timeout/residual/scan-error/missing-child-result classes lack a distinct durable root-only execution-outcome authority.
 
-Binding Repair-3:
+Binding Repair-4:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR3_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR4_CONTRACT_2026-09-11.md`
 
-- [NEXT / ZERO REAL EFFECT] **Repair-3:** fix the six remaining execution/evidence-authority defects while preserving exact Turn-before-dequeue, queued request capture, DENY-only/max-three response surface, finite waits, durable journal, dedicated parent/child process ownership, exact source authority and zero forbidden lifecycle actions.
-- [BLOCKED] One-shot real P7.C7 DENY-only approval probe until Repair-3 is independently architect accepted and exact executable source/tree are frozen.
+- [NEXT / ZERO REAL EFFECT] **Repair-4:** preserve all Repair-3 safety properties; classify the child-result file as exact harness-owned authority during parent post-quiescence scan; set auditable real observation/watchdog horizons that dominate the actual 30-second stimulus; and durably materialize one-shot parent failure outcome classifications without weakening normal result validation.
+- [BLOCKED] One-shot real P7.C7 DENY-only approval probe until Repair-4 is independently architect accepted and exact executable source/tree are frozen.
 - [BLOCKED] P7.C7 matcher authority until accepted real probe evidence establishes safe concrete wire grammar.
 - [BLOCKED] P7.C7 full fresh-thread hard-delete acceptance until probe/matcher/full harness are separately accepted and explicitly authorized.
 
