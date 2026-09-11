@@ -6,7 +6,7 @@ Status: **REWORK_REQUIRED / ZERO-REAL-EFFECT CANDIDATE PRESERVED / REAL EXECUTIO
 
 - Architect base: `7b3185874bc544fc28eb334aba70e4c74935cadc`, tree `7b27cf964c01d550273f5a35b97157d2be60d3cf`.
 - Candidate: `097c8809a90eaca5d7d2074b35dc5e73ae9762c1`.
-- Candidate tree: `036681069e68974abdfd28439147d2819a7a95a2`.
+- Candidate tree: `c099c3a35acde82674f70413f55121c9345c82ba`.
 - Harness blob: `0bccd8e80b362dd283773d6fea18a4a094018042`.
 - Candidate is exactly one commit ahead of the architect base and changes only `tests/real/test_p7_c9_deny_only_approval_probe.py` plus the P7.C9 prep evidence file.
 - Reported real effects: zero. No `src/**` change occurred.
