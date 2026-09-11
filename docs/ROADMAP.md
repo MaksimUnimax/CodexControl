@@ -46,19 +46,20 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [REWORK_REQUIRED / ZERO EFFECT] Repair-2 `388b1a1bf46b56bc1734bbf2e3eb630266b822a7`, tree `45cfb17776d70d41cef9b1b503ffd7dbf6bed088`.
 - [REWORK_REQUIRED / ZERO EFFECT] Repair-3 `6cb422b5ef6dc5ad0a63580fa052f298f940c5fc`, tree `ff73a49f45ec654e6fad6c7eaa6c8667dde15789`.
 - [REWORK_REQUIRED / ZERO EFFECT] Repair-4 `96738658cfb59b50c541997eb4fc66a5fb9740ce`, tree `539dbc8ad624a6c5722b1d6040cca4324d43a58f`.
+- [REWORK_REQUIRED / ZERO EFFECT] Repair-5 `b78b9fe93423c456e4557926745f9109e3992ea8`, tree `d395857adabf8e19c7524566258614c4180bdd4b`.
 
-Repair-4 architect review:
+Repair-5 architect review:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR4_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR5_ARCHITECT_REVIEW_2026-09-11.md`
 
-Repair-4 closes its targeted child-result boundary, observation-budget and parent-outcome-persistence defects. Remaining blockers are durable-evidence truthfulness only: parent outcome facts are partially defaulted instead of measured, outcome semantic combinations are under-constrained, and RecoveryJournal does not bind later appends to its creation-time inode/device.
+Repair-5 closes its targeted measured-outcome and immutable-journal defects. The remaining deterministic blocker is normal durable effect-ledger truthfulness: the child result writes zero for model/list, thread/start and turn/start even though the authoritative budget has one of each, and the normal parent validator allows those zeroes.
 
-Binding Repair-5:
+Binding Repair-6:
 
-`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR5_CONTRACT_2026-09-11.md`
+`docs/evidence/p7c7/P7C7_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR6_CONTRACT_2026-09-11.md`
 
-- [NEXT / ZERO REAL EFFECT] **Repair-5:** preserve all Repair-4 execution safety while measuring actual latch/child-result facts, enforcing a class-to-facts outcome consistency matrix, and binding the recovery journal to one immutable creation-time inode across all appends.
-- [BLOCKED] One-shot real P7.C7 DENY-only approval probe until Repair-5 is independently architect accepted and exact executable source/tree are frozen.
+- [NEXT / ZERO REAL EFFECT] **Repair-6:** project actual `FutureProbeBudget` lifecycle counts into the normal child result; require exact `model/list=1`, `thread/start=1`, `turn/start=1` and valid fresh thread/Turn hashes for normal child/final authority; preserve all Repair-5 outcome/journal/process safety.
+- [BLOCKED] One-shot real P7.C7 DENY-only approval probe until Repair-6 is independently architect accepted and exact executable source/tree are frozen.
 - [BLOCKED] P7.C7 matcher authority until accepted real probe evidence establishes safe concrete wire grammar.
 - [BLOCKED] P7.C7 full fresh-thread hard-delete acceptance until probe/matcher/full harness are separately accepted and explicitly authorized.
 
