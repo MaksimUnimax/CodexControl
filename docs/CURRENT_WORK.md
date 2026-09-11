@@ -33,13 +33,19 @@ Conservative server-80 cleanup reclaimed exactly `945344512` bytes (`0.880421 Gi
 - Repair-3 canonical commit: `2b38969c1c9a8232cb1c68efc953dae125e0e18c` — REWORK_REQUIRED.
 - Repair-4 candidate: `a55a765cdfb0d51e956045a238d4ecb5a237a5fe` — **REWORK_REQUIRED** after independent architect review.
 
+Repair-4 review:
+
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR4_ARCHITECT_REVIEW_2026-09-11.md`
+
+Binding Repair-5 contract:
+
+`docs/evidence/p7c6/P7C6_SAME_THREAD_PREP_V2_REPAIR5_CONTRACT_2026-09-11.md`
+
 Repair-4 successfully adds the required dedicated child-process watchdog and preserves the accepted Repair-3 guards: finite coroutine-level ownership, all-marker/sentinel exactness, baseline identity atomicity, post-delete safe authority, source/topology/controller/budget gates, one-delete authority, no-new-thread path and success-only sanitization.
 
-However Repair-4 is not executable real authority because its process watchdog uses one global default `WATCHDOG_HARD_DEADLINE = 5.0`, and the real test invokes `launch_dedicated_continuation_child(mode="real")` without overriding that bound. The valid real continuation contains multiple deliberately finite operations whose normal allowed duration is far greater than five seconds; therefore the current watchdog would create a deterministic/near-deterministic false stop before the workflow can complete.
+It is not executable real authority because the real watchdog inherits `WATCHDOG_HARD_DEADLINE = 5.0` while the valid frozen real flow contains multiple legitimate bounded waits much longer than five seconds. The current watchdog therefore creates a false-stop authority for a healthy continuation. The real dedicated child also discards the sanitized dict returned by `_run_real_continuation()`, leaving the parent with process exit metadata rather than a structured final lifecycle result authority.
 
-A second evidence-quality gap remains: the real dedicated child discards the sanitized dict returned by `_run_real_continuation()` and the parent receives only process completion/returncode. Repair-5 must provide a bounded sanitized child-to-parent result authority so a process PASS is tied to the actual final lifecycle statuses/counters, without leaking raw IDs/markers/content.
-
-No production `src/**` defect is established by either gap.
+No production `src/**` defect is established.
 
 `P7C6_CONTINUATION_PREP_V2_REPAIR4=REWORK_REQUIRED`
 
@@ -49,13 +55,7 @@ No production `src/**` defect is established by either gap.
 
 **P7.C6 same-thread continuation prep-v2 Repair-5 — NEXT / ZERO REAL EFFECT.**
 
-Repair-5 is harness/tests/evidence only. It must:
-
-1. separate synthetic watchdog test deadlines from the real continuation watchdog authority;
-2. bind the real hard deadline to a documented finite value that exceeds the complete worst-case internal finite wait budget plus margin;
-3. preserve single-child/no-retry terminate/kill semantics;
-4. deliver a bounded sanitized success result from the real child to the parent and validate it before declaring process PASS;
-5. keep all real authorization gates unset during Repair-5 tests.
+Repair-5 may modify only the gated acceptance harness/tests/evidence. It must separate synthetic vs real watchdog timing, prove the real hard deadline exceeds the full internal finite-wait budget plus margin, and add a bounded sanitized child-to-parent result authority whose fields are validated before process PASS.
 
 No production `src/**` changes and no real Codex/app-server/business RPC effects are authorized.
 
