@@ -7,7 +7,7 @@ Status: **REWORK_REQUIRED / ZERO-REAL-EFFECT CANDIDATE RETAINED / REAL PROBE NOT
 - Architect base: `735eb4b17b9160b9d3d687812624e71a7fdb1c91`.
 - Base tree: `9333a68f5fb3d5835fd24882d65bd67662baf493`.
 - Repair-4 candidate: `96738658cfb59b50c541997eb4fc66a5fb9740ce`.
-- Candidate tree: `8ec38fccbd8a3989596385959456620890f20ff0`.
+- Candidate tree: `539dbc8ad624a6c5722b1d6040cca4324d43a58f`.
 - Candidate is exactly one commit ahead and changes only the P7.C7 test harness plus Repair-4 evidence. No `src/**` change occurred.
 
 ## Repair-4 improvements accepted as useful
