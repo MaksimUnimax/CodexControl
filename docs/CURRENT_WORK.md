@@ -77,48 +77,54 @@ P7.C7 used a 5-second outer acquire timeout around a production startup path con
 
 P7.C8 is a new successor namespace, not a retry of P7.C7.
 
-Initial P7.C8 zero-effect prep candidate:
+Initial prep `9297395efb678356255d91aa8d90001a5fc768e0` was architect reviewed as `REWORK_REQUIRED` because acquisition containment/evidence still had unbounded cleanup join, optimistic parent `CONFIRMED`, lost post-containment classification, an invalid cleanup-category journal route, incomplete safe category authority and a non-authoritative journal reader.
 
-- commit `9297395efb678356255d91aa8d90001a5fc768e0`;
-- tree `291fddbbef8a67dc918a730d363c086cbb910db3`;
-- scope limited to the new P7.C8 harness plus prep evidence;
-- reported real effects `0`.
+Repair-1 is architect accepted:
 
-Architect review:
+- executable commit `070bcd0caa336d6df1ed24ee05d31dcce3d2cd95`;
+- executable tree `787e083077b7386a8b05968f2193c611d8182d9d`;
+- harness blob `53e70ba37803bb6a88e3e8ab4b7f499db1e28df8`;
+- Repair-1 evidence blob `c3c4dc55e4afe75b96c6a15919e4492e0b57cb4f`.
 
-`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_REVIEW_2026-09-11.md`
+Architect acceptance:
 
-The candidate correctly introduces a dedicated acquisition observer and the new P7.C8 namespace, but remains **REWORK_REQUIRED** before any real execution.
+`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_ARCHITECT_ACCEPTANCE_2026-09-11.md`
 
-Blocking harness/evidence defects:
+Accepted acquisition authority:
 
-- failed-acquire cleanup cancels its cleanup task and then waits through an unbounded `asyncio.gather`, violating the 12-second containment authority for cancellation-resistant cleanup;
-- the real child discards the `AcquireObservation` returned by containment, so a post-cleanup escalation to `RUNTIME_ACQUIRE_CANCELLATION_NONCONVERGENT` is not durably finalized;
-- parent acquisition recovery defaults absent/missing acquisition evidence to `RUNTIME_ACQUIRE_CONFIRMED`, which is not fail-closed;
-- cleanup safe-category persistence calls `RecoveryJournal.result(..., category=...)` even though that method does not accept `category`, so the categorized cleanup path raises `TypeError`;
-- the frozen safe runtime-category set is incomplete relative to production `RuntimeErrorSafe.category` values reachable from acquire/start/cleanup;
-- parent acquisition recovery uses ordinary `Path.read_text()` rather than bounded no-follow stable-identity journal reading.
+- 45-second runtime-acquire ceiling;
+- distinct initial and final acquisition classes;
+- 12-second failed-acquire `shutdown_profile()` containment;
+- 1-second bounded cleanup cancellation/join;
+- post-containment escalation to `RUNTIME_ACQUIRE_CANCELLATION_NONCONVERGENT` is preserved;
+- parent acquisition reconstruction is fail-closed with `RUNTIME_ACQUIRE_NOT_ESTABLISHED`, never optimistic `CONFIRMED`;
+- parent acquisition journal read is bounded/no-follow/stable-identity JSONL;
+- recognized production `RuntimeErrorSafe.category` values are retained safely; unrecognized values become fixed `SAFE_EXCEPTION_CATEGORY_UNRECOGNIZED`;
+- failed acquisition has zero downstream model/list/thread/Turn/approval effects;
+- normal success requires acquisition initial/final `CONFIRMED` and no acquisition cleanup/error facts.
 
-No production `src/**` defect is established.
-
-Binding Repair-1 contract:
-
-`docs/evidence/p7c8/P7C8_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_CONTRACT_2026-09-11.md`
+All accepted DENY/process/journal/result gates remain present: ALLOW=0, max three DENY attempts, one child/no retry, exact process-group ownership, immutable recovery journal, exact normal `1/1/1` effect ledger, zero resume/interrupt/delete/read/list, child/parent boundary proof and separate normal result/outcome authority.
 
 ## Current executable slice
 
-**P7.C8 DENY-only approval-probe prep Repair-1 — NEXT / ZERO REAL EFFECT.**
+**P7.C8 one-shot real DENY-only approval probe — AUTHORIZED UNDER EXACT SNAPSHOT ONLY.**
 
-Repair-1 is limited to bounded failed-acquire containment and truthful durable acquisition authority. It must preserve every already-correct P7.C8 DENY/process/journal/result gate and must perform zero real Codex effects.
+Binding execution contract:
 
-`P7C8_DENY_ONLY_APPROVAL_PROBE_PREP=REWORK_REQUIRED`
+`docs/evidence/p7c8/P7C8_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-11.md`
 
-`P7C8_PREP_REPAIR1=NEXT_ZERO_REAL_EFFECT`
+The real probe must execute only from detached HEAD `070bcd0caa336d6df1ed24ee05d31dcce3d2cd95`, tree `787e083077b7386a8b05968f2193c611d8182d9d`.
 
-`P7C8_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+It may perform at most one owned runtime generation, one model/list, one fresh thread/start, one primary turn/start and 0..3 DENY attempts. ALLOW/resume/interrupt/delete/read/list remain zero.
 
-`P7C8_REAL_EXECUTION_AUTHORIZED=NO`
+The real invocation is one-shot and becomes permanently consumed once started under any success/failure/timeout/ambiguity outcome. It is observational only and never authorizes hard delete automatically.
+
+`P7C8_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
+
+`P7C8_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
 
 `P7C8_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
+
+`P7C7_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
 P8/P9 remain blocked until real P7 acceptance is architect accepted.
