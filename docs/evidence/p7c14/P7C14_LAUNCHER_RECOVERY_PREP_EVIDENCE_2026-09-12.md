@@ -188,3 +188,172 @@ used.
 
 `P8_STARTED=NO`
 `P9_STARTED=NO`
+
+## Repair-1 execution record
+
+The architect review identified the prior `P7C14_PREP_READY=YES` statement as
+superseded: the successor executor inherited a P7.C13 `run()` interface that
+required `expected_harness_blob`, while the P7.C14 contract exposes the
+accepted inherited value as `expected_p7c13_harness_blob`. Repair-1 changes
+only the P7.C14 launcher and this evidence file.
+
+`P7C14_REPAIR1_BASE_HEAD=33f27a2ecba5f81d20651e6456bd2e137a4f5274`
+
+`P7C14_REPAIR1_BASE_TREE=04c0733eabea2763731bf99c765fc16fd95fec31`
+
+`PRIOR_P7C14_LAUNCHER_BLOB=c2b9643e92206f194abdfd35ad08de3783801afe`
+
+`PRIOR_P7C14_EVIDENCE_BLOB=7e2ad8d0266fe9fbbb8c9f5d5079c0d6b512c8f5`
+
+`P7C14_REPAIR1_LAUNCHER_BLOB=fcce1352d581522b4c4ab0e5235d0b927d2eceb8`
+
+The final evidence blob is the Git blob ID of this completed file and is
+reported by the final commit/remote readback; it cannot be self-embedded in
+its own content without changing that blob ID.
+
+### Contract adaptation
+
+`P7C14_CONTRACT_ADAPTATION_CLASS=P7C14PreparedFutureRealExecutor.run`
+
+`P7C14_CONTRACT_ADAPTATION_TARGET=p7c13.FutureArchitectContract`
+
+`P7C14_CONTRACT_ADAPTATION_FIELDS=authorization_token(P7.C14 inert),expected_head(P7.C14),expected_tree(P7.C14),expected_harness_blob(accepted P7.C13 harness)`
+
+`P7C14_CONTRACT_ADAPTATION_LAUNCHER_AS_HARNESS=NO`
+
+The override rejects null, non-P7.C14 and malformed contracts before ledger
+reservation, constructs exactly the inherited four-field contract, and calls
+the inherited executor once. Synthetic fixtures distinguish the launcher
+blob (`synthetic-p7c14-launcher`) from the inherited harness blob
+(`synthetic-p7c13-harness`).
+
+### Exact-authorized synthetic handoff
+
+The positive test passed the complete P7.C14 source-bundle gate and traversed
+the production-shaped `p7c14_real_entrypoint`, the concrete
+`P7C14PreparedFutureRealExecutor.run` override and the inherited
+`p7c13.PreparedFutureRealExecutor.run` implementation. It used only temporary
+ledger, boot and result paths, a counting temporary ledger, a harmless child
+command descriptor and a fake watchdog. The watchdog wrote a bounded,
+boot-bound synthetic PASS result; no child process was started.
+
+`P7C14_SOURCE_GATE=PASS`
+
+`P7C14_EXECUTOR_CALLS=1`
+
+`P7C14_CONTRACT_ADAPTATION=PASS`
+
+`TEMP_P7C14_LEDGER_RESERVATIONS=1`
+
+`P7C13_GLOBAL_LEDGER_MUTATIONS=0`
+
+`P7C13_GLOBAL_LEDGER_ACCESS=0`
+
+`REAL_CODEX_CALLS=0`
+
+`REAL_CHILD_CALLS=0`
+
+`FAKE_CHILD_DISPATCHES=1`
+
+`BOOT_SOURCE_HEAD=synthetic-p7c14-head`
+
+`BOOT_SOURCE_TREE=synthetic-p7c14-tree`
+
+`BOOT_HARNESS_BLOB=synthetic-p7c13-harness`
+
+`PARENT_SYNTHETIC_RESULT=accepted finite PASS`
+
+`P7C14_TEMP_LEDGER_PATH != P7C13_GLOBAL_LEDGER_PATH=PASS`
+
+No `AttributeError`, missing contract field, real ledger reservation, real
+child, Codex call, RPC, approval response, interrupt, delete or signal
+occurred. Production construction remains bound to
+`/root/.codexcontrol/p7c14-one-shot.json`; the inherited P7.C13 ledger path
+was not used as P7.C14 replay authority.
+
+### Negative matrix and validation
+
+The focused matrix blocks wrong token, HEAD, tree, P7.C14 launcher, inherited
+P7.C13 harness, matcher, package markers, import roots and tracked-clean
+authority before executor selection. Direct executor tests block null and
+non-P7.C14 contracts before temporary ledger reservation. The adaptation
+test proves `expected_harness_blob` equals only the accepted inherited P7.C13
+harness and not the P7.C14 launcher. The temporary latch test proves the
+exclusive reservation and terminal consumption states.
+
+The exact gate-disabled command with all P7.C14 authorization variables unset
+returned finite exit `2`; P7.C14 and P7.C13 production ledgers remained
+absent, with zero Codex/RPC effect.
+
+- P7.C14 Repair-1 focused: `8 passed`.
+- P7.C13 offline-only: `71 passed`.
+- P7.C12 focused: `13 passed`.
+- P7.C2/C3/C4/C5 fake/non-real: `106 passed`.
+- Full non-real pytest: `1859 passed`, `7 skipped`, `1541 subtests`, `6
+  immutable historical consumed-latch failures`.
+- Unittest discovery: `1872 tests`, `7 skipped`, `5 immutable historical
+  consumed-latch failures`, `1 immutable historical consumed-latch error`.
+- compileall: PASS.
+- `git diff --check`: PASS.
+- leakage/security scan: PASS.
+
+The six pytest failures and five unittest failures plus one error are the
+pre-existing consumed-latch/authority-presence failures in P7.C7 through
+P7.C11. No historical source or evidence was changed to affect them.
+
+### Repair-1 zero-real-effect accounting
+
+`REAL_CODEX_PROCESS_STARTS=0`
+
+`APP_SERVER_STARTS=0`
+
+`MODEL_LIST_CALLS=0`
+
+`THREAD_START_CALLS=0`
+
+`THREAD_RESUME_CALLS=0`
+
+`THREAD_READ_CALLS=0`
+
+`THREAD_LIST_CALLS=0`
+
+`THREAD_DELETE_CALLS=0`
+
+`TURN_START_CALLS=0`
+
+`TURN_INTERRUPT_CALLS=0`
+
+`APPROVAL_RESPONSES=0`
+
+`ALLOW_RESPONSES=0`
+
+`DENY_RESPONSES=0`
+
+`P7C13_LEDGER_MUTATIONS=0`
+
+`P7C14_REAL_LEDGER_CREATIONS=0`
+
+`REAL_PERSISTENT_HOME_MUTATIONS=0`
+
+`REAL_ISOLATED_MUTATIONS=0`
+
+`REAL_CONTROLLER_MUTATIONS=0`
+
+`REAL_APPROVAL_TARGET_MUTATIONS=0`
+
+`TELEGRAM_CALLS=0`
+
+`REAL_CODEX_PROCESS_SIGNALS=0`
+
+`P7C14_REPAIR1_CONTRACT_ADAPTATION=PASS`
+`P7C14_REPAIR1_EXACT_AUTHORIZED_SYNTHETIC_HANDOFF=PASS`
+`P7C14_REPAIR1_TEMP_LEDGER_ONLY=PASS`
+`P7C14_REPAIR1_INHERITED_BOOT_BINDING=PASS`
+`P7C14_REPAIR1_GATE_DISABLED_SMOKE=PASS`
+`P7C14_PREP_READY=YES`
+
+`P7C14_REAL_EXECUTION_AUTHORIZED=NO`
+`P7C13_REAL_RETRY_AUTHORIZED=NO`
+
+`P8_STARTED=NO`
+`P9_STARTED=NO`

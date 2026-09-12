@@ -192,6 +192,33 @@ def _contract_from_environment(environ: dict[str, str]) -> P7C14ArchitectContrac
 class P7C14PreparedFutureRealExecutor(p7c13.PreparedFutureRealExecutor):
     """Accepted child/delete implementation with a P7.C14 replay authority."""
 
+    @staticmethod
+    def _adapt_contract(
+        contract: P7C14ArchitectContract | None,
+    ) -> p7c13.FutureArchitectContract:
+        """Adapt successor source authority to the frozen inherited interface."""
+        if contract is None or not isinstance(contract, P7C14ArchitectContract):
+            raise P7C14PreparationGateError("valid P7.C14 contract required")
+        required = (
+            contract.authorization_token, contract.expected_head, contract.expected_tree,
+            contract.expected_launcher_blob, contract.expected_p7c13_harness_blob,
+            contract.expected_p7c12_matcher_blob, contract.expected_tests_init_blob,
+            contract.expected_tests_real_init_blob,
+        )
+        if not all(required) or contract.expected_import_roots != P7C14_IMPORT_ROOTS:
+            raise P7C14PreparationGateError("P7.C14 contract malformed")
+        return p7c13.FutureArchitectContract(
+            authorization_token=contract.authorization_token,
+            expected_head=contract.expected_head,
+            expected_tree=contract.expected_tree,
+            expected_harness_blob=contract.expected_p7c13_harness_blob,
+        )
+
+    def run(self, *, contract: P7C14ArchitectContract | None = None) -> object:
+        """Enter the inherited executor only through an explicit adaptation."""
+        adapted = self._adapt_contract(contract)
+        return super().run(contract=adapted)
+
     @classmethod
     def production(cls, contract: P7C14ArchitectContract) -> "P7C14PreparedFutureRealExecutor":
         record = {
@@ -234,11 +261,18 @@ def p7c14_real_entrypoint(
 
 
 def _synthetic_authority() -> P7C14SourceAuthority:
-    return P7C14SourceAuthority("head", "tree", "launcher", "harness", "matcher", "tests", "real", True, True)
+    return P7C14SourceAuthority(
+        "synthetic-p7c14-head", "synthetic-p7c14-tree", "synthetic-p7c14-launcher",
+        "synthetic-p7c13-harness", "synthetic-p7c12-matcher", "synthetic-tests", "synthetic-tests-real",
+        True, True,
+    )
 
 
 def _synthetic_contract() -> P7C14ArchitectContract:
-    return P7C14ArchitectContract("offline-token", "head", "tree", "launcher", "harness", "matcher", "tests", "real")
+    return P7C14ArchitectContract(
+        "offline-token", "synthetic-p7c14-head", "synthetic-p7c14-tree", "synthetic-p7c14-launcher",
+        "synthetic-p7c13-harness", "synthetic-p7c12-matcher", "synthetic-tests", "synthetic-tests-real",
+    )
 
 
 def _synthetic_environment(contract: P7C14ArchitectContract) -> dict[str, str]:
@@ -255,6 +289,114 @@ def _synthetic_environment(contract: P7C14ArchitectContract) -> dict[str, str]:
 
 
 class P7C14OfflineAuthorityTests(unittest.TestCase):
+    def test_executor_contract_adaptation_precedes_reserve(self) -> None:
+        class CountingLedger(p7c13.DurableOneShotLedger):
+            def __init__(self, path: Path) -> None:
+                super().__init__(path)
+                self.reserve_calls = 0
+
+            def reserve(self, record: dict[str, object]) -> bool:
+                self.reserve_calls += 1
+                return super().reserve(record)
+
+        with tempfile.TemporaryDirectory(prefix="p7c14-adaptation-") as directory:
+            ledger = CountingLedger(Path(directory) / "p7c14-ledger.json")
+            executor = P7C14PreparedFutureRealExecutor(
+                ledger=ledger, watchdog=Mock(), child_command=("synthetic-child",),
+                result_path=Path(directory) / "result.json", record=p7c13._synthetic_ledger_record(),
+            )
+            for malformed in (None, p7c13.FutureArchitectContract("token", "head", "tree", "harness")):
+                with self.subTest(contract=malformed):
+                    with self.assertRaises(P7C14PreparationGateError):
+                        executor.run(contract=malformed)
+            self.assertEqual(0, ledger.reserve_calls)
+
+    def test_executor_contract_adaptation_keeps_launcher_and_harness_separate(self) -> None:
+        contract = _synthetic_contract()
+        adapted = P7C14PreparedFutureRealExecutor._adapt_contract(contract)
+        self.assertEqual(contract.expected_head, adapted.expected_head)
+        self.assertEqual(contract.expected_tree, adapted.expected_tree)
+        self.assertEqual(contract.expected_p7c13_harness_blob, adapted.expected_harness_blob)
+        self.assertNotEqual(contract.expected_launcher_blob, adapted.expected_harness_blob)
+
+    def test_exact_authorized_synthetic_handoff_uses_inherited_executor(self) -> None:
+        class CountingLedger(p7c13.DurableOneShotLedger):
+            def __init__(self, path: Path) -> None:
+                super().__init__(path)
+                self.reserve_calls = 0
+
+            def reserve(self, record: dict[str, object]) -> bool:
+                self.reserve_calls += 1
+                return super().reserve(record)
+
+        class SyntheticWatchdog:
+            def __init__(self, owner: P7C14PreparedFutureRealExecutor) -> None:
+                self.owner = owner
+                self.calls = 0
+                self.fake_child_calls = 0
+                self.real_child_calls = 0
+                self.commands: list[tuple[str, ...]] = []
+
+            def run(self, command: tuple[str, ...], *, result_path: Path, result_validator=None, **kwargs: object) -> p7c13.WatchdogResult:
+                self.calls += 1
+                self.fake_child_calls += 1
+                self.commands.append(tuple(command))
+                boot = p7c13.RootOnlyBootAuthority(self.owner.boot_path).read()
+                budget = p7c13.EffectBudget(dict(p7c13.FROZEN_EFFECT_BUDGET))
+                budget.counts = dict(p7c13.FROZEN_EFFECT_BUDGET)
+                child = p7c13.CompleteChildResult(
+                    True, {"synthetic": "PASS"},
+                    {"persistent": 0, "isolated": 0, "scan_errors": 0}, {"synthetic": "PASS"},
+                )
+                p7c13._write_child_result(result_path, p7c13._child_result_payload(boot, child, budget))
+                if result_validator is None or not result_validator(Path(result_path)):
+                    raise AssertionError("synthetic child result was not accepted by watchdog validator")
+                return p7c13.WatchdogResult("COMPLETED", child_result_valid=True)
+
+        contract = _synthetic_contract()
+        environment = _synthetic_environment(contract)
+        with tempfile.TemporaryDirectory(prefix="p7c14-handoff-") as directory:
+            root = Path(directory)
+            ledger = CountingLedger(root / "p7c14-ledger.json")
+            executor = P7C14PreparedFutureRealExecutor(
+                ledger=ledger, watchdog=Mock(), child_command=("synthetic-child",),
+                result_path=root / "p7c14-result.json", boot_path=root / "p7c14-boot.json",
+                record=p7c13._synthetic_ledger_record(),
+                child_factory=lambda boot_path: ("synthetic-child", str(boot_path)),
+                run_paths={
+                    "isolated_root": str(root / "isolated"),
+                    "controller_db": str(root / "controller.sqlite3"),
+                    "workdir": str(root / "workdir"),
+                    "approval_target": str(root / "approval-target"),
+                },
+            )
+            watchdog = SyntheticWatchdog(executor)
+            executor.watchdog = watchdog
+
+            self.assertTrue(p7c14_source_bundle_gate(environment, contract, _synthetic_authority()))
+            result = p7c14_real_entrypoint(
+                environ=environment, authority=_synthetic_authority(),
+                executor=executor, contract=contract,
+            )
+
+            self.assertEqual("COMPLETED", result.status)
+            self.assertEqual(1, executor.calls)
+            self.assertEqual(["ledger", "boot", "child"], executor.order)
+            self.assertEqual(1, ledger.reserve_calls)
+            self.assertEqual(1, watchdog.calls)
+            self.assertEqual(1, watchdog.fake_child_calls)
+            self.assertEqual(0, watchdog.real_child_calls)
+            self.assertNotEqual(ledger.path, P7C13_LEDGER_PATH)
+
+            boot = p7c13.RootOnlyBootAuthority(executor.boot_path).read()
+            self.assertEqual(contract.expected_head, boot["source_head"])
+            self.assertEqual(contract.expected_tree, boot["source_tree"])
+            self.assertEqual(contract.expected_p7c13_harness_blob, boot["harness_blob"])
+            self.assertNotEqual(contract.expected_launcher_blob, boot["harness_blob"])
+            self.assertEqual(str(ledger.path), boot["ledger_path"])
+            parent_result = p7c13.read_child_result(executor.result_path, boot=boot)
+            self.assertTrue(p7c13.child_result_passes(parent_result, boot))
+
     def test_wrong_authority_matrix_blocks_before_executor(self) -> None:
         contract = _synthetic_contract()
         environment = _synthetic_environment(contract)
