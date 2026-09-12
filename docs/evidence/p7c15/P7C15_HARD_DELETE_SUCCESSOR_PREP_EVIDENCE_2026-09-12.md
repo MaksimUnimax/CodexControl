@@ -135,7 +135,7 @@ focused P7.C15: 14 passed
 P7.C14/P7.C13/P7.C12 offline regression: 96 passed, 128 subtests passed
 P7.C2/P7.C3/P7.C4/P7.C5 fake/non-real: 106 passed, 54 subtests passed
 full pytest: 1873 passed, 7 skipped, 6 retained historical-latch failures
-unittest discovery: 1882 tests, 7 skipped, 5 retained historical-latch failures, 1 retained historical-authority error
+unittest discovery: 1886 tests, 7 skipped, 5 retained historical-latch failures, 1 retained historical-authority error
 compileall: PASS
 git diff --check: PASS
 ```
