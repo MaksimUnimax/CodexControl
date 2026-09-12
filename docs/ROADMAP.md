@@ -39,28 +39,13 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [CONSUMED / NO RERUN] real evidence `21d3c3f6dbcb0c77047121c75b70a0d0f0814bea`.
 - [DONE / ROOT-CAUSE REVIEW] production correctly rejected manually incomplete test state root; harness precondition defect; production defect `NO`.
 
-### P7.C9 production-provisioned DENY-only successor
+### P7.C9
 
-#### Preparation
-
-- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] initial prep `097c8809a90eaca5d7d2074b35dc5e73ae9762c1`, tree `c099c3a35acde82674f70413f55121c9345c82ba`.
-- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Repair-1 `6cefa7772f00f6b1d67b9c6ecfd3770009d77c7f`, tree `1fd13ed5964f7c18ac5c5cfc799ee4670c719ab2`, harness blob `44271459c2b4523f97551ade93563aee96def1c3`.
-- [PASS] Real path uses production `IsolatedStateRoot.provision(profile)` then `validate(profile)`; no manual marker/sqlite/logs creation.
-- [PASS] State-root workers have explicit bounded owner authority; normal success requires both `TERMINALIZED`.
-- [PASS] Parent provision/runtime evidence recovery is fail-closed and category domains are separated.
-
-#### One-shot real probe and forensic
-
-- [CONSUMED / NO RERUN] Real evidence `bf7f870c6df640bb26e51fa9c05a2b55e44e5489`.
-- [DONE / ZERO EFFECT FORENSIC] forensic evidence head `462e441cde02f9d21212dd583b8d965a2b1858cc`, blob `de0903e3e2668f79d39b3e44d690bdd016a5115a`.
-- [PASS] model/list, model catalog, thread/start and turn/start all confirmed.
-- [ROOT CAUSE] structural `TURN_ID_AUTHORITY` was rejected by generic RecoveryJournal secret-substring filtering as `JOURNAL_VALUE_UNSAFE`.
-- [CLASSIFICATION] harness failure; production defect `NO`.
-- [CLOSED] P7.C9 permanently consumed; fresh thread/Turn evidence-only.
-
-Architect root-cause review:
-
-`docs/evidence/p7c9/P7C9_CONSUMED_REAL_DENY_ONLY_APPROVAL_PROBE_FORENSIC_ARCHITECT_REVIEW_2026-09-12.md`
+- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Repair-1 `6cefa7772f00f6b1d67b9c6ecfd3770009d77c7f`, tree `1fd13ed5964f7c18ac5c5cfc799ee4670c719ab2`.
+- [CONSUMED / NO RERUN] real evidence `bf7f870c6df640bb26e51fa9c05a2b55e44e5489`.
+- [DONE / ZERO EFFECT FORENSIC] forensic evidence `462e441cde02f9d21212dd583b8d965a2b1858cc`.
+- [ROOT CAUSE] P7.C9 harness rejected structural `TURN_ID_AUTHORITY` as `JOURNAL_VALUE_UNSAFE`.
+- [CLASSIFICATION] harness failure; production defect `NO`; fresh thread/Turn evidence-only.
 
 ### P7.C10 schema-aware journal successor
 
@@ -68,44 +53,56 @@ Architect root-cause review:
 
 - [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] prep `3732134246464df899837a3c499c86c52270b038`, tree `68be37c8a5d0aa132199f8b2782618638a07b87e`, harness blob `0a8611e72e8a7f0d368a3b391f2025e05790d3f5`.
 - [PASS] schema-aware journal accepts structural `TURN_ID_AUTHORITY` while raw ID/path/command routes remain closed.
-- [PASS] exact durable Turn chronology enforced in child and parent authority.
+- [PASS] child and parent require exact durable Turn chronology.
 
 #### One-shot real probe
 
-- [CONSUMED / NO RERUN] Executed exactly once; evidence commit `87124ee0d9f921ea9672cebb17e160b46a26a686`, blob `f3ce5635d3ba51697ed99f69c012c9096e695d26`.
-- [DONE / ARCHITECT ACCEPTED REAL OBSERVATION] parent final confirmed; child completed; state-root provision/validate and runtime acquire confirmed; durable Turn authority proved; exact normal `1/1/1`; zero forbidden lifecycle effects; one child/no retry; boundary safe; runtime shutdown confirmed.
-- [FACT] `PRIMARY_OUTCOME_CLASS=TURN_TERMINAL_BEFORE_APPROVAL_REQUEST`, terminal `COMPLETED`, request count 0, DENY 0, ALLOW 0.
-- [FACT] sentinel was touched successfully; no wire-command authority exists.
-- [SOURCE EXPLANATION] exact Codex 0.144.6 workspace-write makes `$TMPDIR` and `/tmp` writable by default; P7.C10 target was under `/tmp`, so no approval was expected.
-- [CLASSIFICATION] observational path accepted; approval stimulus not established; production defect `NO`.
-- [CLOSED] P7.C10 permanently consumed; fresh thread/Turn evidence-only.
+- [CONSUMED / NO RERUN] evidence `87124ee0d9f921ea9672cebb17e160b46a26a686`, blob `f3ce5635d3ba51697ed99f69c012c9096e695d26`.
+- [DONE / ARCHITECT ACCEPTED REAL OBSERVATION] complete normal observational path: state-root, runtime acquire, model/list, fresh thread, fresh Turn, durable Turn authority, owners, shutdown, boundaries, one child/no retry all passed.
+- [FACT] `TURN_TERMINAL_BEFORE_APPROVAL_REQUEST`, terminal `COMPLETED`, request count 0, DENY 0, ALLOW 0.
+- [FACT] `/tmp` sentinel touched successfully; no wire authority.
+- [SOURCE EXPLANATION] Codex 0.144.6 workspace-write makes `$TMPDIR` and `/tmp` writable by default, so the P7.C10 stimulus was not approval-eliciting.
+- [CLOSED] observational run accepted; approval stimulus not established; production defect `NO`; no rerun.
 
 Architect review:
 
 `docs/evidence/p7c10/P7C10_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_ARCHITECT_REVIEW_2026-09-12.md`
 
-`P7C10_REAL_PROBE_RERUN_AUTHORIZED=NO`
-
-`P7C10_REAL_APPROVAL_PROBE_AUTHORIZED=NO_CONSUMED`
-
-`P7C10_MATCHER_AUTHORIZED=NO`
-
-`P7C10_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
-
 ### P7.C11 source-backed explicit-escalation successor
 
-Binding preparation contract:
+Binding source/stimulus contract:
 
 `docs/evidence/p7c11/P7C11_SOURCE_BACKED_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-12.md`
 
-- [NEXT / ZERO REAL EFFECT] New P7.C11 namespace; no reuse/rerun of consumed probes.
-- [SOURCE AUTHORITY] exact upstream 0.144.6 proves `OnRequest + workspace-write + SandboxPermissions::RequireEscalated` routes to command `ExecApproval`; upstream scenario `workspace_write_on_request_requires_approval_outside_workspace` exercises this route.
-- [STIMULUS FIX] Future primary Turn must make exactly one shell-command request for `touch <fresh sentinel>` and explicitly request `require_escalated` on the first and only tool call; no default-sandbox first attempt, alternate tool/path, patch, network or retry.
-- [TARGET FIX] Sentinel must be outside `/tmp`, `$TMPDIR`, Turn cwd and all default workspace writable roots; preferred target is a fresh high-entropy file directly under `/root`, outside `/root/.codexcontrol`, and absent before the Turn.
-- [DENY-ONLY] Command approval is observed/captured then DENIED; target should remain absent; ALLOW remains impossible.
-- [BOUND] Preserve P7.C10 schema-aware journal, durable Turn authority, P7.C9 production state-root ownership, P7.C8 runtime-acquire containment, exact normal `1/1/1`, zero resume/interrupt/delete/read/list, immutable journal, one child/no retry, process-group and boundary authority.
-- [BLOCKED] No real P7.C11 probe until zero-effect prep is independently architect accepted and an exact executable SHA/tree is frozen.
-- [BLOCKED] Matcher and hard-delete execution until separately accepted real command-approval evidence exists.
+#### Initial preparation
+
+- [REWORK_REQUIRED / ZERO REAL EFFECT] candidate `52d5a4d3a3e716dce32069afbb6b6bdf0fa4a07e`, harness blob `dcc6fa05e551f5514ced8993976caa8a6fa1f606`, evidence blob `960e59ad468868c8290d12312bff266ab520ba66`.
+- [PASS] exact upstream 0.144.6 `OnRequest + workspace-write + RequireEscalated -> ExecApproval` authority frozen.
+- [PASS] future target is a fresh direct child of `/root`, outside `/tmp`, `$TMPDIR`, cwd, run root, repository, persistent Codex home, state/controller roots and `/root/.codexcontrol`.
+- [PASS] prompt requires first-and-only shell call, exact touch target, explicit `sandbox_permissions=require_escalated`, no default first attempt, alternate tool/path/network/retry.
+- [PASS] DENY-only/no-ALLOW, root-only wire capture and all prior state/runtime/process/journal gates carried forward.
+- [BLOCKER] `COMMAND_APPROVAL_OBSERVED_AND_DENIED` is currently over-broad: any command-kind request + any DENY attempt can be called success even if exact identity/wire authority is absent or the DENY result is `RESPONSE_UNKNOWN`.
+- [BLOCKER] parent/child success validation does not bind preferred success to the authoritative exact request, its exact target reference and its own confirmed DENY.
+- [BLOCKER] parent final authority does not independently bind child target SHA-256 to the parent-selected exact target.
+
+Architect review:
+
+`docs/evidence/p7c11/P7C11_SOURCE_BACKED_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_REVIEW_2026-09-12.md`
+
+#### Repair-1
+
+Binding contract:
+
+`docs/evidence/p7c11/P7C11_SOURCE_BACKED_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_CONTRACT_2026-09-12.md`
+
+- [NEXT / ZERO REAL EFFECT] Preserve source-backed target/prompt and repair only evidence correlation/success classification.
+- [FIX] correlate validated root-only wire capture to one exact command request.
+- [FIX] correlate `DENIED_CONFIRMED` to that same authoritative request; `RESPONSE_UNKNOWN` is never preferred success.
+- [FIX] wrong identity/kind/unrelated target reference cannot satisfy command-approval success.
+- [FIX] preferred success requires exact target reference authority and valid wire SHA/vector authority.
+- [FIX] parent independently binds child target SHA-256 to its own generated target and re-observes target absence.
+- [BOUND] zero-request/non-success outcomes remain finite valid observations; PARENT_FINAL_RESULT_CONFIRMED is not synonymous with command-approval success.
+- [BLOCKED] no real P7.C11 until Repair-1 is independently architect accepted and exact executable SHA/tree are frozen.
 
 `P7C11_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
 
@@ -117,11 +114,11 @@ Binding preparation contract:
 
 ## P8 — deployment packaging/rollback
 
-[BLOCKED BY P7 REAL ACCEPTANCE]
+[BLOCKED BY P7 HARD-DELETE ACCEPTANCE]
 
 ## P9 — server-80 live Telegram acceptance
 
-[BLOCKED BY P7 REAL ACCEPTANCE]
+[BLOCKED BY P7 HARD-DELETE ACCEPTANCE]
 
 ## P10 — server-78 discovery/deployment
 
