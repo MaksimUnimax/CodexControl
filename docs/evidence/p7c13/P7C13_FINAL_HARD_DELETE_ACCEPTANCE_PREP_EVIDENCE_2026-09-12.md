@@ -1,65 +1,117 @@
-# P7.C13 preparation Repair-4 evidence — 2026-09-12
+# P7.C13 preparation Repair-5 evidence — 2026-09-12
 
-Status: **REPAIR-4 PREPARATION READY / ZERO REAL EFFECT / NO REAL EXECUTION**
+Status: **REPAIR-5 PREPARATION READY / ZERO REAL EFFECT / NO REAL EXECUTION**
 
 ## Authority, lineage and scope
 
-`REPAIR4_BASE_HEAD=75f1ccbcc839fc49c0602acfb9d9c19c9f587a30`
+`REPAIR5_BASE_HEAD=86aa1b7b139b7db3d7d1ab8ed725c4cb25e5562d`
 
-`REPAIR4_BASE_TREE=2c240993be4d7998c94b455c347c2065176adbd7`
+`REPAIR5_BASE_TREE=2968187b6300e1ed03e336340aa906c199819d48`
 
-`PRIOR_HARNESS_BLOB=b60a38c90317ec83063f314eb189af9c66e735cb`
+`PRIOR_HARNESS_BLOB=61853860ed0955df6119edb288d22573299cd1b3`
 
 `P7C12_MATCHER_BLOB=f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1`
 
-`ARCHITECT_MAIN_HEAD=4f0ab1232d00df44b732f7f741e201b457391577`
+`ARCHITECT_MAIN_HEAD=2b9970212c75d873ab4dcb25ac1251dbb5e3a98a`
 
-`ARCHITECT_MAIN_TREE=79f33b80b9f507217f1d79a099809f9277e4e116`
+`ARCHITECT_MAIN_TREE=bd7e027d014401e45c4149fdf1f3db3f020100b3`
 
-`FINAL_HARNESS_BLOB=61853860ed0955df6119edb288d22573299cd1b3`
+`FINAL_HARNESS_BLOB=cb64f44bc71339300e2d697167daa08b0b601f15`
 
 `FINAL_EVIDENCE_BLOB=DERIVED_BY_FINAL_REMOTE_READBACK`
 
-`HELPER_BLOB=NONE`
+`HELPER_BLOB=NONE — Repair-5 helper is in the harness file`
 
-The branch began exactly at Repair-3 final candidate `75f1ccbcc839fc49c0602acfb9d9c19c9f587a30`; no merge, rebase, squash or history rewrite was used. The only tracked Repair-4 files are this evidence file and `tests/real/test_p7_c13_final_hard_delete_acceptance.py`. The tolerated untracked `tests/real/__init__.py` was preserved. No `src/**`, accepted matcher, historical P7.C6–P7.C12 file, schema/migration, ADR, deployment, Telegram, CURRENT_WORK or ROADMAP file changed.
+The branch starts at the exact accepted Repair-4 commit and remains linear. No
+merge, rebase, squash or history rewrite was used. Tracked modifications are
+limited to this evidence file and the P7.C13 harness. The pre-existing
+untracked `tests/real/__init__.py` was preserved. No `src/**`, accepted matcher,
+historical P7.C6–P7.C12 file, schema/migration, ADR, deployment, Telegram,
+CURRENT_WORK or ROADMAP file changed.
 
-## Repair-4 implementation authority
+## Repair-5 external-user classification
 
-- Source gate derives exact HEAD, tree and harness blob and requires both `git diff --quiet HEAD -- .` and `git diff --cached --quiet HEAD -- .`; staged tracked drift is blocked before ledger reservation.
-- Production topology uses `/root/.codex_second` only as shared authenticated profile home, the actual repository root as repository authority, a pre-existing private controller-root directory, and a fresh isolated root outside repository/profile/controller boundaries. The isolated root and workdir are fresh direct `/root` children; controller DB/ledger/boot/result remain under the private controller root.
-- Production preflight is read-only and covers `/proc/self/mountinfo`, persistent home, repository, isolated root plus `sqlite`/`logs`, controller root/DB, workdir, approval target, ledger, boot and result. It checks physical aliases, root ownership, exact owned external users, and allows shared-home-only processes. No mount or namespace mutation and no unrelated process signal is used.
-- `create_fresh_private_workdir()` creates the absent workdir exactly once before `thread/start`, then proves root ownership, mode `0700`, non-symlink identity and stable `(st_dev, st_ino)` across turns.
-- Named finite internal waits are: runtime acquire generations 1/2 `30s` each; model list `20s`; thread start/resume `30s` each; Turn 1/2 start and terminal `60s` each; Turn 3 start/approval/terminal `90s`; Turn 4 start `30s`, active observation `5s`, interrupt/terminal `45s`; runtime shutdowns `30s`; controller open/binding `30s`; canonical application delete `60s`; final convergence `30s`. Every potentially blocking production-capable await is owned and bounded.
-- The parent watchdog hard deadline is `670.0s`, derived from `610.0s` named stages plus `60.0s` margin, with TERM grace `5.0s` and KILL grace `5.0s`. Active/zombie/error probes inspect only the exact owned PGID via bounded `/proc` reads; scan errors fail closed. The parent can signal only that PGID.
+The production read-only preflight continues to perform all existing
+normalization, `/proc/self/mountinfo`, root-ownership, symlink, physical inode
+alias and topology-overlap checks. Only the process-user role classification was
+corrected.
 
-## C11/C12 approval authority
+| Boundary role | Boundaries | External users |
+|---|---|---|
+| report-only/shared or source | `persistent_home`, `repository`, `controller_root` | allowed and reported |
+| exact destructive run-owned | `isolated_root`, `isolated_sqlite`, `isolated_logs`, `controller_db`, `workdir`, `approval_target`, `ledger`, `boot`, `result` | fail closed when count is nonzero |
 
-- Turn 3 uses the explicit C11-shaped prompt: first and only shell-command tool call; exact `touch <selected target>` operation; explicit `sandbox_permissions=require_escalated`; short justification; no default-sandbox attempt; no alternate path/tool/network operation; no second call; no retry.
-- A run-owned root-only wire record and root-only bounded approval journal are separate from the C12 matcher. The wire record captures once from the actual request and records actual kind, request ordinal, independent local sequence, thread, Turn, normalized cwd, target hash and command SHA/plaintext. A second capture fails closed.
-- Correlation requires exactly one in-memory capture against the immutable record. Only after kind, ordinal, local sequence, thread, Turn, cwd, target hash/SHA, command SHA and target absence are validated are C12 `CapturedRequest`, `ExpectedAuthority` and `CorrelatedWireRecord` projected. `command_plaintext` comes from the validated wire record. The accepted matcher blob is unchanged.
-- The single bridge route reserves total response budget before either ALLOW or DENY; ALLOW additionally reserves the ALLOW slot before the bridge callback. PASS requires request ordinal `1`, request count `1`, response count `1`, ALLOW `1`, DENY `0`, bridge `ALLOWED`, no response-unknown and exact C12 match. Mismatch DENY consumes only the total-response slot; a second response is blocked.
+Offline matrix: `persistent_home=4`, `repository=2` and `controller_root=2`
+were each allowed and reported. Each of the nine destructive boundaries was
+tested independently with one external user and failed closed. Repository and
+controller-root mount ambiguity failed. Physical aliases across shared and
+destructive classes failed. A simulated live parent/executor using the
+repository checkout as cwd was reported and did not block the child; exact
+run-owned `workdir`, `controller_db` and `ledger` users blocked.
 
-## Turn, delete and oracle authority
+## Repair-5 Turn-4 unexpected-request gate
 
-- Turn 1/2 use observed terminal outputs and memory markers across a deliberate runtime-generation restart/resume. Turn 4 uses only `sleep 120`; an owned terminal waiter must lose a bounded active observation window before the single interrupt slot is reserved. Terminal-before-active yields zero interrupt; UNKNOWN is never accepted.
-- The canonical chain remains `DialogueDeleteService` -> instrumented real `CodexThreadLifecycleAdapter` -> `DeleteStorageCleanupCoordinator` -> `CodexRuntimeManager`/isolated authority. There is no raw delete fallback and exactly one application delete call. The official P1.9 status is recorded independently from application status.
-- Controller proof derives schema `PRAGMA user_version == 4`, the durable IDLE binding before delete, post-delete live binding absence and exact bounded tombstone identity/expiry. Official `DELETE_UNKNOWN` remains `UNKNOWN`; confirmed external delete with local proof pending remains `CONFIRMED_PENDING_STORAGE` and maps to terminal `CONFIRMED_PENDING`; neither retries or becomes PASS.
-- Post-delete proof derives the isolated ownership envelope through `IsolatedStateRoot.validate()`, regular/special/symlink/scan counts, and actual descendant counts under isolated `sqlite/` and `logs/`. The persistent and isolated bounded no-follow oracles are separate and include target thread ID plus memory, response, approval-prompt/target and Turn-4 markers. Filename, directory, history, content and marker residuals are independently blocking.
-- Unrelated-removal is derived from content-free pre/post metadata and target-path attribution, not a literal success constant. Shared-home background changes are not attributed without exact target evidence.
-- Child result publishes derived runtime-owned-child quiescence and leaves parent process-group quiescence to the parent watchdog. Parent PASS requires child runtime quiescence plus active `0`, zombie `0`, scan errors `0`, one child and retry `0` from its own exact-PGID probes.
+After actual Turn-4 `START_CONFIRMED`, the production path owns exactly two
+bounded current-run tasks: the exact `wait_turn(binding)` terminal waiter and a
+request observer awaiting `client.next_server_request()`. The observer only
+records that a request was dequeued; it never calls a response method and never
+uses `CodexApprovalBridge`.
+
+| Synthetic fact timing | Result | Interrupt |
+|---|---|---:|
+| no request during active window; active/nonterminal proof; failed terminal after interrupt | PASS | 1 |
+| terminal before active window | NON-PASS | 0 |
+| request before active timeout | NON-PASS; `unexpected_request_count=1` | at most one cleanup interrupt |
+| request during interrupt | NON-PASS; no response | 1 cleanup interrupt |
+| request before final terminal convergence | NON-PASS; no response | 1 cleanup interrupt |
+| request and terminal in same scheduler slice | NON-PASS / fail closed | 0 |
+
+The observer remains owned through interrupt and terminal convergence. The final
+snapshot requires zero unexpected requests for PASS, a definitive failed
+terminal, and both waiters terminalized or cancellation-joined. All synthetic
+observer tests ended with no pending request task and no detached terminal task.
+
+Turn-3 accounting remained exactly `approval_responses=1`,
+`allow_responses=1`, `deny_responses=0` when Turn-4 produced an unexpected
+request. The response callback count was zero. The source-order proof places
+the non-PASS Turn-4 gate before controller DB open and before
+`DialogueDeleteService.delete()`; the controller/delete callbacks are
+therefore unreachable after an unexpected request. The one exact interrupt is
+available only for cleanup of the exact actual Turn-4 binding.
+
+## Preserved Repair-4 authorities
+
+The accepted C11 root-only wire authority, C12 matcher and independent
+request/Turn/cwd/local-sequence/target correlation remain unchanged. Turn-3
+explicit escalation and its single response, official delete observation,
+schema-v4 controller proof, post-delete oracle, UNKNOWN and CONFIRMED_PENDING
+mapping, runtime/parent quiescence, watchdog bounds, source/index gate and
+fresh topology remain present and covered by the focused regression suites.
 
 ## Validation
 
-- Focused Repair-4: `63 passed, 22 subtests`.
-- Accepted P7.C12 plus relevant C2/C3/C4/C5 fake/non-real regressions: `119 passed, 133 subtests`.
-- Complete non-real pytest with all real gates unset: `1839 passed, 7 skipped, 6 failures, 1514 subtests`; all six failures are preserved historical consumed-latch/absence authorities from P7.C7–P7.C11, including the existing P7.C11 preflight error. No historical latch was removed or rewritten.
-- Ordinary unittest discovery with all real gates unset: `1852 run, 5 failures, 1 error, 7 skipped`; the six non-green outcomes are the same preserved historical consumed-latch/absence authorities. The initial repository-root discovery form ran zero tests and was not used as the discovery result.
-- `compileall`: required after evidence update; result recorded by final handoff.
-- `git diff --check`: PASS before evidence publication; rerun required after evidence update.
-- Leakage/security scan: source/evidence review found no future authorization token, raw real thread ID, credential content, raw prompt/response, wire plaintext, Telegram call or real-process signal. Temporary fixtures remained test-owned and no future real mode was invoked.
+- Focused P7.C13 Repair-5: `73 passed`, `36 subtests`.
+- Accepted P7.C12 plus relevant P7.C2/C3/C4/C5 fake/non-real regressions:
+  `119 passed`, `133 subtests`.
+- Complete non-real pytest with real authorization gates unset:
+  `1849 passed`, `7 skipped`, `6 failures`; the six failures are the preserved
+  historical P7.C7–P7.C11 consumed-latch/absence authorities, including the
+  existing P7.C11 preflight error. No historical latch was deleted or changed.
+- Ordinary unittest discovery with real authorization gates unset:
+  `1862 run`, `5 failures`, `1 error`, `7 skipped`; these are the same six
+  preserved historical consumed-latch/absence authorities.
+- `python -m compileall -q src tests`: PASS before final evidence edit.
+- `git diff --check`: PASS before final evidence edit.
+- Leakage/security scan: PASS; no future authorization token, credential,
+  private key, raw retained real identifiers, raw wire payload, Telegram call
+  or real-process signal was added.
+- Exact changed-path scope and accepted matcher/historical immutability:
+  PASS before final evidence edit.
 
 ## Zero-real-effect accounting
+
+All Repair-5 testing used synthetic state or injected fakes. No future gate
+token was set or invented, and `--p7c13-real-run` was not executed.
 
 `REAL_CODEX_PROCESS_STARTS=0`
 
@@ -107,19 +159,10 @@ The branch began exactly at Repair-3 final candidate `75f1ccbcc839fc49c0602acfb9
 
 `HISTORICAL_AUTHORITY_MUTATIONS=0`
 
-No authorization token was set or invented. `--p7c13-real-run` was not executed. No real Codex dependency was started. P8 and P9 were not started.
-
-P7C13_REPAIR4_SOURCE_GATE=PASS
-P7C13_REPAIR4_ISOLATION_BOUNDARY_GATE=PASS
-P7C13_REPAIR4_REAL_WATCHDOG_GATE=PASS
-P7C13_REPAIR4_C11_WIRE_AUTHORITY_GATE=PASS
-P7C13_REPAIR4_EXPLICIT_ESCALATION_GATE=PASS
-P7C13_REPAIR4_SINGLE_PROTOCOL_RESPONSE_GATE=PASS
-P7C13_REPAIR4_TURN4_ACTIVE_INTERRUPT_GATE=PASS
-P7C13_REPAIR4_OFFICIAL_DELETE_OBSERVATION=PASS
-P7C13_REPAIR4_REAL_POST_DELETE_ORACLE=PASS
-P7C13_REPAIR4_TERMINAL_RECOVERY_CLASSES=PASS
-P7C13_REPAIR4_CHILD_PARENT_QUIESCENCE=PASS
+P7C13_REPAIR5_EXTERNAL_USER_CLASSIFICATION=PASS
+P7C13_REPAIR5_TURN4_UNEXPECTED_REQUEST_GATE=PASS
+P7C13_REPAIR5_TURN4_NO_SECOND_RESPONSE=PASS
+P7C13_REPAIR5_TASK_OWNERSHIP=PASS
 P7C13_PREP_HARNESS_READY=YES
 P7C13_REAL_EXECUTION_AUTHORIZED=NO
 P7C13_REAL_ALLOW_AUTHORIZED=NO

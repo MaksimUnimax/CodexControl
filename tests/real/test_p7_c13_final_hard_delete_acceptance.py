@@ -56,8 +56,10 @@ from codex_control.adapters.codex.thread_lifecycle import (
 from codex_control.adapters.codex.turn_lifecycle import (
     CodexTurnLifecycleAdapter,
     TurnBinding,
+    TurnInterruptResult,
     TurnInterruptStatus,
     TurnStartStatus,
+    TurnTerminalResult,
     TurnTerminalStatus,
 )
 from codex_control.application import (
@@ -81,14 +83,14 @@ from tests.real import test_p7_c12_strict_approval_matcher as c12
 REPAIR1_BASE_HEAD = "8fa749856c678cb1ae120f7802c6c553c1272e34"
 REPAIR2_BASE_HEAD = "e0e1cd4c3aaaf2a89e1bf4c510a67203865e7247"
 REPAIR3_BASE_HEAD = "aae95407650c10b16387bbe4a27cec8bd96efe2b"
-REPAIR4_BASE_HEAD = "75f1ccbcc839fc49c0602acfb9d9c19c9f587a30"
+REPAIR4_BASE_HEAD = "86aa1b7b139b7db3d7d1ab8ed725c4cb25e5562d"
 P7C13_BASE_SHA = REPAIR4_BASE_HEAD
-P7C13_BASE_TREE = "2c240993be4d7998c94b455c347c2065176adbd7"
-PRIOR_HARNESS_BLOB = "b60a38c90317ec83063f314eb189af9c66e735cb"
+P7C13_BASE_TREE = "2968187b6300e1ed03e336340aa906c199819d48"
+PRIOR_HARNESS_BLOB = "61853860ed0955df6119edb288d22573299cd1b3"
 P7C12_MATCHER_BLOB = "f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1"
 ORIGINAL_HARNESS_BLOB = "a6962a14ffd4c10d6e4ff072cd24622077f839c2"
-ARCHITECT_MAIN_HEAD = "4f0ab1232d00df44b732f7f741e201b457391577"
-ARCHITECT_MAIN_TREE = "79f33b80b9f507217f1d79a099809f9277e4e116"
+ARCHITECT_MAIN_HEAD = "2b9970212c75d873ab4dcb25ac1251dbb5e3a98a"
+ARCHITECT_MAIN_TREE = "bd7e027d014401e45c4149fdf1f3db3f020100b3"
 FUTURE_GATE_ENV = "P7C13_FUTURE_REAL_GATE"
 PERSISTENT_HOME = "/root/.codex_second"
 INSTALLED_EXECUTABLE = "/usr/local/bin/codex"
@@ -1851,6 +1853,167 @@ def _valid_owned_approval_capture(capture: ApprovalAuthorityCapture) -> bool:
     return c12.strict_p7c12_match(request, expected, [wire]) is c12.MatcherResult.MATCH_EXACT_P7_APPROVAL_COMMAND
 
 
+@dataclass(frozen=True)
+class Turn4GateResult:
+    """Content-free final facts for the owned Turn-4 observation window."""
+
+    passed: bool
+    terminal: Any | None
+    interrupt: Any | None
+    unexpected_request_count: int
+    same_tick: bool
+    active_proof: bool
+    request_observer_joined: bool
+    terminal_waiter_joined: bool
+
+
+def _turn4_task_fact(task: asyncio.Task[Any]) -> tuple[Any | None, bool]:
+    """Return a completed task fact and whether it faulted/cancelled."""
+    if task.cancelled():
+        return None, True
+    try:
+        return task.result(), False
+    except (asyncio.CancelledError, Exception):
+        return None, True
+
+
+async def _join_turn4_task(task: asyncio.Task[Any], *, timeout: float, stage: str) -> None:
+    """Cancel and join one owned waiter; never leave a detached task."""
+    if not task.done():
+        task.cancel()
+    try:
+        await asyncio.wait_for(task, timeout=timeout)
+    except asyncio.CancelledError:
+        return
+    except asyncio.TimeoutError as error:
+        raise PreparationGateError(f"{stage} nonconvergent") from error
+    except Exception:
+        # The exception is consumed here; the final gate is non-PASS.
+        return
+
+
+async def observe_owned_turn4(
+    *, client: Any, turn_lifecycle: Any, binding: TurnBinding, budget: EffectBudget,
+    active_timeout: float = REAL_STAGE_TIMEOUTS["turn4_active_observation"],
+    interrupt_timeout: float = REAL_STAGE_TIMEOUTS["turn4_interrupt_terminal"],
+    join_timeout: float = REAL_STAGE_TIMEOUTS["final_runtime_local_convergence"],
+) -> Turn4GateResult:
+    """Own terminal and protocol-request observers through Turn-4 convergence.
+
+    The request waiter only observes/dequeues the current client's next server
+    request. It has no response authority. Any completed request is therefore
+    a permanent non-PASS fact, including a request racing terminal completion.
+    """
+    if type(active_timeout) not in (int, float) or active_timeout <= 0:
+        raise PreparationGateError("Turn-4 active timeout invalid")
+    terminal_task = asyncio.create_task(turn_lifecycle.wait_turn(binding))
+    request_task = asyncio.create_task(client.next_server_request())
+    terminal: Any | None = None
+    interrupt: Any | None = None
+    unexpected_request_count = 0
+    same_tick = False
+    active_proof = False
+    observer_fault = False
+    terminal_fault = False
+
+    try:
+        done, _ = await asyncio.wait(
+            (terminal_task, request_task), timeout=active_timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            # Give both current-run waiters one scheduler turn before
+            # establishing ACTIVE/NONTERMINAL; this closes the same-slice race.
+            await asyncio.sleep(0)
+            done = {task for task in (terminal_task, request_task) if task.done()}
+
+        terminal_done = terminal_task in done or terminal_task.done()
+        request_done = request_task in done or request_task.done()
+        if request_done:
+            request_fact, observer_fault = _turn4_task_fact(request_task)
+            if not observer_fault:
+                # The object is intentionally not inspected or answered.
+                unexpected_request_count = 1
+            if terminal_done:
+                same_tick = True
+                terminal, terminal_fault = _turn4_task_fact(terminal_task)
+            else:
+                # An unexpected request can use the one exact interrupt only
+                # to terminate the owned active Turn safely.
+                try:
+                    budget.record("turn/interrupt")
+                    interrupt = await _await_owned(
+                        turn_lifecycle.interrupt_turn(binding),
+                        timeout=interrupt_timeout, stage="Turn-4 cleanup interrupt",
+                    )
+                except (PreparationGateError, Exception):
+                    terminal_fault = True
+                if terminal_task.done():
+                    terminal, terminal_fault = _turn4_task_fact(terminal_task)
+                else:
+                    try:
+                        terminal = await asyncio.wait_for(asyncio.shield(terminal_task), timeout=interrupt_timeout)
+                    except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                        terminal_fault = True
+        elif terminal_done:
+            # Terminal-before-active is a fail-closed zero-interrupt result.
+            terminal, terminal_fault = _turn4_task_fact(terminal_task)
+            await asyncio.sleep(0)
+            if request_task.done():
+                _, observer_fault = _turn4_task_fact(request_task)
+                if not observer_fault:
+                    unexpected_request_count = 1
+                same_tick = True
+        else:
+            active_proof = True
+            budget.record("turn/interrupt")
+            try:
+                interrupt = await _await_owned(
+                    turn_lifecycle.interrupt_turn(binding),
+                    timeout=interrupt_timeout, stage="Turn-4 interrupt",
+                )
+            except (PreparationGateError, Exception):
+                terminal_fault = True
+            if terminal_task.done():
+                terminal, terminal_fault = _turn4_task_fact(terminal_task)
+            else:
+                try:
+                    terminal = await asyncio.wait_for(asyncio.shield(terminal_task), timeout=interrupt_timeout)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    terminal_fault = True
+    finally:
+        # The request observer remains owned through terminal convergence.
+        await asyncio.sleep(0)
+        if request_task.done():
+            _, request_fault = _turn4_task_fact(request_task)
+            observer_fault = observer_fault or request_fault
+            if not request_fault:
+                unexpected_request_count = 1
+        if not terminal_task.done():
+            await _join_turn4_task(terminal_task, timeout=join_timeout, stage="Turn-4 terminal waiter")
+        if not request_task.done():
+            await _join_turn4_task(request_task, timeout=join_timeout, stage="Turn-4 request observer")
+
+    interrupt_ok = (
+        interrupt is not None
+        and getattr(interrupt, "status", None) in (TurnInterruptStatus.CONFIRMED, TurnInterruptStatus.RECONCILED)
+        and getattr(getattr(interrupt, "terminal_result", None), "status", None) is TurnTerminalStatus.FAILED
+    )
+    passed = (
+        active_proof and not observer_fault and not terminal_fault
+        and unexpected_request_count == 0
+        and interrupt_ok
+        and getattr(terminal, "status", None) is TurnTerminalStatus.FAILED
+        and terminal_task.done() and request_task.done()
+    )
+    return Turn4GateResult(
+        passed=passed, terminal=terminal, interrupt=interrupt,
+        unexpected_request_count=unexpected_request_count, same_tick=same_tick,
+        active_proof=active_proof, request_observer_joined=request_task.done(),
+        terminal_waiter_joined=terminal_task.done(),
+    )
+
+
 class CompleteFutureChildOrchestrator:
     """The complete future child traversal, with every effect pre-reserved."""
 
@@ -2061,26 +2224,14 @@ class ProductionRealChildOrchestrator:
         ), timeout=REAL_STAGE_TIMEOUTS["turn4_start"], stage="turn 4 start")
         if turn4.status is not TurnStartStatus.CONFIRMED or turn4.binding is None or turn4.binding.turn_id in {turn1.binding.turn_id, turn2.binding.turn_id, turn3.binding.turn_id}:
             raise PreparationGateError("Turn-4 actual distinct binding required")
-        terminal4_task = asyncio.create_task(resume_turns.wait_turn(turn4.binding))
-        try:
-            await asyncio.wait_for(asyncio.shield(terminal4_task), timeout=REAL_STAGE_TIMEOUTS["turn4_active_observation"])
-            raise PreparationGateError("Turn 4 terminal before active proof")
-        except asyncio.TimeoutError:
-            pass
-        try:
-            self.budget.record("turn/interrupt")
-            interrupt = await _await_owned(resume_turns.interrupt_turn(turn4.binding), timeout=REAL_STAGE_TIMEOUTS["turn4_interrupt_terminal"], stage="turn 4 interrupt")
-            if interrupt.status not in (TurnInterruptStatus.CONFIRMED, TurnInterruptStatus.RECONCILED) or interrupt.terminal_result is None or interrupt.terminal_result.status is not TurnTerminalStatus.FAILED:
-                raise PreparationGateError("definitive Turn-4 interrupt required")
-            if not terminal4_task.done():
-                await _await_owned(terminal4_task, timeout=REAL_STAGE_TIMEOUTS["turn4_interrupt_terminal"], stage="turn 4 terminal convergence")
-        finally:
-            if not terminal4_task.done():
-                terminal4_task.cancel()
-                try:
-                    await asyncio.wait_for(terminal4_task, timeout=REAL_STAGE_TIMEOUTS["final_runtime_local_convergence"])
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    raise PreparationGateError("Turn 4 terminal waiter nonconvergent")
+        turn4_gate = await observe_owned_turn4(
+            client=client, turn_lifecycle=resume_turns, binding=turn4.binding,
+            budget=self.budget,
+        )
+        if not turn4_gate.passed:
+            if turn4_gate.unexpected_request_count:
+                raise PreparationGateError("unexpected Turn-4 server request")
+            raise PreparationGateError("Turn-4 active/interrupt gate failed")
         await _await_owned(self.runtime_manager.shutdown_profile(profile_id), timeout=REAL_STAGE_TIMEOUTS["runtime_shutdown_before_scan"], stage="runtime shutdown before scan")
 
         material_markers = (memory_marker.encode(), response_marker.encode(), str(target).encode(), turn3_prompt.encode(), TURN4_STIMULUS.encode())
@@ -2766,6 +2917,11 @@ def production_read_only_boundary_preflight(
     external_users: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """Actual future-path preflight for mount aliases and owned external users."""
+    report_only_users = frozenset(("persistent_home", "repository", "controller_root"))
+    destructive_user_boundaries = frozenset((
+        "isolated_root", "isolated_sqlite", "isolated_logs", "controller_db",
+        "workdir", "approval_target", "ledger", "boot", "result",
+    ))
     normalized = {name: Path(os.path.abspath(os.fspath(path))) for name, path in boundaries.items()}
     if not normalized or "persistent_home" not in normalized or "repository" not in normalized:
         raise PreparationGateError("boundary set incomplete")
@@ -2796,10 +2952,23 @@ def production_read_only_boundary_preflight(
     if any(str(path) in mount_points for path in normalized.values()):
         raise PreparationGateError("mount alias unresolved")
     users = dict(external_users) if external_users is not None else _process_users_for_boundaries(normalized)
-    for name, count in users.items():
-        if name != "persistent_home" and count:
+    if not destructive_user_boundaries.issubset(normalized):
+        raise PreparationGateError("destructive boundary set incomplete")
+    if any(name not in report_only_users | destructive_user_boundaries for name in users):
+        raise PreparationGateError("unknown boundary user classification")
+    for count in users.values():
+        if type(count) is not int or count < 0:
+            raise PreparationGateError("boundary user count invalid")
+    for name in destructive_user_boundaries:
+        count = users.get(name, 0)
+        if count:
             raise PreparationGateError("owned external boundary user")
-    return {"mount_alias": "PASS", "external_users": users, "persistent_home_shared": "YES"}
+    return {
+        "mount_alias": "PASS", "external_users": users,
+        "report_only_user_boundaries": tuple(sorted(report_only_users)),
+        "destructive_user_boundaries": tuple(sorted(destructive_user_boundaries)),
+        "persistent_home_shared": "YES",
+    }
 
 
 def create_fresh_private_workdir(path: str | Path) -> TrustedWorkingDirectory:
@@ -2867,6 +3036,49 @@ class _FakeDelete:
 class _FailingScanner:
     def scan(self, profile: CodexProfile, thread_id: str):
         return scanner_module.PersistentProfileScanResult(0, 0, 0, 1)
+
+
+class _Turn4FakeProtocolClient:
+    """Injected queue-only client used by offline Turn-4 observer tests."""
+
+    def __init__(self) -> None:
+        self.requests: asyncio.Queue[Any] = asyncio.Queue()
+        self.response_calls = 0
+
+    async def next_server_request(self) -> Any:
+        return await self.requests.get()
+
+    async def respond_server_request(self, *_: Any, **__: Any) -> None:
+        self.response_calls += 1
+
+
+class _Turn4FakeLifecycle:
+    def __init__(self, binding: TurnBinding, *, terminal_ready: bool = False) -> None:
+        self.binding = binding
+        self.terminal_event = asyncio.Event()
+        if terminal_ready:
+            self.terminal_event.set()
+        self.terminal_status = TurnTerminalStatus.FAILED
+        self.interrupt_calls = 0
+        self.on_interrupt: Callable[[], Any] | None = None
+
+    async def wait_turn(self, binding: TurnBinding) -> TurnTerminalResult:
+        if binding != self.binding:
+            raise AssertionError("wrong Turn-4 binding")
+        await self.terminal_event.wait()
+        return TurnTerminalResult(binding, self.terminal_status, ())
+
+    async def interrupt_turn(self, binding: TurnBinding) -> TurnInterruptResult:
+        if binding != self.binding:
+            raise AssertionError("wrong Turn-4 interrupt binding")
+        self.interrupt_calls += 1
+        if self.on_interrupt is not None:
+            callback = self.on_interrupt()
+            if hasattr(callback, "__await__"):
+                await callback
+        self.terminal_event.set()
+        terminal = TurnTerminalResult(binding, TurnTerminalStatus.FAILED, ())
+        return TurnInterruptResult(TurnInterruptStatus.CONFIRMED, binding, terminal)
 
 
 class P7C13OfflineFlowTests(unittest.TestCase):
@@ -3070,6 +3282,141 @@ class P7C13OfflineFlowTests(unittest.TestCase):
             self.assertEqual(1, len(client.responses))
             self.assertEqual(1, budget.count("approval_responses"))
             self.assertEqual(1, budget.count("allow_responses"))
+
+    def test_turn4_no_request_active_interrupt_failed_terminal_passes(self) -> None:
+        async def scenario() -> Turn4GateResult:
+            client = _Turn4FakeProtocolClient()
+            lifecycle = _Turn4FakeLifecycle(TurnBinding("p", "thread", "turn-4"))
+            budget = EffectBudget()
+            budget.counts = {"approval_responses": 1, "allow_responses": 1}
+            return await observe_owned_turn4(
+                client=client, turn_lifecycle=lifecycle, binding=lifecycle.binding,
+                budget=budget, active_timeout=0.01, interrupt_timeout=0.1,
+            )
+
+        result = asyncio.run(scenario())
+        self.assertTrue(result.passed)
+        self.assertIs(result.interrupt.status, TurnInterruptStatus.CONFIRMED)
+        self.assertEqual(0, result.unexpected_request_count)
+        self.assertTrue(result.request_observer_joined)
+        self.assertTrue(result.terminal_waiter_joined)
+
+    def test_turn4_terminal_before_active_has_zero_interrupts(self) -> None:
+        async def scenario() -> tuple[Turn4GateResult, int]:
+            client = _Turn4FakeProtocolClient()
+            lifecycle = _Turn4FakeLifecycle(TurnBinding("p", "thread", "turn-4"), terminal_ready=True)
+            result = await observe_owned_turn4(
+                client=client, turn_lifecycle=lifecycle, binding=lifecycle.binding,
+                budget=EffectBudget(), active_timeout=0.1, interrupt_timeout=0.1,
+            )
+            return result, lifecycle.interrupt_calls
+
+        result, interrupt_calls = asyncio.run(scenario())
+        self.assertFalse(result.passed)
+        self.assertEqual(0, interrupt_calls)
+
+    def test_turn4_request_before_active_timeout_has_no_response_and_no_delete_eligibility(self) -> None:
+        async def scenario() -> tuple[Turn4GateResult, _Turn4FakeProtocolClient, EffectBudget, int]:
+            client = _Turn4FakeProtocolClient()
+            await client.requests.put(object())
+            lifecycle = _Turn4FakeLifecycle(TurnBinding("p", "thread", "turn-4"))
+            budget = EffectBudget()
+            budget.counts = {"approval_responses": 1, "allow_responses": 1}
+            result = await observe_owned_turn4(
+                client=client, turn_lifecycle=lifecycle, binding=lifecycle.binding,
+                budget=budget, active_timeout=0.1, interrupt_timeout=0.1,
+            )
+            return result, client, budget, lifecycle.interrupt_calls
+
+        result, client, budget, interrupt_calls = asyncio.run(scenario())
+        self.assertFalse(result.passed)
+        self.assertEqual(1, result.unexpected_request_count)
+        self.assertEqual(1, interrupt_calls)
+        self.assertEqual(0, client.response_calls)
+        self.assertEqual(1, budget.count("approval_responses"))
+        self.assertEqual(1, budget.count("allow_responses"))
+        self.assertEqual(0, budget.count("deny_responses"))
+
+    def test_turn4_request_during_interrupt_is_nonpass_without_response(self) -> None:
+        async def scenario() -> tuple[Turn4GateResult, _Turn4FakeProtocolClient]:
+            client = _Turn4FakeProtocolClient()
+            lifecycle = _Turn4FakeLifecycle(TurnBinding("p", "thread", "turn-4"))
+            async def request_during_interrupt() -> None:
+                await client.requests.put(object())
+                await asyncio.sleep(0)
+            lifecycle.on_interrupt = request_during_interrupt
+            result = await observe_owned_turn4(
+                client=client, turn_lifecycle=lifecycle, binding=lifecycle.binding,
+                budget=EffectBudget(), active_timeout=0.01, interrupt_timeout=0.1,
+            )
+            return result, client
+
+        result, client = asyncio.run(scenario())
+        self.assertFalse(result.passed)
+        self.assertEqual(1, result.unexpected_request_count)
+        self.assertEqual(0, client.response_calls)
+
+    def test_turn4_request_before_final_terminal_convergence_is_nonpass(self) -> None:
+        async def scenario() -> tuple[Turn4GateResult, _Turn4FakeProtocolClient]:
+            client = _Turn4FakeProtocolClient()
+            lifecycle = _Turn4FakeLifecycle(TurnBinding("p", "thread", "turn-4"))
+            async def request_before_terminal() -> None:
+                await client.requests.put(object())
+                await asyncio.sleep(0.01)
+            lifecycle.on_interrupt = request_before_terminal
+            result = await observe_owned_turn4(
+                client=client, turn_lifecycle=lifecycle, binding=lifecycle.binding,
+                budget=EffectBudget(), active_timeout=0.01, interrupt_timeout=0.1,
+            )
+            return result, client
+
+        result, client = asyncio.run(scenario())
+        self.assertFalse(result.passed)
+        self.assertEqual(1, result.unexpected_request_count)
+        self.assertEqual(0, client.response_calls)
+
+    def test_turn4_request_and_terminal_same_scheduler_slice_fail_closed(self) -> None:
+        async def scenario() -> tuple[Turn4GateResult, int]:
+            client = _Turn4FakeProtocolClient()
+            await client.requests.put(object())
+            lifecycle = _Turn4FakeLifecycle(TurnBinding("p", "thread", "turn-4"), terminal_ready=True)
+            result = await observe_owned_turn4(
+                client=client, turn_lifecycle=lifecycle, binding=lifecycle.binding,
+                budget=EffectBudget(), active_timeout=0.1, interrupt_timeout=0.1,
+            )
+            return result, lifecycle.interrupt_calls
+
+        result, interrupt_calls = asyncio.run(scenario())
+        self.assertFalse(result.passed)
+        self.assertTrue(result.same_tick)
+        self.assertEqual(0, interrupt_calls)
+
+    def test_turn4_observer_and_terminal_waiter_are_joined_without_detached_tasks(self) -> None:
+        async def scenario() -> Turn4GateResult:
+            client = _Turn4FakeProtocolClient()
+            lifecycle = _Turn4FakeLifecycle(TurnBinding("p", "thread", "turn-4"))
+            return await observe_owned_turn4(
+                client=client, turn_lifecycle=lifecycle, binding=lifecycle.binding,
+                budget=EffectBudget(), active_timeout=0.01, interrupt_timeout=0.1,
+            )
+
+        result = asyncio.run(scenario())
+        self.assertTrue(result.request_observer_joined)
+        self.assertTrue(result.terminal_waiter_joined)
+
+    def test_turn4_observer_path_has_no_response_or_approval_bridge_dispatch(self) -> None:
+        source = inspect.getsource(observe_owned_turn4)
+        self.assertIn("next_server_request", source)
+        self.assertNotIn("respond_server_request", source)
+        self.assertNotIn("CodexApprovalBridge", source)
+
+    def test_unexpected_turn4_request_blocks_controller_and_delete_dispatch(self) -> None:
+        source = inspect.getsource(ProductionRealChildOrchestrator.run_async)
+        gate = source.index("if not turn4_gate.passed")
+        controller = source.index("SqliteStorage.open", gate)
+        delete = source.index("service.delete", controller)
+        self.assertLess(gate, controller)
+        self.assertLess(gate, delete)
 
     def test_turn1_turn2_restart_exact_binding_and_marker_plan(self) -> None:
         flow = OfflineFutureFlow()
@@ -3338,15 +3685,61 @@ class P7C13OracleAndWatchdogTests(unittest.TestCase):
     def test_production_mount_alias_and_external_boundary_preflight(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c13-boundary-") as directory:
             root = Path(directory)
-            boundaries = {name: root / name for name in ("persistent_home", "repository", "isolated_root", "controller_root", "workdir", "approval_target", "ledger", "result")}
-            for name in ("persistent_home", "repository", "isolated_root", "controller_root"):
+            names = (
+                "persistent_home", "repository", "isolated_root", "isolated_sqlite",
+                "isolated_logs", "controller_root", "controller_db", "workdir",
+                "approval_target", "ledger", "boot", "result",
+            )
+            boundaries = {name: root / name for name in names}
+            for name in ("persistent_home", "repository", "isolated_root", "isolated_sqlite", "isolated_logs", "controller_root"):
                 boundaries[name].mkdir(mode=0o700)
             passed = production_read_only_boundary_preflight(boundaries, mountinfo="1 2 3 4 /other", external_users={name: 0 for name in boundaries} | {"persistent_home": 4})
             self.assertEqual("PASS", passed["mount_alias"])
-            with self.assertRaises(PreparationGateError):
-                production_read_only_boundary_preflight(boundaries, mountinfo="1 2 3 4 /other", external_users={name: 0 for name in boundaries} | {"controller_root": 1})
+            self.assertEqual(4, passed["external_users"]["persistent_home"])
+            for name in ("repository", "controller_root"):
+                with self.subTest(report_only=name):
+                    reported = production_read_only_boundary_preflight(
+                        boundaries, mountinfo="1 2 3 4 /other",
+                        external_users={key: 0 for key in boundaries} | {name: 2},
+                    )
+                    self.assertEqual(2, reported["external_users"][name])
+            for name in ("isolated_root", "isolated_sqlite", "isolated_logs", "controller_db", "workdir", "approval_target", "ledger", "boot", "result"):
+                with self.subTest(destructive=name), self.assertRaises(PreparationGateError):
+                    production_read_only_boundary_preflight(
+                        boundaries, mountinfo="1 2 3 4 /other",
+                        external_users={key: 0 for key in boundaries} | {name: 1},
+                    )
             with self.assertRaises(PreparationGateError):
                 production_read_only_boundary_preflight(boundaries, mountinfo=f"1 2 3 4 {boundaries['repository']}", external_users={name: 0 for name in boundaries})
+            with self.assertRaises(PreparationGateError):
+                production_read_only_boundary_preflight(boundaries, mountinfo=f"1 2 3 4 {boundaries['controller_root']}", external_users={name: 0 for name in boundaries})
+            repository_alias = dict(boundaries, repository=boundaries["persistent_home"])
+            with self.assertRaises(PreparationGateError):
+                production_read_only_boundary_preflight(repository_alias, mountinfo="1 2 3 4 /other", external_users={name: 0 for name in boundaries})
+            controller_alias = dict(boundaries, controller_db=boundaries["controller_root"])
+            with self.assertRaises(PreparationGateError):
+                production_read_only_boundary_preflight(controller_alias, mountinfo="1 2 3 4 /other", external_users={name: 0 for name in boundaries})
+
+    def test_repository_parent_executor_authority_is_report_only_and_owned_boundaries_block(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-boundary-users-") as directory:
+            root = Path(directory)
+            boundaries = {name: root / name for name in (
+                "persistent_home", "repository", "isolated_root", "isolated_sqlite",
+                "isolated_logs", "controller_root", "controller_db", "workdir",
+                "approval_target", "ledger", "boot", "result",
+            )}
+            for name in ("persistent_home", "repository", "isolated_root", "isolated_sqlite", "isolated_logs", "controller_root"):
+                boundaries[name].mkdir(mode=0o700)
+            users = {name: 0 for name in boundaries}
+            users["repository"] = 1  # simulated live parent/executor cwd
+            result = production_read_only_boundary_preflight(boundaries, mountinfo="1 2 3 4 /other", external_users=users)
+            self.assertEqual(1, result["external_users"]["repository"])
+            for name in ("workdir", "controller_db", "ledger"):
+                with self.subTest(boundary=name), self.assertRaises(PreparationGateError):
+                    production_read_only_boundary_preflight(
+                        boundaries, mountinfo="1 2 3 4 /other",
+                        external_users={**users, name: 1},
+                    )
 
     def test_real_proc_group_probe_reports_active_zombie_and_scan_error(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c13-proc-") as directory:
