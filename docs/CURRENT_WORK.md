@@ -106,55 +106,57 @@ Exact Codex 0.144.6 source explains the zero-approval result: workspace-write gr
 
 ## P7.C11 source-backed explicit-escalation successor
 
-Binding source-backed preparation contract:
+Binding source/stimulus contract:
 
 `docs/evidence/p7c11/P7C11_SOURCE_BACKED_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-12.md`
 
-Initial zero-effect candidate:
+Initial candidate `52d5a4d3a3e716dce32069afbb6b6bdf0fa4a07e` established the correct source-backed `/root` target and first-and-only explicit `sandbox_permissions=require_escalated` stimulus, but architect review rejected its command-approval success projection as over-broad.
 
-- commit `52d5a4d3a3e716dce32069afbb6b6bdf0fa4a07e`;
-- harness blob `dcc6fa05e551f5514ced8993976caa8a6fa1f606`;
-- evidence blob `960e59ad468868c8290d12312bff266ab520ba66`;
-- production source changed: NO;
-- real effects during prep: 0.
+Repair-1 is architect accepted:
 
-Accepted portions of the candidate:
+- executable commit `be98542b9bcbf99508784f229057698d85784367`;
+- executable tree `ec6433f02f9293273979fd5dfc3f3eff70f16fa4`;
+- harness blob `fc67299d80c3d617280975182c097a92cb863b92`;
+- Repair-1 evidence blob `febfb3e94b1b963956520f80d9fb1ff371f16c49`.
 
-- exact upstream 0.144.6 `RequireEscalated -> ExecApproval` route is frozen;
-- external target directly under `/root` is separated from `/tmp`, `$TMPDIR`, cwd, run root, repository, persistent Codex home, state/controller roots and `/root/.codexcontrol`;
-- prompt requires first-and-only shell call, exact `touch <target>`, explicit `sandbox_permissions=require_escalated`, no default-sandbox first attempt, no alternate tool/path/network/retry;
-- DENY-only/no-ALLOW, root-only wire authority and all P7.C10 state/runtime/process/journal gates are carried forward.
+Repair-1 accepted authority:
 
-Architect review found a false-positive acceptance defect: `COMMAND_APPROVAL_OBSERVED_AND_DENIED` can currently be projected from any command-kind request plus any DENY attempt, even when exact thread/Turn/cwd wire authority is absent or the response is `RESPONSE_UNKNOWN`. Parent/child validators also do not bind this success class to the authoritative exact request and confirmed DENY, and parent final authority does not independently bind the child target hash to the parent-selected exact target.
+- root-only first-capture wire authority is correlated to exactly one observed command request by local sequence and wire SHA-256;
+- preferred success requires exact COMMAND_EXECUTION thread/Turn/cwd identity;
+- DENY intent/result carries that request's ordinal and the authoritative request must resolve to `DENIED_CONFIRMED`;
+- `RESPONSE_UNKNOWN`, wrong identity/kind, missing wire authority or non-exact target reference cannot become preferred success;
+- preferred command success requires exact target-token authority, established wire-vector reconstruction, ALLOW=0, terminalized owners and absent target;
+- child authority exposes only sanitized command-correlation facts;
+- parent independently hashes its selected external target, binds it to the child target SHA-256 and re-observes exact target absence;
+- zero-request/non-success outcomes remain finite observations and are not silently promoted to command-approval success.
 
-Architect review:
+Architect acceptance:
 
-`docs/evidence/p7c11/P7C11_SOURCE_BACKED_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_REVIEW_2026-09-12.md`
+`docs/evidence/p7c11/P7C11_SOURCE_BACKED_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_ARCHITECT_ACCEPTANCE_2026-09-12.md`
 
-Frozen Repair-1 contract:
-
-`docs/evidence/p7c11/P7C11_SOURCE_BACKED_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_CONTRACT_2026-09-12.md`
+The repository-wide test attempt still encounters historical P7.C7–P7.C10 static checks because their consumed one-shot latch files correctly remain present. Those immutable latches must not be deleted or rewritten to manufacture green historical tests. P7.C11 itself passed its focused suite and the complete non-real regression suite.
 
 ## Current executable slice
 
-**P7.C11 preparation Repair-1 — NEXT / ZERO REAL EFFECT.**
+**P7.C11 one-shot real source-backed explicit-escalation DENY-only approval probe — AUTHORIZED UNDER EXACT SNAPSHOT ONLY.**
 
-Repair-1 must preserve the source-backed `/root` target and explicit `require_escalated` prompt while fixing only evidence correlation and success classification:
+Binding execution contract:
 
-- correlate root-only exact command capture to one observed request;
-- correlate confirmed DENY to that same authoritative request;
-- `RESPONSE_UNKNOWN` must not count as command-approval success;
-- wrong identity/kind or unrelated command must not count as success;
-- preferred success requires exact target reference and valid wire authority;
-- parent must independently bind child target SHA-256 to its own target authority;
-- zero-request and other non-success empirical outcomes remain finite normal observations;
-- matcher/hard delete remain unauthorized.
+`docs/evidence/p7c11/P7C11_ONE_SHOT_REAL_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-12.md`
 
-`P7C11_PREP_CANDIDATE=REWORK_REQUIRED`
+Executable snapshot:
 
-`P7C11_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+`HEAD=be98542b9bcbf99508784f229057698d85784367`
 
-`P7C11_REAL_EXECUTION_AUTHORIZED=NO`
+`TREE=ec6433f02f9293273979fd5dfc3f3eff70f16fa4`
+
+`HARNESS_BLOB=fc67299d80c3d617280975182c097a92cb863b92`
+
+The real probe is one-shot. It asks for exactly one `touch <external-target>` shell command with `sandbox_permissions=require_escalated`; every approval is DENY; the external target must remain absent. A zero-request or other finite empirical outcome remains valid evidence but is not command-approval acceptance.
+
+`P7C11_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
+
+`P7C11_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
 
 `P7C11_MATCHER_AUTHORIZED=NO`
 
