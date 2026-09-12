@@ -119,21 +119,41 @@ The generic `RecoveryJournal._safe()` filter rejects strings containing `turn_id
 
 `P7C9_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
+## P7.C10 schema-aware journal successor
+
+Preparation is architect accepted:
+
+- executable commit `3732134246464df899837a3c499c86c52270b038`;
+- executable tree `68be37c8a5d0aa132199f8b2782618638a07b87e`;
+- harness blob `0a8611e72e8a7f0d368a3b391f2025e05790d3f5`.
+
+Architect acceptance:
+
+`docs/evidence/p7c10/P7C10_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_ACCEPTANCE_2026-09-12.md`
+
+Accepted P7.C10 authority includes:
+
+- field-aware RecoveryJournal writer/reader validation with a finite exact structural event allowlist;
+- exact structural `TURN_ID_AUTHORITY=ESTABLISHED` accepted while raw thread/Turn IDs, paths, wire plaintext and prompt/response routes remain closed;
+- future real ordering confirmed Turn -> in-memory Turn authority -> durable Turn authority -> durable observer-armed record -> observer use;
+- normal child and parent success independently require exact durable Turn chronology;
+- all accepted P7.C9 state-root worker/provisioning, P7.C8 runtime-acquisition containment, DENY-only, immutable journal, exact `1/1/1`, zero resume/interrupt/delete/read/list, one-child/no-retry, process-group and boundary gates remain binding.
+
 ## Current executable slice
 
-**P7.C10 DENY-only approval-probe preparation — NEXT / ZERO REAL EFFECT.**
+**P7.C10 one-shot real DENY-only approval probe — AUTHORIZED UNDER EXACT SNAPSHOT ONLY.**
 
-P7.C10 is a new successor, not a retry of P7.C9. Binding contract:
+Binding execution contract:
 
-`docs/evidence/p7c10/P7C10_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-12.md`
+`docs/evidence/p7c10/P7C10_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-12.md`
 
-The central correction is schema-aware RecoveryJournal validation: exact structural event `TURN_ID_AUTHORITY` must be accepted and durably readable, while raw thread/Turn IDs, wire commands, paths, prompts and other protected payloads remain impossible to persist.
+The real probe may execute only from detached HEAD `3732134246464df899837a3c499c86c52270b038`, tree `68be37c8a5d0aa132199f8b2782618638a07b87e`, harness blob `0a8611e72e8a7f0d368a3b391f2025e05790d3f5`.
 
-P7.C10 must preserve production state-root provisioning/validation, explicit state-root worker ownership, bounded runtime acquisition/containment, DENY-only approval handling, exact normal `1/1/1`, zero resume/interrupt/delete/read/list, immutable journal identity, one-child/no-retry process authority and exact source/boundary/result gates.
+Once started, P7.C10 is consumed under every outcome. The probe remains observational and never automatically authorizes matcher or hard-delete execution.
 
-`P7C10_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+`P7C10_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
 
-`P7C10_REAL_EXECUTION_AUTHORIZED=NO`
+`P7C10_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
 
 `P7C10_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
