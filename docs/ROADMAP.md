@@ -57,19 +57,24 @@ Status authority: architect only. `[DONE]` means architect-verified GitHub evide
 - [PASS] State-root validate `CONFIRMED/TERMINALIZED`.
 - [PASS] Runtime acquire initial/final `CONFIRMED`.
 - [FACT] Child returned nonzero under `PROCESS_COMPLETED`; group active=0, scan errors=0, no TERM/KILL; one child, zero retry.
-- [FACT] Normal result absent; child result absent.
-- [NOT ESTABLISHED] Exact post-acquire failure stage and fresh-thread/Turn/approval disposition.
-
-Architect review:
-
-`docs/evidence/p7c9/P7C9_CONSUMED_REAL_DENY_ONLY_APPROVAL_PROBE_ARCHITECT_REVIEW_2026-09-11.md`
 
 #### Retained-run forensic
 
-- [NEXT / ZERO REAL EFFECT] Inspect only retained RecoveryJournal, safe run-root state, read-only isolated log/SQLite evidence and exact filesystem correlation into persistent Codex session artifacts.
-- [FORBIDDEN] No Codex/app-server process, model/list, thread/start/resume/read/list/delete, turn/start/interrupt, approval response, process signal, or retained-state cleanup.
-- [GOAL] Establish the last durable stage after runtime acquire: model/list, thread/start, turn/start, approval/terminal observation, shutdown, boundary, or child-result publication.
-- [GOAL] Classify fresh-thread and approval/wire disposition without inference from missing normal result.
+- [DONE / ZERO REAL EFFECT] forensic evidence head `462e441cde02f9d21212dd583b8d965a2b1858cc`, blob `de0903e3e2668f79d39b3e44d690bdd016a5115a`.
+- [PASS] model/list returned; model catalog confirmed.
+- [PASS] fresh thread/start confirmed.
+- [PASS] fresh turn/start confirmed.
+- [PASS] persistent-session correlation proves one fresh Turn; terminal `ABORTED`.
+- [FACT] command item count 0; approval request/decision/response structural counts 0; no wire authority; sentinel absent; workdir empty.
+- [PASS] runtime shutdown confirmed; boundary proof recorded; child-result write never reached.
+- [ROOT CAUSE] Harness `RecoveryJournal._safe()` rejects any string containing `turn_id`; the structural event token `TURN_ID_AUTHORITY` therefore throws `JOURNAL_VALUE_UNSAFE` after confirmed turn/start and before approval observer arming.
+- [CLASSIFICATION] `FAILURE_CLASS=HARNESS_FAILURE`; production defect `NO`.
+- [DISPOSITION] fresh thread and Turn are evidence-only; no resume/read/list/delete.
+- [CLOSED] P7.C9 permanently consumed.
+
+Architect root-cause review:
+
+`docs/evidence/p7c9/P7C9_CONSUMED_REAL_DENY_ONLY_APPROVAL_PROBE_FORENSIC_ARCHITECT_REVIEW_2026-09-12.md`
 
 `P7C9_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
@@ -80,6 +85,25 @@ Architect review:
 `P7C9_MATCHER_AUTHORIZED=NO`
 
 `P7C9_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
+
+### P7.C10 schema-aware journal successor
+
+Binding preparation contract:
+
+`docs/evidence/p7c10/P7C10_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-12.md`
+
+- [NEXT / ZERO REAL EFFECT] Create a new P7.C10 probe harness with new token/profile/run/global-authority namespace.
+- [FIX] RecoveryJournal validation must be schema-aware: exact structural event `TURN_ID_AUTHORITY` must be accepted while raw thread/Turn IDs and other protected payloads remain impossible to persist.
+- [FIX] Prove exact ordering: confirmed Turn -> in-memory Turn authority -> durable `TURN_ID_AUTHORITY` -> durable `APPROVAL_OBSERVER_ARMED` -> observer creation/use.
+- [BOUND] Preserve P7.C9 production state-root provisioning/validation, explicit state-root worker ownership, P7.C8 runtime-acquire containment, DENY-only handling, immutable journal identity, exact normal `1/1/1`, zero resume/interrupt/delete/read/list, one child/no retry and exact process-group/boundary/result gates.
+- [BLOCKED] Any real P7.C10 probe until zero-effect prep is independently architect accepted and exact executable SHA/tree are frozen.
+- [BLOCKED] Matcher and hard-delete execution pending accepted real evidence.
+
+`P7C10_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+
+`P7C10_REAL_EXECUTION_AUTHORIZED=NO`
+
+`P7C10_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
 ## P8 — deployment packaging/rollback
 
