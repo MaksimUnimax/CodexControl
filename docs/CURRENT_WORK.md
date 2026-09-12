@@ -1,6 +1,6 @@
 # Current work authority
 
-Date: 2026-09-11
+Date: 2026-09-12
 
 ## Accepted baseline
 
@@ -59,8 +59,6 @@ The durable runtime-acquire result was `RUNTIME_ACQUIRE_SAFE_EXCEPTION`, categor
 
 ## P7.C9 production-provisioned successor
 
-Initial prep `097c8809a90eaca5d7d2074b35dc5e73ae9762c1` correctly moved future real state-root creation to production `IsolatedStateRoot.provision(profile)` followed by `validate(profile)`, but architect review required Repair-1 for parent-category shadowing and state-root worker ownership.
-
 Repair-1 is architect accepted:
 
 - executable commit `6cefa7772f00f6b1d67b9c6ecfd3770009d77c7f`;
@@ -68,35 +66,48 @@ Repair-1 is architect accepted:
 - harness blob `44271459c2b4523f97551ade93563aee96def1c3`;
 - Repair-1 evidence blob `58d505e7c6e4e49ad01376ce9ceb7626554d9a9f`.
 
-Architect acceptance:
+The one-shot real P7.C9 probe executed exactly once and is permanently consumed. Sanitized real evidence commit: `bf7f870c6df640bb26e51fa9c05a2b55e44e5489`. Retained-run forensic evidence head: `462e441cde02f9d21212dd583b8d965a2b1858cc`, blob `de0903e3e2668f79d39b3e44d690bdd016a5115a`.
 
-`docs/evidence/p7c9/P7C9_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_ARCHITECT_ACCEPTANCE_2026-09-11.md`
+Accepted forensic facts:
 
-The one-shot real P7.C9 probe executed exactly once and is permanently consumed. Sanitized evidence commit: `bf7f870c6df640bb26e51fa9c05a2b55e44e5489`.
-
-Durable parent facts establish:
-
-- state-root provision `CONFIRMED`, owner `TERMINALIZED`;
-- state-root validation `CONFIRMED`, owner `TERMINALIZED`;
+- production state-root provision `CONFIRMED`, owner `TERMINALIZED`;
+- production state-root validation `CONFIRMED`, owner `TERMINALIZED`;
 - runtime acquire initial/final `RUNTIME_ACQUIRE_CONFIRMED`;
-- no runtime acquire error/cleanup authority;
-- child exited nonzero under `PROCESS_COMPLETED`;
-- process group quiescent, no TERM/KILL, one child, zero retries;
-- normal result and child result absent.
+- model/list returned and model catalog confirmed;
+- fresh thread/start confirmed;
+- fresh primary turn/start confirmed;
+- persistent-session evidence confirms exactly one fresh P7.C9 Turn;
+- fresh Turn terminal status `ABORTED`;
+- command item count `0`;
+- approval request/decision/response structural counts all `0`;
+- no wire authority, workdir empty, sentinel absent;
+- runtime shutdown confirmed and boundary proof durably recorded;
+- child-result write not reached;
+- process group quiescent, no TERM/KILL, one child, zero retries.
 
-Architect review:
+Architect root-cause review:
 
-`docs/evidence/p7c9/P7C9_CONSUMED_REAL_DENY_ONLY_APPROVAL_PROBE_ARCHITECT_REVIEW_2026-09-11.md`
+`docs/evidence/p7c9/P7C9_CONSUMED_REAL_DENY_ONLY_APPROVAL_PROBE_FORENSIC_ARCHITECT_REVIEW_2026-09-12.md`
 
-The exact post-acquire failure stage remains not established by the global parent outcome. No fresh-thread, Turn, approval, wire or sentinel fact may be inferred from the missing normal result.
+Exact P7.C9 root cause:
 
-## Current executable slice
+`FAILURE_CLASS=HARNESS_FAILURE`
 
-**P7.C9 consumed real probe — ZERO-EFFECT RETAINED-RUN FORENSIC NEXT.**
+`ROOT_CAUSE_CLASS=RECOVERY_JOURNAL_STRUCTURAL_EVENT_REJECTED_BY_GENERIC_SECRET_FILTER`
 
-The real probe is permanently consumed. No rerun, new thread, new Turn, approval response, app-server read/list, process signal or retained-state cleanup is authorized.
+`ROOT_CAUSE_EVENT=TURN_ID_AUTHORITY`
 
-The forensic must inspect only retained P7.C9 recovery journal, safe filesystem state, isolated logs/SQLite where read-only, and exact filesystem correlation into persistent Codex session artifacts. Its purpose is to determine the last durable post-acquire stage and fresh-thread/approval disposition without any new Codex effect.
+`ROOT_CAUSE_EXCEPTION_CLASS=JOURNAL_VALUE_UNSAFE`
+
+The generic `RecoveryJournal._safe()` filter rejects strings containing `turn_id`; the harness attempted to append structural event `TURN_ID_AUTHORITY`, so the structural event token was rejected even though no raw Turn ID was present. The exception occurred after turn/start confirmation and before approval observer arming, then the `finally` path shut down the runtime and recorded boundary proof. Production defect is not established.
+
+`P7C9_FRESH_THREAD_DISPOSITION=FRESH_THREAD_CONFIRMED_EVIDENCE_ONLY`
+
+`P7C9_FRESH_TURN_DISPOSITION=FRESH_TURN_CONFIRMED_EVIDENCE_ONLY_ABORTED`
+
+`P7C9_APPROVAL_DISPOSITION=APPROVAL_NOT_REACHED_PROVED`
+
+`P7C9_PRODUCTION_DEFECT_ESTABLISHED=NO`
 
 `P7C9_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
@@ -107,5 +118,23 @@ The forensic must inspect only retained P7.C9 recovery journal, safe filesystem 
 `P7C9_MATCHER_AUTHORIZED=NO`
 
 `P7C9_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
+
+## Current executable slice
+
+**P7.C10 DENY-only approval-probe preparation — NEXT / ZERO REAL EFFECT.**
+
+P7.C10 is a new successor, not a retry of P7.C9. Binding contract:
+
+`docs/evidence/p7c10/P7C10_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-12.md`
+
+The central correction is schema-aware RecoveryJournal validation: exact structural event `TURN_ID_AUTHORITY` must be accepted and durably readable, while raw thread/Turn IDs, wire commands, paths, prompts and other protected payloads remain impossible to persist.
+
+P7.C10 must preserve production state-root provisioning/validation, explicit state-root worker ownership, bounded runtime acquisition/containment, DENY-only approval handling, exact normal `1/1/1`, zero resume/interrupt/delete/read/list, immutable journal identity, one-child/no-retry process authority and exact source/boundary/result gates.
+
+`P7C10_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+
+`P7C10_REAL_EXECUTION_AUTHORIZED=NO`
+
+`P7C10_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
 P8/P9 remain blocked until real P7 acceptance is architect accepted.
