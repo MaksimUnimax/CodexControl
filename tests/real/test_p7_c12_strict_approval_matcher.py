@@ -489,12 +489,56 @@ def project_retained_authority(
     command = wire.get("wire_command_plaintext")
     _projection_require(_sha256(command) == wire_sha if isinstance(command, str) else False, "WIRE_COMMAND_SHA_MISMATCH")
 
+    # The sanitized child result is an independent retained observation.  Do
+    # not construct matcher inputs from the wire until every child capture
+    # fact has been bound to the journal and root-only wire authorities.
+    child = fixture.child_result
+    _projection_require(isinstance(child, Mapping), "CHILD_RESULT_INVALID")
+    _projection_require(
+        child.get("authoritative_command_capture_established") is True,
+        "CHILD_CAPTURE_NOT_ESTABLISHED",
+    )
+    child_ordinal = child.get("authoritative_command_request_ordinal")
+    _projection_require(
+        type(child_ordinal) is int and child_ordinal == ordinal,
+        "CHILD_REQUEST_ORDINAL_MISMATCH",
+    )
+    child_local_sequence = child.get("authoritative_command_local_sequence")
+    _projection_require(
+        type(child_local_sequence) is int and child_local_sequence == local_sequence,
+        "CHILD_LOCAL_SEQUENCE_MISMATCH",
+    )
+    child_kind = child.get("authoritative_command_kind")
+    _projection_require(
+        child_kind == "command_execution"
+        and child_kind == journal_request.get("kind")
+        and child_kind == wire.get("request_kind"),
+        "CHILD_KIND_MISMATCH",
+    )
+    for key, reason in (
+        ("authoritative_command_thread_match", "CHILD_THREAD_MATCH_INVALID"),
+        ("authoritative_command_turn_match", "CHILD_TURN_MATCH_INVALID"),
+        ("authoritative_command_cwd_match", "CHILD_CWD_MATCH_INVALID"),
+    ):
+        _projection_require(child.get(key) is True, reason)
+    child_wire_sha = child.get("authoritative_command_wire_sha256")
+    _projection_require(
+        _valid_sha(child_wire_sha)
+        and child_wire_sha == journal_wire_sha
+        and child_wire_sha == wire_sha,
+        "CHILD_WIRE_SHA_MISMATCH",
+    )
+    _projection_require(
+        child.get("authoritative_command_deny_status") == "DENIED_CONFIRMED",
+        "CHILD_DENY_STATUS_INVALID",
+    )
+
     # Identity hashes are projected only after the journal has proven all three matches.
     target = _candidate_target_from_wire(command, retained=retained_target_shape)
     candidate_target_sha = _sha256(target)
     _projection_require(wire["expected_sentinel_path_sha256"] == candidate_target_sha, "WIRE_TARGET_SHA_MISMATCH")
 
-    child_hash = fixture.child_result.get("target_sentinel_path_sha256")
+    child_hash = child.get("target_sentinel_path_sha256")
     _projection_require(_valid_sha(child_hash) and child_hash == candidate_target_sha, "CHILD_TARGET_SHA_MISMATCH")
     if fixture.parent_result is not None:
         parent = fixture.parent_result
@@ -567,7 +611,18 @@ def _synthetic_retained_authority() -> RetainedAuthorityFixture:
         "capture_status": "CAPTURED_ROOT_ONLY",
     }
     expected_target_sha = wire.expected_target_sha256
-    child = {"target_sentinel_path_sha256": expected_target_sha}
+    child = {
+        "target_sentinel_path_sha256": expected_target_sha,
+        "authoritative_command_capture_established": True,
+        "authoritative_command_request_ordinal": 1,
+        "authoritative_command_local_sequence": 1,
+        "authoritative_command_kind": "command_execution",
+        "authoritative_command_thread_match": True,
+        "authoritative_command_turn_match": True,
+        "authoritative_command_cwd_match": True,
+        "authoritative_command_wire_sha256": wire.command_sha256,
+        "authoritative_command_deny_status": "DENIED_CONFIRMED",
+    }
     parent = {
         "target_sentinel_path_sha256": expected_target_sha,
         "parent_target_sentinel_path_sha256": expected_target_sha,
@@ -633,6 +688,37 @@ class P7C12RetainedAuthorityProjectionTests(unittest.TestCase):
             with self.subTest(case=label):
                 with self.assertRaises(AuthorityProjectionError):
                     project_retained_authority(corrupted)
+
+    def test_repair2_child_capture_authority_corruption_matrix_fails_before_match(self) -> None:
+        def mutate_child(**changes: object) -> RetainedAuthorityFixture:
+            base = _synthetic_retained_authority()
+            return RetainedAuthorityFixture(
+                base.journal_records,
+                base.wire,
+                {**base.child_result, **changes},
+                base.parent_result,
+                base.parent_outcome,
+            )
+
+        cases = (
+            ("capture established false", {"authoritative_command_capture_established": False}),
+            ("request ordinal wrong", {"authoritative_command_request_ordinal": 2}),
+            ("local sequence wrong", {"authoritative_command_local_sequence": 2}),
+            ("kind wrong", {"authoritative_command_kind": "file_change"}),
+            ("thread match false", {"authoritative_command_thread_match": False}),
+            ("Turn match false", {"authoritative_command_turn_match": False}),
+            ("cwd match false", {"authoritative_command_cwd_match": False}),
+            ("wire SHA wrong", {"authoritative_command_wire_sha256": "4" * 64}),
+            ("DENY status unknown", {"authoritative_command_deny_status": "RESPONSE_UNKNOWN"}),
+            ("DENY status absent", {"authoritative_command_deny_status": None}),
+            ("local sequence type invalid", {"authoritative_command_local_sequence": "1"}),
+            ("ordinal type invalid", {"authoritative_command_request_ordinal": "1"}),
+        )
+        self.assertEqual(len(cases), 12)
+        for label, changes in cases:
+            with self.subTest(case=label):
+                with self.assertRaises(AuthorityProjectionError):
+                    project_retained_authority(mutate_child(**changes))
 
 
 class P7C12RetainedGoldenOfflineTests(unittest.TestCase):

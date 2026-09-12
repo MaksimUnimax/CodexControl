@@ -1,18 +1,19 @@
-# P7.C12 strict approval matcher preparation — Repair-1 evidence — 2026-09-12
+# P7.C12 strict approval matcher preparation — Repair-2 evidence — 2026-09-12
 
 ## Scope and lineage
 
-Repair-1 is an offline, test-only retained-golden-authority repair. No real
-probe, app-server, RPC, approval response, target operation, retained-file
-rewrite, hard delete, P8 work, or P9 work was performed.
+Repair-2 is a narrow, offline, test-only retained-authority projection repair.
+No real Codex process, app-server, RPC, approval response, target operation,
+retained-file rewrite, hard delete, P8 work, or P9 work was performed. The
+accepted strict command matcher grammar was preserved.
 
-REPAIR_BRANCH=impl-p7-c12-strict-approval-matcher-prep-repair1-2026-09-12
-REPAIR1_BASE_HEAD=4d57b95650c972d26baa33c51f80a85a70b17564
-REPAIR1_BASE_TREE=e7810d891e73dfc93a274053a8f431c5fcb2c022
-ARCHITECT_MAIN_HEAD=ab778b397ed478c8e24cf3408d821e97050e851a
-ARCHITECT_MAIN_TREE=897f70d220b6a2f12c0938738fb59325f51d2ef5
+REPAIR_BRANCH=impl-p7-c12-strict-approval-matcher-prep-repair2-2026-09-12
+REPAIR2_BASE_HEAD=a2281b3839c4dcb7f85218e95034510c25c80956
+REPAIR2_BASE_TREE=9b583139f3100e55ae4224f71b2819182d71e6d1
+REPAIR1_MATCHER_BLOB=e3a94659dd6765f5d6fe5d35aa6b5e65172720f1
+ARCHITECT_MAIN_HEAD=e9b007adb8580621372ecc338776be9f34d73852
+ARCHITECT_MAIN_TREE=2104662dd74aaf5cb12243d4e4416c05a8a316d6
 ORIGIN_MAIN_AUTHORITY=UNCHANGED
-ORIGINAL_MATCHER_BLOB=00ba41a13ad492179989d97c7b5dc59f671b4883
 
 P7C11_FORENSIC_COMMIT=5f1bef2045dd526e22f9b3fb24d42c9f4827962a
 P7C11_FORENSIC_EVIDENCE_BLOB=4e56f592f99f16182169b0fb6ec68f304b506be5
@@ -22,26 +23,28 @@ P7C11_ACCEPTED_HARNESS_BLOB=fc67299d80c3d617280975182c097a92cb863b92
 
 ## Changed-file authority
 
-Allowed tracked paths changed by Repair-1:
+Allowed tracked paths changed by Repair-2:
 
 - `tests/real/test_p7_c12_strict_approval_matcher.py`
 - `docs/evidence/p7c12/P7C12_STRICT_APPROVAL_MATCHER_PREP_EVIDENCE_2026-09-12.md`
 
-NEW_MATCHER_BLOB=e3a94659dd6765f5d6fe5d35aa6b5e65172720f1
+NEW_MATCHER_BLOB=f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1
 HELPER_BLOB=NONE
 PRODUCTION_SRC_CHANGES=NONE
 HISTORICAL_P7C6_P7C11_CHANGES=NONE
+REPAIR2_LINEAR_PARENT=a2281b3839c4dcb7f85218e95034510c25c80956
 PREEXISTING_UNTRACKED_FILE=tests/real/__init__.py
 PREEXISTING_UNTRACKED_FILE_HANDLING=PRESERVED_UNSTAGED_UNMODIFIED
 
-## Matcher and correlation repair
+## Matcher grammar preservation
 
-The accepted strict matcher grammar is unchanged: exact command kind,
-ordinal/local sequence, thread/Turn/cwd identity, one wire, SHA binding,
-canonical `shlex` round trip, vector length 3, `/bin/bash`, `-lc`, literal
-two-token `touch <target>`, one target occurrence, exact inner tokens, and
-fail-closed rejection of alternate, compound, redirect, expansion, wildcard,
-wrapper, retry, and equivalent-executable forms.
+The accepted matcher remains pure and fail-closed: exact
+`COMMAND_EXECUTION`, ordinal/local sequence and identity equality, exactly one
+wire, command SHA binding, canonical `shlex` round trip, exactly three outer
+tokens, exact `/bin/bash`, exact `-lc`, literal two-token `touch <target>`,
+exactly one target occurrence, and rejection of substring, compound,
+redirect, expansion, wildcard, wrapper, retry, and equivalent-executable
+forms.
 
 CORRELATION_AUTHORITY_FIELD=REMOVED_FROM_EXPECTED_REQUEST_WIRE_AND_FIXTURES
 CORRELATION_PROOF_FIELDS=ORDINAL_LOCAL_SEQUENCE_KIND_THREAD_TURN_CWD_WIRE_SHA
@@ -50,17 +53,35 @@ MATCHER_SENDS_APPROVAL_RESPONSE=NO
 MATCHER_EXECUTES_COMMAND=NO
 FINITE_MATCHER_CLASSES=11
 
-## Retained authority projection
+## Repair-2 child capture binding
 
-The retained golden replay reads these sources separately through the accepted
-bounded/no-follow readers:
+The retained projection now validates the sanitized child result before any
+wire identity, local sequence, or command SHA is projected into
+`CapturedRequest`, `ExpectedAuthority`, or `CorrelatedWireRecord`.
+
+CHILD_CAPTURE_ESTABLISHED_BINDING=PASS
+CHILD_REQUEST_ORDINAL_BINDING=PASS
+CHILD_LOCAL_SEQUENCE_BINDING=PASS
+CHILD_KIND_BINDING=PASS
+CHILD_IDENTITY_FLAGS_BINDING=PASS
+CHILD_WIRE_SHA_BINDING=PASS
+CHILD_DENY_STATUS_BINDING=PASS
+CHILD_DENY_STATUS_REQUIRED=DENIED_CONFIRMED
+CHILD_PROJECTION_PRECEDES_MATCHER_INPUTS=PASS
+
+The gates require capture establishment, child ordinal equality with the
+unique journal request ordinal, child local-sequence equality with the
+root-only wire sequence, command kind agreement across child/journal/wire,
+all three child identity flags true, child/journal/wire command SHA equality,
+and child `DENIED_CONFIRMED` status.
+
+## Preserved independent authority gates
 
 REQUEST_SIDE_AUTHORITY=RecoveryJournal
 WIRE_SIDE_AUTHORITY=ROOT_ONLY_WIRE
-CHILD_TARGET_AUTHORITY=PROBE_CHILD_RESULT
+CHILD_AUTHORITY=SANITIZED_CHILD_RESULT
 PARENT_TARGET_AUTHORITY=GLOBAL_PARENT_RESULT
 PARENT_OUTCOME_AUTHORITY=GLOBAL_PARENT_OUTCOME
-
 JOURNAL_REQUEST_RECORD_COUNT=1
 JOURNAL_REQUEST_RECORD_RESULT=APPROVAL_REQUEST_1_OBSERVED_VALIDATED
 JOURNAL_REQUEST_KIND=COMMAND_EXECUTION
@@ -69,60 +90,54 @@ JOURNAL_IDENTITY_TURN_MATCH=TRUE
 JOURNAL_IDENTITY_CWD_MATCH=TRUE
 JOURNAL_SENTINEL_REFERENCE_CLASS=EMBEDDED_OCCURRENCE
 JOURNAL_TO_WIRE_SHA_BINDING=PASS
-REQUEST_WIRE_INDEPENDENT_BINDING=PASS
-
-Wire identity hashes are projected into matcher objects only after the
-independent journal flags and journal-to-wire SHA equality pass. The matcher
-itself reads no files.
-
-DENY_REQUEST_ORDINAL=1
-DENY_DISPATCH_INTENT_COUNT=1
-DENY_RESULT_COUNT=1
-DENY_RESULT=DENIED_CONFIRMED
+DENY_CHRONOLOGY_BINDING=PASS
 DENY_REQUEST_BEFORE_INTENT=PASS
 DENY_INTENT_BEFORE_RESULT=PASS
-DENY_CHRONOLOGY_BINDING=PASS
-
-The dispatch intent is not treated as completion authority. Wrong ordinal,
-attempt mismatch, unknown result, duplicate result, and reordered chronology
-all fail closed before a matcher projection is returned.
-
-Candidate target reconstruction is private in memory and uses the validated
-wire grammar. No target plaintext is published.
-
+DENY_INTENT_COUNT=1
+DENY_CONFIRMED_RESULT_COUNT=1
+ATTEMPT_EQUALITY=PASS
+TARGET_MULTI_AUTHORITY_BINDING=PASS
 WIRE_TARGET_SHA_MATCH=YES
 CHILD_TARGET_SHA_MATCH=YES
 PARENT_TARGET_SHA_MATCH=YES
-TARGET_MULTI_AUTHORITY_BINDING=PASS
+PARENT_FINAL_AUTHORITY=PASS
 
-## Independent-authority negative matrix
+The dispatch intent is not completion authority. Request, intent, and
+confirmed result remain exact, unique, ordinal/attempt-correlated, and
+chronologically ordered before projection.
 
-The in-memory retained-authority fixture independently corrupted each case
-below. Every case failed in the projection gate before
-`MATCH_EXACT_P7_APPROVAL_COMMAND` could be established:
+## Repair-2 negative matrix
 
-1. journal wire command SHA;
-2. journal kind;
-3. journal ordinal/request count;
-4. journal thread-match flag;
-5. journal Turn-match flag;
-6. journal cwd-match flag;
-7. journal sentinel-reference class;
-8. DENY request ordinal;
-9. DENY attempt;
-10. DENY result `RESPONSE_UNKNOWN`;
-11. DENY chronology order;
-12. child target SHA;
-13. parent target SHA;
-14. wire expected target SHA;
-15. duplicate approval request record;
-16. duplicate DENY result record.
+Each case below was independently corrupted in an in-memory synthetic child
+fixture. Every case raised the bounded `AuthorityProjectionError` in
+`project_retained_authority(...)` before the matcher could return
+`MATCH_EXACT_P7_APPROVAL_COMMAND`:
 
-INDEPENDENT_AUTHORITY_CORRUPTION_CASES=16
-INDEPENDENT_AUTHORITY_CORRUPTION_FAILED_BEFORE_MATCH=16
-INDEPENDENT_AUTHORITY_CORRUPTION_MATRIX=16_OF_16_FAIL_CLOSED
+1. child capture established false;
+2. child request ordinal wrong;
+3. child local sequence wrong;
+4. child command kind wrong;
+5. child thread-match false;
+6. child Turn-match false;
+7. child cwd-match false;
+8. child authoritative wire SHA wrong;
+9. child DENY status `RESPONSE_UNKNOWN`;
+10. child DENY status absent/`None`;
+11. child local sequence type invalid;
+12. child request ordinal type invalid.
 
-## Offline matcher proof
+REPAIR2_CHILD_CORRUPTION_CASES=12
+REPAIR2_CHILD_CORRUPTION_FAILED_BEFORE_MATCH=12
+REPAIR2_CHILD_CORRUPTION_MATRIX=12_OF_12_FAIL_CLOSED
+
+The accepted Repair-1 independent-authority matrix remains intact:
+
+REPAIR1_INDEPENDENT_AUTHORITY_CORRUPTION_CASES=16
+REPAIR1_INDEPENDENT_AUTHORITY_CORRUPTION_FAILED_BEFORE_MATCH=16
+REPAIR1_INDEPENDENT_AUTHORITY_CORRUPTION_MATRIX=16_OF_16_FAIL_CLOSED
+TOTAL_RETAINED_AUTHORITY_CORRUPTION_CASES=28
+
+## Offline matcher proof and golden replay
 
 POSITIVE_EXACT_MATCH_TEST_METHODS=3
 POSITIVE_AUTHORITY_PROJECTION_TEST_METHODS=1
@@ -130,8 +145,8 @@ POSITIVE_RESULT=PASS
 POSITIVE_REPORTED_SUBTESTS=8_AUTHORITY_MUTATIONS
 NEGATIVE_COMMAND_MATRIX_CASES=37
 NEGATIVE_COMMAND_AND_IDENTITY_TEST_METHODS=5
-NEGATIVE_AUTHORITY_PROJECTION_TEST_METHODS=1
-NEGATIVE_REPORTED_SUBTESTS=59
+NEGATIVE_AUTHORITY_PROJECTION_TEST_METHODS=2
+NEGATIVE_REPORTED_SUBTESTS=79
 NEGATIVE_RESULT=PASS
 SUBSTRING_MATCH_CAN_NEVER_PRODUCE_MATCH=PASS
 COMPOUND_COMMAND_REJECTION_CAN_NEVER_PRODUCE_MATCH=PASS
@@ -140,39 +155,41 @@ VECTOR_LENGTHS_0_1_2_4_5_FAIL_CLOSED=PASS
 IDENTITY_COMPONENT_INDEPENDENT_MUTATIONS_FAIL_CLOSED=PASS
 REPEATED_INVOCATION_SIDE_EFFECTS=ZERO
 
-## Retained golden replay and validation
-
-The retained RecoveryJournal, root-only wire, child result, global parent
-result, and global parent outcome were read-only validated. The repaired
-projection then produced the pure matcher inputs and matched the retained
-wire in memory.
+The retained P7.C11 RecoveryJournal, root-only wire, sanitized child result,
+global parent result, and global parent outcome were read-only validated.
+The bound projection then produced pure matcher inputs and the retained wire
+matched in memory:
 
 P7C11_RETAINED_WIRE_GOLDEN_MATCH=MATCH_EXACT_P7_APPROVAL_COMMAND
-P7C12_REPAIR1_REQUEST_WIRE_INDEPENDENT_BINDING=PASS
-P7C12_REPAIR1_DENY_CHRONOLOGY_BINDING=PASS
-P7C12_REPAIR1_TARGET_MULTI_AUTHORITY_BINDING=PASS
-P7C12_REPAIR1_GOLDEN_REPLAY=PASS
+P7C12_REPAIR2_GOLDEN_REPLAY=PASS
+
+## Validation and historical consumed-latch handling
 
 FOCUSED_TEST_COMMAND=PYTHONPATH=src python -m pytest -q tests/real/test_p7_c12_strict_approval_matcher.py
-FOCUSED_TESTS=12_PASSED
-FOCUSED_SUBTESTS=67_PASSED
+FOCUSED_TESTS=13_PASSED
+FOCUSED_SUBTESTS=79_PASSED
 COMPLETE_NON_REAL_REGRESSION_COMMAND=PYTHONPATH=src python -m pytest -q -k 'not real_authorities_are_unset_and_gate_is_disabled and not preflight_checks_exact_target_without_precreating_it'
-COMPLETE_NON_REAL_REGRESSION=1775_PASSED_7_SKIPPED_6_DESELECTED
+COMPLETE_NON_REAL_REGRESSION=1776_PASSED_7_SKIPPED_6_DESELECTED
+COMPLETE_NON_REAL_REGRESSION_SUBTESTS=1492_PASSED
 COMPLETE_NON_REAL_REGRESSION_WARNINGS=2_PREEXISTING
 COMPILEALL=PASS
 GIT_DIFF_CHECK=PASS
 
-The six separately reported historical consumed-latch failures are not run in
-Repair-1: the five P7.C7–P7.C11 `real_authorities_are_unset_and_gate_is_disabled`
-checks and the historical P7.C11 `preflight_checks_exact_target_without_precreating_it`
-check would fail only because consumed one-shot latch authority is present.
-No latch, result, outcome, SQLite state, or historical authority was deleted,
-rewritten, or used as a writable fixture.
+Six historical consumed-latch static/preflight tests were separately
+deselected: the five P7.C7–P7.C11
+`real_authorities_are_unset_and_gate_is_disabled` checks and the historical
+P7.C11 `preflight_checks_exact_target_without_precreating_it` check. They
+were not run as real probes. Historical consumed latches, results, outcomes,
+SQLite state, and authority files were not deleted, rewritten, or used as
+writable fixtures.
+
+HISTORICAL_CONSUMED_LATCH_TESTS=6_SEPARATELY_REPORTED_NOT_RUN
+HISTORICAL_CONSUMED_LATCH_HANDLING=PRESERVED_NO_DELETE_NO_REWRITE
 
 ## Leakage and zero-effect accounting
 
 LEAKAGE_SCAN=PASS
-LEAKAGE_SCAN_SCOPE=REPAIR1_SOURCE_AND_EVIDENCE_EXACT_RETAINED_VALUES
+LEAKAGE_SCAN_SCOPE=CHANGED_SOURCE_AND_EVIDENCE_EXACT_RETAINED_VALUES
 LEAKAGE_SCAN_RAW_RETAINED_COMMAND=ABSENT
 LEAKAGE_SCAN_RAW_RETAINED_TARGET=ABSENT
 LEAKAGE_SCAN_RAW_RETAINED_IDENTITIES=ABSENT
@@ -192,22 +209,22 @@ TURN_INTERRUPT_CALLS=0
 APPROVAL_RESPONSES=0
 ALLOW_RESPONSES=0
 DENY_RESPONSES=0
+TARGET_MUTATIONS=0
+TARGET_FILESYSTEM_MUTATIONS=0
+HISTORICAL_LATCH_MUTATIONS=0
+RETAINED_AUTHORITY_MUTATIONS=0
+RETAINED_SQLITE_WRITES=0
 TELEGRAM_CALLS=0
 PROCESS_SIGNALS=0
-TARGET_FILESYSTEM_MUTATIONS=0
-RETAINED_AUTHORITY_MUTATIONS=0
-HISTORICAL_LATCH_MUTATIONS=0
-RETAINED_SQLITE_WRITES=0
 
 ## Final authority
 
-P7C12_MATCHER_CONSTRUCTED=YES
+P7C12_REPAIR2_CHILD_CAPTURE_BINDING=PASS
+P7C12_REPAIR2_LOCAL_SEQUENCE_BINDING=PASS
+P7C12_REPAIR2_CHILD_WIRE_SHA_BINDING=PASS
+P7C12_REPAIR2_CHILD_DENY_STATUS_BINDING=PASS
+P7C12_REPAIR2_GOLDEN_REPLAY=PASS
 P7C12_MATCHER_OFFLINE_PROOF=PASS
-P7C12_RETAINED_C11_GOLDEN_REPLAY=PASS
-P7C12_REPAIR1_REQUEST_WIRE_INDEPENDENT_BINDING=PASS
-P7C12_REPAIR1_DENY_CHRONOLOGY_BINDING=PASS
-P7C12_REPAIR1_TARGET_MULTI_AUTHORITY_BINDING=PASS
-P7C12_REPAIR1_GOLDEN_REPLAY=PASS
 P7C12_REAL_EXECUTION_AUTHORIZED=NO
 P7C12_REAL_ALLOW_AUTHORIZED=NO
 P7C12_HARD_DELETE_EXECUTION_AUTHORIZED=NO
