@@ -104,62 +104,77 @@ Exact Codex 0.144.6 source explains the zero-approval result: workspace-write gr
 
 `P7C10_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
-## P7.C11 source-backed explicit-escalation successor
+### P7.C11
 
-Binding source/stimulus contract:
+P7.C11 established the source-backed explicit-escalation approval route using a fresh external `/root` target and a first-and-only `sandbox_permissions=require_escalated` shell operation.
 
-`docs/evidence/p7c11/P7C11_SOURCE_BACKED_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-12.md`
+Accepted executable authority:
 
-Initial candidate `52d5a4d3a3e716dce32069afbb6b6bdf0fa4a07e` established the correct source-backed `/root` target and first-and-only explicit `sandbox_permissions=require_escalated` stimulus, but architect review rejected its command-approval success projection as over-broad.
+- HEAD `be98542b9bcbf99508784f229057698d85784367`;
+- tree `ec6433f02f9293273979fd5dfc3f3eff70f16fa4`;
+- harness blob `fc67299d80c3d617280975182c097a92cb863b92`.
 
-Repair-1 is architect accepted:
+The one-shot real probe executed exactly once and is permanently consumed. It observed exactly one authoritative `COMMAND_EXECUTION` approval request, one correlated durable `DENIED_CONFIRMED`, `ALLOW=0`, and an absent target. The frozen preferred class was not emitted only because the target reference was represented as `EMBEDDED_OCCURRENCE` in the outer command vector.
 
-- executable commit `be98542b9bcbf99508784f229057698d85784367`;
-- executable tree `ec6433f02f9293273979fd5dfc3f3eff70f16fa4`;
-- harness blob `fc67299d80c3d617280975182c097a92cb863b92`;
-- Repair-1 evidence blob `febfb3e94b1b963956520f80d9fb1ff371f16c49`.
+Zero-effect retained-wire forensic:
 
-Repair-1 accepted authority:
-
-- root-only first-capture wire authority is correlated to exactly one observed command request by local sequence and wire SHA-256;
-- preferred success requires exact COMMAND_EXECUTION thread/Turn/cwd identity;
-- DENY intent/result carries that request's ordinal and the authoritative request must resolve to `DENIED_CONFIRMED`;
-- `RESPONSE_UNKNOWN`, wrong identity/kind, missing wire authority or non-exact target reference cannot become preferred success;
-- preferred command success requires exact target-token authority, established wire-vector reconstruction, ALLOW=0, terminalized owners and absent target;
-- child authority exposes only sanitized command-correlation facts;
-- parent independently hashes its selected external target, binds it to the child target SHA-256 and re-observes exact target absence;
-- zero-request/non-success outcomes remain finite observations and are not silently promoted to command-approval success.
+- commit `5f1bef2045dd526e22f9b3fb24d42c9f4827962a`;
+- evidence blob `4e56f592f99f16182169b0fb6ec68f304b506be5`;
+- unique retained run: YES;
+- journal SHA-256 `7ca9800213a22260de6ebbad6b36cf847bca0d002dff5aea9dc9121341af5193`, 31 records, 0 schema errors;
+- request ordinal/local sequence `1/1`, kind `COMMAND_EXECUTION`;
+- vector reconstruction ESTABLISHED, length 3;
+- token 0 exact retained SHA corresponds to `/bin/bash`, class `BASH_ABSOLUTE`;
+- token 1 `-lc`, class `DASH_LC`;
+- inner script exact equality to one two-token `touch <exact target>` operation: YES;
+- wire/child/parent target SHA agreement: YES;
+- alternate/extra command evidence: NONE;
+- target absent;
+- current retained-path process references: 0;
+- forensic real effects: 0.
 
 Architect acceptance:
 
-`docs/evidence/p7c11/P7C11_SOURCE_BACKED_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_ARCHITECT_ACCEPTANCE_2026-09-12.md`
+`docs/evidence/p7c11/P7C11_CONSUMED_REAL_EXPLICIT_ESCALATION_RETAINED_WIRE_FORENSIC_ARCHITECT_ACCEPTANCE_2026-09-12.md`
 
-The repository-wide test attempt still encounters historical P7.C7–P7.C10 static checks because their consumed one-shot latch files correctly remain present. Those immutable latches must not be deleted or rewritten to manufacture green historical tests. P7.C11 itself passed its focused suite and the complete non-real regression suite.
+Accepted classification:
 
-## Current executable slice
+`P7C11_APPROVAL_ROUTE_ESTABLISHED=YES`
 
-**P7.C11 one-shot real source-backed explicit-escalation DENY-only approval probe — AUTHORIZED UNDER EXACT SNAPSHOT ONLY.**
+`EMBEDDED_REFERENCE_EXPLANATION_CLASS=OUTER_SHELL_WRAPPER__INNER_EXACT_TOUCH_TARGET`
 
-Binding execution contract:
+`P7C11_MATCHER_INPUT_AUTHORITY=MATCHER_INPUT_AUTHORITY_ESTABLISHED`
 
-`docs/evidence/p7c11/P7C11_ONE_SHOT_REAL_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-12.md`
+P7.C11 remains consumed forever:
 
-Executable snapshot:
+`P7C11_REAL_PROBE_RERUN_AUTHORIZED=NO`
 
-`HEAD=be98542b9bcbf99508784f229057698d85784367`
+`P7C11_REAL_APPROVAL_PROBE_AUTHORIZED=NO_CONSUMED`
 
-`TREE=ec6433f02f9293273979fd5dfc3f3eff70f16fa4`
-
-`HARNESS_BLOB=fc67299d80c3d617280975182c097a92cb863b92`
-
-The real probe is one-shot. It asks for exactly one `touch <external-target>` shell command with `sandbox_permissions=require_escalated`; every approval is DENY; the external target must remain absent. A zero-request or other finite empirical outcome remains valid evidence but is not command-approval acceptance.
-
-`P7C11_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
-
-`P7C11_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
+`P7C11_REAL_EXECUTION_AUTHORIZED=NO_CONSUMED`
 
 `P7C11_MATCHER_AUTHORIZED=NO`
 
 `P7C11_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
-P8/P9 remain blocked until architect-accepted hard-delete acceptance.
+## Current executable slice
+
+**P7.C12 — strict approval matcher construction and zero-effect offline preparation.**
+
+Binding contract:
+
+`docs/evidence/p7c12/P7C12_STRICT_APPROVAL_MATCHER_PREP_CONTRACT_2026-09-12.md`
+
+P7.C12 may construct only a test-only fail-closed matcher over the exact accepted P7.C11 representation authority. Positive match requires exact request identity/correlation plus canonical vector length 3, exact `/bin/bash`, exact `-lc`, and exact inner literal `touch <expected-target>` with no alternate/extra operation. Broad substring/equivalent-command matching is forbidden.
+
+P7.C12 must include a zero-effect golden replay of the retained P7.C11 wire through the new matcher and a large negative matrix. It may return only a matcher classification; it may not send a real approval decision.
+
+Production `src/**` changes are forbidden. Historical consumed P7.C6-P7.C11 test/evidence authorities are immutable.
+
+`P7C12_REAL_EXECUTION_AUTHORIZED=NO`
+
+`P7C12_REAL_ALLOW_AUTHORIZED=NO`
+
+`P7C12_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
+
+P8/P9 remain blocked until a later architect-accepted real hard-delete acceptance.
