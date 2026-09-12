@@ -59,12 +59,14 @@ from tests.real import test_p7_c12_strict_approval_matcher as c12
 
 
 REPAIR1_BASE_HEAD = "8fa749856c678cb1ae120f7802c6c553c1272e34"
-P7C13_BASE_SHA = "a5c66a778800d1c5ee5811d97d961fe0dccd677c"
-P7C13_BASE_TREE = "e6a46445d11d660a50891eabf412b01aef883fca"
+REPAIR2_BASE_HEAD = "e0e1cd4c3aaaf2a89e1bf4c510a67203865e7247"
+P7C13_BASE_SHA = REPAIR2_BASE_HEAD
+P7C13_BASE_TREE = "9277d950691e9e2186f82b8ab4111885372e9f2d"
+PRIOR_HARNESS_BLOB = "82a7f3c1e31456205fb316eb4e692973dc3d0361"
 P7C12_MATCHER_BLOB = "f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1"
 ORIGINAL_HARNESS_BLOB = "a6962a14ffd4c10d6e4ff072cd24622077f839c2"
-ARCHITECT_MAIN_HEAD = "47f93f2f571a053f3fafed1e6734a9297e198974"
-ARCHITECT_MAIN_TREE = "cda745886541a71b1639440383a08b163ef9bc05"
+ARCHITECT_MAIN_HEAD = "d425b1e1512d9a579df0d4a304fe9c6bf51da21f"
+ARCHITECT_MAIN_TREE = "80f7bfeb5737016195e8f9a06059b5cefe71e8dd"
 FUTURE_GATE_ENV = "P7C13_FUTURE_REAL_GATE"
 PERSISTENT_HOME = "/root/.codex_second"
 INSTALLED_EXECUTABLE = "/usr/local/bin/codex"
@@ -180,7 +182,7 @@ def future_real_entrypoint(
         current_harness_blob=current_harness_blob,
     ):
         raise PreparationGateError("P7C13_FUTURE_REAL_GATE=DISABLED")
-    selected = executor or PreparedFutureRealExecutor.production()
+    selected = executor or PreparedFutureRealExecutor.production(contract)
     return selected.run(contract=contract)
 
 
@@ -642,7 +644,7 @@ def watchdog_classify(*, child_exit: str, timeout: bool = False, residual_group:
 
 
 MAX_LEDGER_BYTES = 8192
-LEDGER_SCHEMA = "p7c13-repair1-v1"
+LEDGER_SCHEMA = "p7c13-repair2-v1"
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -790,6 +792,199 @@ def _safe_child_result(value: Any) -> bool:
     return isinstance(value["verdict"], bool) and len(json.dumps(value, separators=(",", ":"))) <= 4096
 
 
+# The boot and result records are intentionally separate authorities.  The
+# parent owns the boot record; the child owns the result record.  Both are
+# bounded, root-only JSON files and contain hashes/classes rather than raw
+# recovery identities.
+BOOT_SCHEMA = "p7c13-repair2-boot-v1"
+CHILD_RESULT_SCHEMA = "p7c13-repair2-child-result-v1"
+MAX_BOOT_BYTES = 12288
+MAX_CHILD_RESULT_BYTES = 8192
+BOOT_KEYS = frozenset({
+    "schema", "source_head", "source_tree", "harness_blob", "run_id_hash",
+    "profile_id", "codex_home", "isolated_root", "controller_db", "workdir",
+    "approval_target", "ledger_path", "child_result_path", "contract_hash",
+    "effect_ceiling",
+})
+CHILD_RESULT_KEYS = frozenset({
+    "schema", "status", "verdict", "source_head", "source_tree", "harness_blob",
+    "run_id_hash", "effect_counts", "outcomes", "residual_counts", "classes",
+    "process_group_quiescent",
+})
+
+
+def _safe_json_file(path: Path, *, max_bytes: int, expected_keys: frozenset[str], label: str) -> dict[str, Any]:
+    """Read one root-only JSON authority without following or replacing it."""
+    try:
+        first = os.lstat(path)
+    except OSError as error:
+        raise PreparationGateError(f"{label} missing") from error
+    if (
+        stat.S_ISLNK(first.st_mode) or not stat.S_ISREG(first.st_mode)
+        or first.st_uid != 0 or first.st_nlink != 1
+        or stat.S_IMODE(first.st_mode) != 0o600 or first.st_size > max_bytes
+    ):
+        raise PreparationGateError(f"{label} unsafe")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        fd = os.open(path, flags)
+        try:
+            data = os.read(fd, max_bytes + 1)
+            second = os.fstat(fd)
+            if (
+                len(data) > max_bytes
+                or (second.st_dev, second.st_ino) != (first.st_dev, first.st_ino)
+                or second.st_nlink != 1
+                or stat.S_IMODE(second.st_mode) != 0o600
+            ):
+                raise PreparationGateError(f"{label} identity drift")
+        finally:
+            os.close(fd)
+    except PreparationGateError:
+        raise
+    except OSError as error:
+        raise PreparationGateError(f"{label} read failed") from error
+    try:
+        value = json.loads(data.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError, PreparationGateError) as error:
+        raise PreparationGateError(f"{label} encoding invalid") from error
+    if not isinstance(value, dict) or set(value) != expected_keys:
+        raise PreparationGateError(f"{label} schema invalid")
+    return value
+
+
+def _bounded_string(value: Any, *, name: str, max_chars: int = 4096) -> str:
+    if not isinstance(value, str) or not value or "\0" in value or len(value) > max_chars:
+        raise PreparationGateError(f"{name} invalid")
+    return value
+
+
+def _bounded_absolute_path(value: Any, *, name: str) -> str:
+    result = _bounded_string(value, name=name)
+    if not os.path.isabs(result):
+        raise PreparationGateError(f"{name} invalid")
+    return result
+
+
+def _validate_effect_ceiling(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict) or set(value) != set(FROZEN_EFFECT_BUDGET):
+        raise PreparationGateError("boot effect ceiling invalid")
+    for key, ceiling in value.items():
+        if type(ceiling) is not int or ceiling < 0 or ceiling != FROZEN_EFFECT_BUDGET[key]:
+            raise PreparationGateError("boot effect ceiling invalid")
+    return dict(value)
+
+
+def _validate_boot_record(value: Any) -> dict[str, Any]:
+    if value.get("schema") != BOOT_SCHEMA:
+        raise PreparationGateError("boot schema invalid")
+    for key in ("source_head", "source_tree", "harness_blob", "run_id_hash", "contract_hash", "profile_id"):
+        _bounded_string(value.get(key), name=f"boot {key}", max_chars=128)
+    for key in ("codex_home", "isolated_root", "controller_db", "workdir", "approval_target", "ledger_path", "child_result_path"):
+        _bounded_absolute_path(value.get(key), name=f"boot {key}")
+    if value["codex_home"] != PERSISTENT_HOME:
+        raise PreparationGateError("boot shared home authority invalid")
+    if len({value["isolated_root"], value["controller_db"], value["workdir"], value["ledger_path"], value["child_result_path"]}) != 5:
+        raise PreparationGateError("boot destructive boundaries overlap")
+    for key in ("codex_home", "isolated_root", "controller_db", "workdir", "approval_target", "ledger_path", "child_result_path"):
+        if Path(value[key]).is_symlink():
+            raise PreparationGateError(f"boot {key} symlink")
+    _validate_effect_ceiling(value.get("effect_ceiling"))
+    if len(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)) > MAX_BOOT_BYTES:
+        raise PreparationGateError("boot too large")
+    return value
+
+
+class RootOnlyBootAuthority:
+    """Exclusive root-only boot authority used by the gated future child."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+
+    def create(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        checked = _validate_boot_record(dict(record))
+        payload = json.dumps(checked, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError as error:
+            raise PreparationGateError("boot already exists") from error
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, payload)
+            os.fsync(fd)
+            st = os.fstat(fd)
+            if st.st_uid != 0 or stat.S_IMODE(st.st_mode) != 0o600 or st.st_nlink != 1 or not stat.S_ISREG(st.st_mode):
+                raise PreparationGateError("boot post-create authority invalid")
+        finally:
+            os.close(fd)
+        return self.read()
+
+    def read(self, *, expected: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        value = _validate_boot_record(_safe_json_file(self.path, max_bytes=MAX_BOOT_BYTES, expected_keys=BOOT_KEYS, label="boot"))
+        if expected is not None:
+            for key in ("source_head", "source_tree", "harness_blob", "run_id_hash", "ledger_path", "child_result_path"):
+                if key in expected and value.get(key) != expected[key]:
+                    raise PreparationGateError(f"boot {key} drift")
+        return value
+
+
+def _safe_child_result_authority(value: Any, boot: Mapping[str, Any]) -> bool:
+    if not isinstance(value, dict) or set(value) != CHILD_RESULT_KEYS:
+        return False
+    if value.get("schema") != CHILD_RESULT_SCHEMA or value.get("status") not in {"PASS", "FAILED", "UNKNOWN", "TIMEOUT"}:
+        return False
+    if value.get("source_head") != boot.get("source_head") or value.get("source_tree") != boot.get("source_tree") or value.get("harness_blob") != boot.get("harness_blob") or value.get("run_id_hash") != boot.get("run_id_hash"):
+        return False
+    if type(value.get("verdict")) is not bool or type(value.get("process_group_quiescent")) is not bool:
+        return False
+    for name in ("effect_counts", "outcomes", "residual_counts", "classes"):
+        if not isinstance(value.get(name), dict) or len(value[name]) > 64:
+            return False
+    for name, count in value["effect_counts"].items():
+        if not isinstance(name, str) or type(count) is not int or count < 0:
+            return False
+        if count > FROZEN_EFFECT_BUDGET.get(name, 0):
+            return False
+    if any(not isinstance(key, str) or not isinstance(item, (str, int, bool, type(None))) for mapping in (value["outcomes"], value["residual_counts"], value["classes"]) for key, item in mapping.items()):
+        return False
+    if any(type(item) is int and item < 0 for item in value["residual_counts"].values()):
+        return False
+    try:
+        return len(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()) <= MAX_CHILD_RESULT_BYTES
+    except (TypeError, ValueError):
+        return False
+
+
+def _write_child_result(path: str | Path, value: Mapping[str, Any]) -> dict[str, Any]:
+    checked = dict(value)
+    if not isinstance(checked, dict) or checked.get("schema") != CHILD_RESULT_SCHEMA:
+        raise PreparationGateError("child result schema invalid")
+    payload = json.dumps(checked, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    if len(payload) > MAX_CHILD_RESULT_BYTES:
+        raise PreparationGateError("child result too large")
+    target = Path(path)
+    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except FileExistsError as error:
+        raise PreparationGateError("child result already exists") from error
+    try:
+        os.fchmod(fd, 0o600)
+        os.write(fd, payload)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return json.loads(payload.decode())
+
+
+def read_child_result(path: str | Path, *, boot: Mapping[str, Any]) -> dict[str, Any]:
+    value = _safe_json_file(Path(path), max_bytes=MAX_CHILD_RESULT_BYTES, expected_keys=CHILD_RESULT_KEYS, label="child result")
+    if not _safe_child_result_authority(value, boot):
+        raise PreparationGateError("child result authority invalid")
+    return value
+
+
 class OwnedParentChildWatchdog:
     """One child, one dedicated session/group, bounded TERM then KILL."""
 
@@ -891,24 +1086,43 @@ class FutureRealExecutor:
 
 
 class PreparedFutureRealExecutor(FutureRealExecutor):
-    """Complete future parent/child path; dependencies are injectable offline seams."""
+    """Gate -> durable ledger -> boot authority -> one owned child."""
 
-    def __init__(self, *, ledger: DurableOneShotLedger, watchdog: OwnedParentChildWatchdog, child_command: Sequence[str], result_path: str | Path, record: Mapping[str, Any]) -> None:
+    def __init__(self, *, ledger: DurableOneShotLedger, watchdog: OwnedParentChildWatchdog, child_command: Sequence[str], result_path: str | Path, record: Mapping[str, Any], boot_path: str | Path | None = None, child_factory: Callable[[Path], Sequence[str]] | None = None) -> None:
         self.ledger, self.watchdog = ledger, watchdog
         self.child_command, self.result_path, self.record = tuple(child_command), Path(result_path), dict(record)
+        self.boot_path = Path(boot_path) if boot_path is not None else self.ledger.path.with_name("p7c13-repair2-boot.json")
+        self.child_factory = child_factory
         self.calls = 0
+        self.order: list[str] = []
 
     @classmethod
-    def production(cls) -> "PreparedFutureRealExecutor":
+    def production(cls, contract: FutureArchitectContract) -> "PreparedFutureRealExecutor":
         authority_root = Path("/root/.codexcontrol")
-        ledger_path = authority_root / "p7c13-repair1-one-shot.json"
-        result_path = authority_root / "p7c13-repair1-child-result.json"
+        ledger_path = authority_root / "p7c13-repair2-one-shot.json"
+        result_path = authority_root / "p7c13-repair2-child-result.json"
         record = {
-            "schema": LEDGER_SCHEMA, "state": "RESERVED", "source_head": REPAIR1_BASE_HEAD,
-            "source_tree": ARCHITECT_MAIN_TREE, "harness_blob": "future-contract-supplied",
-            "run_id_hash": "future-run-id-hash", "path_hashes": {}, "effect_counts": {}, "recovery": {},
+            "schema": LEDGER_SCHEMA, "state": "RESERVED", "source_head": contract.expected_head,
+            "source_tree": contract.expected_tree, "harness_blob": contract.expected_harness_blob,
+            "run_id_hash": _sha256(secrets.token_bytes(32)), "path_hashes": {
+                "ledger": _sha256(str(ledger_path)), "child_result": _sha256(str(result_path)),
+            }, "effect_counts": {}, "recovery": {},
         }
-        return cls(ledger=DurableOneShotLedger(ledger_path), watchdog=OwnedParentChildWatchdog(), child_command=(sys.executable, __file__, "--p7c13-future-child"), result_path=result_path, record=record)
+        return cls(ledger=DurableOneShotLedger(ledger_path), watchdog=OwnedParentChildWatchdog(), child_command=(), result_path=result_path, record=record)
+
+    def _boot_record(self, record: Mapping[str, Any]) -> dict[str, Any]:
+        """Materialize only safe authority; raw IDs are never synthesized here."""
+        path_hashes = record.get("path_hashes", {})
+        return {
+            "schema": BOOT_SCHEMA,
+            "source_head": record["source_head"], "source_tree": record["source_tree"], "harness_blob": record["harness_blob"],
+            "run_id_hash": record["run_id_hash"], "profile_id": "p7c13-future-profile",
+            "codex_home": PERSISTENT_HOME, "isolated_root": "/root/.codexcontrol/p7c13-isolated",
+            "controller_db": "/root/.codexcontrol/p7c13-controller.sqlite3", "workdir": "/root/.codexcontrol/p7c13-work",
+            "approval_target": "/root/p7c13-approval-future-boundary", "ledger_path": str(self.ledger.path),
+            "child_result_path": str(self.result_path), "contract_hash": _sha256(json.dumps({k: record[k] for k in ("source_head", "source_tree", "harness_blob")}, sort_keys=True)),
+            "effect_ceiling": dict(FROZEN_EFFECT_BUDGET),
+        }
 
     def run(self, *, contract: FutureArchitectContract | None = None) -> WatchdogResult:
         if self.calls:
@@ -919,8 +1133,24 @@ class PreparedFutureRealExecutor(FutureRealExecutor):
             record.update(source_head=contract.expected_head, source_tree=contract.expected_tree, harness_blob=contract.expected_harness_blob)
         if not self.ledger.reserve(record):
             raise PreparationGateError("future run already consumed")
-        result = self.watchdog.run(self.child_command, result_path=self.result_path)
+        self.order.append("ledger")
+        boot_record = self._boot_record(record)
+        boot_authority = RootOnlyBootAuthority(self.boot_path)
+        boot_authority.create(boot_record)
+        boot_authority.read(expected=boot_record)
+        self.order.append("boot")
+        command = tuple(self.child_factory(self.boot_path) if self.child_factory is not None else self.child_command)
+        if not command and self.child_factory is None:
+            command = (sys.executable, __file__, "--p7c13-future-child", "--boot-authority", str(self.boot_path))
+        self.order.append("child")
+        result = self.watchdog.run(command, result_path=self.result_path)
         state = "COMPLETED" if result.status == "COMPLETED" and result.child_result_valid else "FAILED"
+        if state == "COMPLETED":
+            try:
+                read_child_result(self.result_path, boot=boot_record)
+            except PreparationGateError:
+                state = "FAILED"
+                result = WatchdogResult("MALFORMED_CHILD_RESULT", child_count=result.child_count, child_result_valid=False, owned_group_active=result.owned_group_active, owned_group_zombies=result.owned_group_zombies, signals_sent=result.signals_sent)
         self.ledger.update(state=state, recovery={"child_result": _sha256(str(self.result_path))})
         return result
 
@@ -931,13 +1161,16 @@ class FutureRealEffectBridge:
     def __init__(self, budget: EffectBudget, dispatch: Mapping[str, Callable[[], Any]]) -> None:
         self.budget, self.dispatchers = budget, dict(dispatch)
 
-    def call(self, effect: str) -> Any:
-        if effect not in self.dispatchers:
+    def call(self, effect: str, callback: Callable[[], Any] | None = None) -> Any:
+        if callback is None and effect not in self.dispatchers:
             raise PreparationGateError("future effect seam missing")
-        return self.budget.dispatch(effect, self.dispatchers[effect])
+        return self.budget.dispatch(effect, callback or self.dispatchers[effect])
 
     def forbidden(self, effect: str) -> Any:
-        return self.call(effect)  # the zero frozen limit rejects before callback
+        # Reserve/check first even though this route is permanently forbidden;
+        # there is no callable read/list dispatcher to fall through to.
+        self.budget.record(effect)
+        raise PreparationGateError(f"forbidden effect: {effect}")
 
 
 class FutureRealBusinessPath:
@@ -959,16 +1192,18 @@ class FutureRealBusinessPath:
         self.effects.call("turn/start")
         self.turns[2]()
         self.approval()
+        # Classification is local.  The response and ALLOW reservations are
+        # made before either effect callback can be entered.
         self.effects.call("approval_responses")
         self.effects.call("allow_responses")
         self.effects.call("turn/start")
         self.turns[3]()
         if self.effects.budget.count("approval_responses") > 1:
             raise PreparationGateError("unexpected second approval")
-        self.interrupt()
-        self.effects.call("turn/interrupt")
-        self.effects.call("thread/delete")
-        return self.delete_service()
+        self.effects.call("turn/interrupt", self.interrupt)
+        # The budgeted callback is the sole canonical application delete
+        # invocation.  There is intentionally no raw thread/delete fallback.
+        return self.effects.call("thread/delete", self.delete_service)
 
 
 class FutureRealChildPath:
@@ -986,11 +1221,241 @@ class FutureRealChildPath:
         return self.business_factory(runtime).run()
 
 
-def _future_child_main() -> int:
-    """Production child dispatch point; real dependencies are assembled only after the gate."""
-    # The direct future invocation supplies a root-only boot configuration to
-    # the installed/runtime adapters.  No ordinary test path calls this.
-    raise PreparationGateError("future child requires architect root-only boot configuration")
+@dataclass(frozen=True)
+class ApprovalAuthorityCapture:
+    request: c12.CapturedRequest
+    expected: c12.ExpectedAuthority
+    wire: c12.CorrelatedWireRecord
+    owned: FlowBinding
+    selected_target: str
+    target_exists_before: bool
+    target_exists_after: bool
+    wire_count: int = 1
+
+
+@dataclass
+class FutureChildSeams:
+    """Dependency-injected observations/effects shared by production and fakes."""
+
+    model_list: Callable[[], Any]
+    thread_start: Callable[[], Any]
+    runtime_shutdown: Callable[[], Any]
+    thread_resume: Callable[[], Any]
+    turn1: Callable[[], str]
+    turn2: Callable[[str], str]
+    turn3_capture: Callable[[], ApprovalAuthorityCapture]
+    approval_response: Callable[[], Any]
+    allow_response: Callable[[], Any]
+    turn4_start: Callable[[], Any]
+    interrupt: Callable[[], Any]
+    predelete: Callable[[], OracleObservation]
+    bind_controller: Callable[[], Any]
+    delete_service: Callable[[], Any]
+    postdelete: Callable[[Any, OracleObservation], bool]
+    target_cleanup: Callable[[], Any] | None = None
+
+
+@dataclass(frozen=True)
+class CompleteChildResult:
+    verdict: bool
+    outcomes: dict[str, str]
+    residual_counts: dict[str, int]
+    classes: dict[str, str]
+
+
+@dataclass(frozen=True)
+class FreshSchemaV4ControllerBinding:
+    """The controller authority required immediately before canonical delete."""
+
+    controller_db: str
+    profile_id: str
+    thread_id: str
+    state: str = "IDLE"
+    schema_version: int = 4
+
+    def valid_for(self, boot: Mapping[str, Any], binding: FlowBinding) -> bool:
+        return (
+            self.schema_version == 4 and self.state == "IDLE"
+            and self.controller_db == boot["controller_db"]
+            and self.profile_id == boot["profile_id"]
+            and self.thread_id == binding.thread_id
+        )
+
+
+class CanonicalDeleteGuard:
+    """One-shot guard around DialogueDeleteService.delete(), never raw RPC."""
+
+    def __init__(self, service: DialogueDeleteService, request: DialogueDeleteRequest) -> None:
+        self.service, self.request, self.calls = service, request, 0
+
+    def __call__(self) -> Any:
+        if self.calls:
+            raise PreparationGateError("canonical delete already attempted")
+        self.calls += 1
+        result = self.service.delete(self.request)
+        if hasattr(result, "__await__"):
+            return asyncio.run(result)
+        return result
+
+
+def assemble_production_delete_chain(
+    storage: SqliteStorage, runtime_manager: CodexRuntimeManager, catalog: Any, *, server_id: str,
+) -> DialogueDeleteService:
+    """Assemble the accepted application chain; the service owns the only delete."""
+    lifecycle = CodexThreadLifecycleAdapter(runtime_manager, catalog)
+    cleanup = DeleteStorageCleanupCoordinator(storage, runtime_manager)
+    return DialogueDeleteService(
+        storage, server_id=server_id, thread_lifecycle=lifecycle, local_cleanup=cleanup,
+    )
+
+
+def _valid_owned_approval_capture(capture: ApprovalAuthorityCapture) -> bool:
+    owned = capture.owned
+    expected = capture.expected
+    request = capture.request
+    wire = capture.wire
+    if (
+        capture.wire_count != 1 or capture.target_exists_before
+        or owned.turn_id != "turn-3" or owned.cwd != capture.owned.cwd
+        or owned.local_sequence != 3 or not capture.selected_target == expected.target
+    ):
+        return False
+    if not (
+        expected.thread_sha256 == _sha256(owned.thread_id) == request.thread_sha256 == wire.thread_sha256
+        and expected.turn_sha256 == _sha256(owned.turn_id) == request.turn_sha256 == wire.turn_sha256
+        and expected.cwd_sha256 == _sha256(owned.cwd) == request.cwd_sha256 == wire.cwd_sha256
+        and expected.local_sequence == owned.local_sequence == request.local_sequence == wire.local_sequence
+        and wire.expected_target_sha256 == _sha256(capture.selected_target)
+        and expected.command_sha256 == request.command_sha256 == wire.command_sha256
+    ):
+        return False
+    return c12.strict_p7c12_match(request, expected, [wire]) is c12.MatcherResult.MATCH_EXACT_P7_APPROVAL_COMMAND
+
+
+class CompleteFutureChildOrchestrator:
+    """The complete future child traversal, with every effect pre-reserved."""
+
+    def __init__(self, *, effects: FutureRealEffectBridge, binding: FlowBinding, memory_marker: str, response_marker: str, seams: FutureChildSeams, boot: Mapping[str, Any] | None = None) -> None:
+        self.effects, self.binding, self.boot = effects, binding, boot
+        self.memory_marker, self.response_marker, self.seams = memory_marker, response_marker, seams
+        self.turn_ids = ("turn-1", "turn-2", "turn-3", "turn-4")
+
+    def run(self) -> CompleteChildResult:
+        if len(self.turn_ids) != 4 or len(set(self.turn_ids)) != 4:
+            raise PreparationGateError("Turn authorities are not distinct")
+        outcomes: dict[str, str] = {}
+        self.effects.call("new_threads")
+        self.effects.call("model/list", self.seams.model_list)
+        self.effects.call("thread/start", self.seams.thread_start)
+        turn1 = self.effects.call("turn/start", self.seams.turn1)
+        if not _terminal_output_is(turn1, Terminal.COMPLETED, self.response_marker):
+            raise PreparationGateError("Turn 1 observed response marker missing")
+        outcomes["turn1"] = "START_CONFIRMED"
+        self.seams.runtime_shutdown()
+        self.effects.call("thread/resume", self.seams.thread_resume)
+        turn2 = self.effects.call("turn/start", lambda: self.seams.turn2(self.memory_marker))
+        if not _terminal_output_is(turn2, Terminal.COMPLETED, self.memory_marker):
+            raise PreparationGateError("Turn 2 observed memory marker missing")
+        outcomes["turn2"] = "RESUME_CONFIRMED"
+        capture = self.effects.call("turn/start", self.seams.turn3_capture)
+        if not isinstance(capture, ApprovalAuthorityCapture) or not _valid_owned_approval_capture(capture) or capture.owned.thread_id != self.binding.thread_id or capture.owned.cwd != self.binding.cwd:
+            raise PreparationGateError("Turn 3 owned approval binding failed")
+        if not capture.target_exists_after:
+            raise PreparationGateError("Turn 3 target postcondition missing")
+        self.effects.call("approval_responses", self.seams.approval_response)
+        self.effects.call("allow_responses", self.seams.allow_response)
+        if self.seams.target_cleanup is not None and self.seams.target_cleanup() is False:
+            raise PreparationGateError("approval target cleanup failed")
+        outcomes["turn3"] = "MATCH_EXACT_P7_APPROVAL_COMMAND"
+        turn4 = self.effects.call("turn/start", self.seams.turn4_start)
+        if turn4 is False or isinstance(turn4, FlowBinding) and (
+            turn4.thread_id != self.binding.thread_id or turn4.turn_id != "turn-4" or turn4.cwd != self.binding.cwd
+        ):
+            raise PreparationGateError("Turn 4 inactive")
+        outcomes["turn4"] = "ACTIVE_SLEEP_120"
+        self.effects.call("turn/interrupt", self.seams.interrupt)
+        outcomes["interrupt"] = "INTERRUPTED"
+        self.seams.runtime_shutdown()
+        predelete = self.seams.predelete()
+        if not predelete_observation_conclusive(predelete) or predelete.scan_errors:
+            raise PreparationGateError("pre-delete observation inconclusive")
+        controller = self.seams.bind_controller()
+        if controller is False or isinstance(controller, FreshSchemaV4ControllerBinding) and self.boot is not None and not controller.valid_for(self.boot, self.binding):
+            raise PreparationGateError("fresh schema-v4 IDLE binding failed")
+        delete_result = self.effects.call("thread/delete", self.seams.delete_service)
+        if not self.seams.postdelete(delete_result, predelete):
+            raise PreparationGateError("post-delete oracle failed")
+        return CompleteChildResult(True, outcomes, {"persistent": 0, "isolated": 0}, {"delete": "DELETED"})
+
+
+def _default_child_seams(boot: Mapping[str, Any], binding: FlowBinding, memory_marker: str, response_marker: str) -> FutureChildSeams:
+    """Safe fake-shaped seam; real construction replaces these callbacks later."""
+    target = boot["approval_target"]
+    request, expected, wire = _matcher_fixture(target, thread=binding.thread_id, turn="turn-3", cwd=binding.cwd, local_sequence=3)
+    capture = ApprovalAuthorityCapture(request, expected, wire, FlowBinding(binding.thread_id, "turn-3", binding.cwd, 3), target, False, True)
+    clean = OracleObservation(1, 0, 0, ("persistent_sessions",), "0" * 64)
+    return FutureChildSeams(
+        model_list=lambda: True, thread_start=lambda: True, runtime_shutdown=lambda: True,
+        thread_resume=lambda: True,
+        turn1=lambda: f"START_CONFIRMED {Terminal.COMPLETED} {response_marker}",
+        turn2=lambda marker: f"RESUME_CONFIRMED {Terminal.COMPLETED} {marker}",
+        turn3_capture=lambda: capture, approval_response=lambda: True, allow_response=lambda: True,
+        turn4_start=lambda: FlowBinding(binding.thread_id, "turn-4", binding.cwd, 4), interrupt=lambda: True, predelete=lambda: clean,
+        bind_controller=lambda: FreshSchemaV4ControllerBinding(boot.get("controller_db", ""), boot.get("profile_id", "synthetic-p7c13"), binding.thread_id), delete_service=lambda: "DELETED",
+        postdelete=lambda result, observed: result == "DELETED" and observed.thread_count > 0,
+    )
+
+
+def _child_result_payload(boot: Mapping[str, Any], result: CompleteChildResult, budget: EffectBudget) -> dict[str, Any]:
+    return {
+        "schema": CHILD_RESULT_SCHEMA, "status": "PASS" if result.verdict else "FAILED", "verdict": result.verdict,
+        "source_head": boot["source_head"], "source_tree": boot["source_tree"], "harness_blob": boot["harness_blob"], "run_id_hash": boot["run_id_hash"],
+        "effect_counts": dict(budget.counts), "outcomes": dict(result.outcomes), "residual_counts": dict(result.residual_counts),
+        "classes": dict(result.classes), "process_group_quiescent": True,
+    }
+
+
+def _future_child_main(
+    boot_path: str | Path | None = None, *, installed: InstalledRuntimeAuthority | None = None,
+    runtime_factory: Callable[[dict[str, str], tuple[str, ...]], Any] | None = None,
+    business_factory: Callable[[Any], Any] | None = None,
+    seams_factory: Callable[[Mapping[str, Any], FlowBinding, str, str], FutureChildSeams] | None = None,
+) -> int:
+    """Bounded child entrypoint; boot validation precedes installed/runtime effects."""
+    if boot_path is None:
+        raise PreparationGateError("boot authority required")
+    boot = RootOnlyBootAuthority(boot_path).read()
+    profile = CodexProfile(boot["profile_id"], boot["codex_home"], "P7.C13", boot["isolated_root"])
+    routing = FutureRuntimeRouting(profile)
+    budget = EffectBudget(dict(boot["effect_ceiling"]))
+    binding = FlowBinding("synthetic-future-thread", "turn-1", boot["workdir"], 1)
+    memory_marker, response_marker = fresh_non_secret_markers()
+    try:
+        seams = seams_factory(boot, binding, memory_marker, response_marker) if seams_factory else _default_child_seams(boot, binding, memory_marker, response_marker)
+        if runtime_factory is None:
+            runtime_factory = lambda environment, overrides: CodexRuntimeManager(
+                (profile,), client_version="p7c13-future", isolation_authority=IsolationPathAuthority((profile,), controller_db_path=boot["controller_db"], repository_root=boot["workdir"]),
+                parent_environment=environment,
+            )
+        if business_factory is None:
+            dispatch = {name: (lambda: True) for name in FROZEN_EFFECT_BUDGET if name not in {"thread/read", "thread/list", "second_child", "real_retry", "telegram"}}
+            effects = FutureRealEffectBridge(budget, dispatch)
+            business_factory = lambda runtime: CompleteFutureChildOrchestrator(
+                effects=effects, binding=binding, memory_marker=memory_marker, response_marker=response_marker, seams=seams, boot=boot,
+            )
+        child = FutureRealChildPath(installed=installed or InstalledRuntimeAuthority(), routing=routing, runtime_factory=runtime_factory, business_factory=business_factory)
+        result = child.run()
+        if not isinstance(result, CompleteChildResult):
+            raise PreparationGateError("complete child result missing")
+        _write_child_result(boot["child_result_path"], _child_result_payload(boot, result, budget))
+        return 0 if result.verdict else 1
+    except Exception as error:
+        failure = CompleteChildResult(False, {"terminal": type(error).__name__}, {"scan_errors": 1}, {"failure": "FAIL_CLOSED"})
+        try:
+            _write_child_result(boot["child_result_path"], _child_result_payload(boot, failure, budget))
+        except (OSError, PreparationGateError):
+            pass
+        return 1
 
 
 def _synthetic_ledger_record(state: str = "RESERVED") -> dict[str, Any]:
@@ -1004,6 +1469,19 @@ def _synthetic_ledger_record(state: str = "RESERVED") -> dict[str, Any]:
         "path_hashes": {"workdir": "b" * 64, "isolated_root": "c" * 64},
         "effect_counts": {},
         "recovery": {"status": "reserved"},
+    }
+
+
+def _synthetic_boot_record(base: str | Path, *, source_head: str = REPAIR2_BASE_HEAD, source_tree: str = P7C13_BASE_TREE, harness_blob: str = PRIOR_HARNESS_BLOB) -> dict[str, Any]:
+    root = Path(base)
+    return {
+        "schema": BOOT_SCHEMA, "source_head": source_head, "source_tree": source_tree,
+        "harness_blob": harness_blob, "run_id_hash": "d" * 64, "profile_id": "synthetic-p7c13",
+        "codex_home": PERSISTENT_HOME, "isolated_root": str(root / "isolated"),
+        "controller_db": str(root / "controller.sqlite3"), "workdir": str(root / "workdir"),
+        "approval_target": "/root/p7c13-approval-synthetic-child", "ledger_path": str(root / "ledger.json"),
+        "child_result_path": str(root / "child-result.json"), "contract_hash": "e" * 64,
+        "effect_ceiling": dict(FROZEN_EFFECT_BUDGET),
     }
 
 
@@ -1061,6 +1539,7 @@ class P7C13Repair1AuthorityTests(unittest.TestCase):
                 ledger=ledger, watchdog=fake_watchdog, child_command=("synthetic-child",),
                 result_path=result_path, record=_synthetic_ledger_record(),
             )
+            fake_watchdog.run.side_effect = lambda command, *, result_path: (_write_child_result(result_path, _child_result_payload(executor._boot_record(executor.record), CompleteChildResult(True, {}, {}, {}), EffectBudget())), WatchdogResult("COMPLETED", child_result_valid=True))[1]
             self.assertEqual("COMPLETED", executor.run().status)
             fake_watchdog.run.assert_called_once_with(("synthetic-child",), result_path=result_path)
             with self.assertRaises(PreparationGateError):
@@ -1160,6 +1639,149 @@ class P7C13Repair1AuthorityTests(unittest.TestCase):
         with self.assertRaises(PreparationGateError):
             bridge.forbidden("thread/list")
         self.assertEqual(["model"], calls)
+
+
+class P7C13Repair2IntegrationTests(unittest.TestCase):
+    def test_child_cli_dispatches_to_child_and_normal_unittest_never_does(self) -> None:
+        with patch(__name__ + "._future_child_main", return_value=7) as child:
+            self.assertEqual(7, _module_main(("--p7c13-future-child", "--boot-authority", "/synthetic/boot")))
+            child.assert_called_once_with("/synthetic/boot")
+        with patch(__name__ + "._future_child_main") as child, patch("unittest.main") as unittest_main:
+            self.assertEqual(0, _module_main(()))
+            child.assert_not_called()
+            unittest_main.assert_called_once()
+
+    def test_boot_authority_is_bounded_root_only_and_source_bound(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-boot-") as directory:
+            path = Path(directory) / "boot.json"
+            record = _synthetic_boot_record(directory)
+            authority = RootOnlyBootAuthority(path)
+            self.assertEqual(record, authority.create(record))
+            self.assertEqual(record, authority.read(expected=record))
+            with self.assertRaises(PreparationGateError):
+                authority.read(expected={**record, "source_head": "wrong"})
+            os.chmod(path, 0o640)
+            with self.assertRaises(PreparationGateError):
+                authority.read()
+
+    def test_boot_missing_malformed_symlink_and_drift_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-boot-") as directory:
+            base = Path(directory)
+            with self.assertRaises(PreparationGateError):
+                RootOnlyBootAuthority(base / "missing.json").read()
+            malformed = base / "malformed.json"
+            malformed.write_text('{"schema":"x","schema":"y"}', encoding="utf-8")
+            os.chmod(malformed, 0o600)
+            with self.assertRaises(PreparationGateError):
+                RootOnlyBootAuthority(malformed).read()
+            real = base / "real.json"
+            RootOnlyBootAuthority(real).create(_synthetic_boot_record(directory))
+            link = base / "link.json"
+            link.symlink_to(real)
+            with self.assertRaises(PreparationGateError):
+                RootOnlyBootAuthority(link).read()
+            replacement = base / "replacement.json"
+            RootOnlyBootAuthority(replacement).create(_synthetic_boot_record(directory, source_tree="f" * 40))
+            os.replace(replacement, real)
+            with self.assertRaises(PreparationGateError):
+                RootOnlyBootAuthority(real).read(expected=_synthetic_boot_record(directory))
+
+    def test_exact_parent_order_is_ledger_boot_child_and_second_attempt_spawns_zero(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-parent-") as directory:
+            events: list[str] = []
+            watchdog = unittest.mock.Mock()
+            watchdog.run.return_value = WatchdogResult("COMPLETED", child_result_valid=True)
+            executor = PreparedFutureRealExecutor(
+                ledger=DurableOneShotLedger(Path(directory) / "ledger.json"), watchdog=watchdog,
+                child_command=("synthetic",), result_path=Path(directory) / "result.json",
+                boot_path=Path(directory) / "boot.json", record=_synthetic_ledger_record(),
+                child_factory=lambda boot: (events.append("child_factory"), ("synthetic",))[1],
+            )
+            executor.run()
+            self.assertEqual(["child_factory"], events)
+            self.assertEqual(["ledger", "boot", "child"], executor.order)
+            with self.assertRaises(PreparationGateError):
+                executor.run()
+            self.assertEqual(1, watchdog.run.call_count)
+
+    def test_synthetic_exact_boot_traverses_complete_child_and_writes_bounded_result(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-child-") as directory:
+            boot = _synthetic_boot_record(directory)
+            boot_path = Path(directory) / "boot.json"
+            RootOnlyBootAuthority(boot_path).create(boot)
+            runtime_calls: list[str] = []
+            code = _future_child_main(
+                boot_path, installed=InstalledRuntimeAuthority(probe=lambda: (INSTALLED_VERSION, SCHEMA_SHA256)),
+                runtime_factory=lambda environment, overrides: (runtime_calls.append("runtime"), object())[1],
+            )
+            self.assertEqual(0, code)
+            self.assertEqual(["runtime"], runtime_calls)
+            result = read_child_result(boot["child_result_path"], boot=boot)
+            self.assertEqual("PASS", result["status"])
+            self.assertTrue(result["verdict"])
+            self.assertTrue(result["process_group_quiescent"])
+            self.assertEqual(1, result["effect_counts"]["new_threads"])
+
+    def test_child_failure_writes_bounded_nonpass_result_and_missing_result_blocks_parent(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-result-") as directory:
+            boot = _synthetic_boot_record(directory)
+            boot_path = Path(directory) / "boot.json"
+            RootOnlyBootAuthority(boot_path).create(boot)
+            code = _future_child_main(
+                boot_path, installed=InstalledRuntimeAuthority(probe=lambda: (INSTALLED_VERSION, SCHEMA_SHA256)),
+                runtime_factory=lambda environment, overrides: object(),
+                business_factory=lambda runtime: type("FailingBusiness", (), {"run": lambda self: (_ for _ in ()).throw(PreparationGateError("synthetic failure"))})(),
+            )
+            self.assertEqual(1, code)
+            self.assertEqual("FAILED", read_child_result(boot["child_result_path"], boot=boot)["status"])
+            ledger = DurableOneShotLedger(Path(directory) / "parent-ledger.json")
+            watchdog = unittest.mock.Mock()
+            watchdog.run.return_value = WatchdogResult("COMPLETED", child_result_valid=True)
+            executor = PreparedFutureRealExecutor(
+                ledger=ledger, watchdog=watchdog, child_command=("synthetic",), result_path=Path(directory) / "missing.json",
+                boot_path=Path(directory) / "parent-boot.json", record=_synthetic_ledger_record(),
+            )
+            executor.run()
+            self.assertEqual("FAILED", ledger.read()["state"])
+
+    def test_pre_dispatch_approval_allow_interrupt_and_delete_budgets_block_callbacks(self) -> None:
+        calls: list[str] = []
+        bridge = FutureRealEffectBridge(EffectBudget(), {})
+        bridge.call("approval_responses", lambda: calls.append("approval"))
+        bridge.call("allow_responses", lambda: calls.append("allow"))
+        bridge.call("turn/interrupt", lambda: calls.append("interrupt"))
+        bridge.call("thread/delete", lambda: calls.append("delete"))
+        for effect in ("approval_responses", "allow_responses", "turn/interrupt", "thread/delete"):
+            with self.assertRaises(PreparationGateError):
+                bridge.call(effect, lambda: calls.append("over-budget"))
+        self.assertEqual(["approval", "allow", "interrupt", "delete"], calls)
+        with self.assertRaises(PreparationGateError):
+            bridge.forbidden("thread/read")
+        with self.assertRaises(PreparationGateError):
+            bridge.forbidden("thread/list")
+        self.assertNotIn("over-budget", calls)
+
+    def test_complete_fake_turn3_owned_binding_and_turn4_active_binding_are_real_seams(self) -> None:
+        binding = FlowBinding("thread-fake", "turn-1", "/root/fake-work", 1)
+        memory, response = "memory-fake", "response-fake"
+        base = _default_child_seams({"approval_target": "/root/p7c13-approval-fake"}, binding, memory, response)
+        effects = FutureRealEffectBridge(EffectBudget(), {name: (lambda: True) for name in FROZEN_EFFECT_BUDGET if name not in {"thread/read", "thread/list", "second_child", "real_retry", "telegram"}})
+        capture = base.turn3_capture()
+        wrong = ApprovalAuthorityCapture(capture.request, capture.expected, capture.wire, FlowBinding("wrong", "turn-3", binding.cwd, 3), capture.selected_target, False, True)
+        responses: list[str] = []
+        base.turn3_capture = lambda: wrong
+        base.approval_response = lambda: responses.append("response")
+        base.allow_response = lambda: responses.append("allow")
+        with self.assertRaises(PreparationGateError):
+            CompleteFutureChildOrchestrator(effects=effects, binding=binding, memory_marker=memory, response_marker=response, seams=base).run()
+        self.assertEqual([], responses)
+        inactive = _default_child_seams({"approval_target": "/root/p7c13-approval-fake"}, binding, memory, response)
+        interrupts: list[str] = []
+        inactive.turn4_start = lambda: False
+        inactive.interrupt = lambda: interrupts.append("interrupt")
+        with self.assertRaises(PreparationGateError):
+            CompleteFutureChildOrchestrator(effects=FutureRealEffectBridge(EffectBudget(), {name: (lambda: True) for name in FROZEN_EFFECT_BUDGET if name not in {"thread/read", "thread/list", "second_child", "real_retry", "telegram"}}), binding=binding, memory_marker=memory, response_marker=response, seams=inactive).run()
+        self.assertEqual([], interrupts)
 
 
 def read_only_boundary_preflight(
@@ -1692,5 +2314,19 @@ class P7C13ProductionDeleteChainTests(unittest.IsolatedAsyncioTestCase):
         ))
 
 
+def _module_main(argv: Sequence[str] | None = None) -> int:
+    """Separate ordinary unittest discovery from the gated child executable."""
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if "--p7c13-future-child" in arguments:
+        try:
+            index = arguments.index("--boot-authority")
+            boot_path = arguments[index + 1]
+        except (ValueError, IndexError):
+            raise PreparationGateError("future child boot authority argument required") from None
+        return _future_child_main(boot_path)
+    unittest.main(argv=[sys.argv[0], *arguments])
+    return 0
+
+
 if __name__ == "__main__":
-    unittest.main()
+    raise SystemExit(_module_main())
