@@ -15,7 +15,7 @@ import unittest
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from tests.real import test_p7_c11_deny_only_approval_probe as c11
 
@@ -42,7 +42,6 @@ class ExpectedAuthority:
     thread_sha256: str
     turn_sha256: str
     cwd_sha256: str
-    correlation_key: str
     target: str
     command_sha256: str
 
@@ -55,7 +54,6 @@ class CapturedRequest:
     thread_sha256: str
     turn_sha256: str
     cwd_sha256: str
-    correlation_key: str
     command_sha256: str
 
 
@@ -67,7 +65,6 @@ class CorrelatedWireRecord:
     thread_sha256: str
     turn_sha256: str
     cwd_sha256: str
-    correlation_key: str
     expected_target_sha256: str
     command_plaintext: str
     command_sha256: str
@@ -85,7 +82,6 @@ def _request_matches_expected(request: CapturedRequest, expected: ExpectedAuthor
         and request.thread_sha256 == expected.thread_sha256
         and request.turn_sha256 == expected.turn_sha256
         and request.cwd_sha256 == expected.cwd_sha256
-        and request.correlation_key == expected.correlation_key
     )
 
 
@@ -97,7 +93,6 @@ def _wire_matches_request(wire: CorrelatedWireRecord, request: CapturedRequest) 
         and wire.thread_sha256 == request.thread_sha256
         and wire.turn_sha256 == request.turn_sha256
         and wire.cwd_sha256 == request.cwd_sha256
-        and wire.correlation_key == request.correlation_key
     )
 
 
@@ -182,10 +177,10 @@ def strict_p7c12_match(
 SYNTHETIC_TARGET = "/synthetic/p7c12-target-0123456789abcdef"
 SYNTHETIC_ESCAPED_TARGET = SYNTHETIC_TARGET.replace("-", r"\-")
 SYNTHETIC_KIND = "COMMAND_EXECUTION"
-SYNTHETIC_CORRELATION = "synthetic-p7c12-correlation-1"
 SYNTHETIC_THREAD_SHA = _sha256("synthetic-p7c12-thread")
 SYNTHETIC_TURN_SHA = _sha256("synthetic-p7c12-turn")
 SYNTHETIC_CWD_SHA = _sha256("/synthetic/p7c12-cwd")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _synthetic_authority(
@@ -198,21 +193,20 @@ def _synthetic_authority(
     thread_sha256: str = SYNTHETIC_THREAD_SHA,
     turn_sha256: str = SYNTHETIC_TURN_SHA,
     cwd_sha256: str = SYNTHETIC_CWD_SHA,
-    correlation_key: str = SYNTHETIC_CORRELATION,
 ) -> tuple[CapturedRequest, ExpectedAuthority, CorrelatedWireRecord]:
     value = command if command is not None else shlex.join(["/bin/bash", "-lc", f"touch {target}"])
     digest = _sha256(value)
     request = CapturedRequest(
         kind, request_ordinal, local_sequence, thread_sha256, turn_sha256,
-        cwd_sha256, correlation_key, digest,
+        cwd_sha256, digest,
     )
     expected = ExpectedAuthority(
         kind, request_ordinal, local_sequence, thread_sha256, turn_sha256,
-        cwd_sha256, correlation_key, target, digest,
+        cwd_sha256, target, digest,
     )
     wire = CorrelatedWireRecord(
         kind, request_ordinal, local_sequence, thread_sha256, turn_sha256,
-        cwd_sha256, correlation_key, _sha256(target), value, digest,
+        cwd_sha256, _sha256(target), value, digest,
     )
     return request, expected, wire
 
@@ -269,7 +263,6 @@ class P7C12PositiveOfflineTests(unittest.TestCase):
             {"thread_sha256": _sha256("wrong-thread")},
             {"turn_sha256": _sha256("wrong-turn")},
             {"cwd_sha256": _sha256("/synthetic/other-cwd")},
-            {"correlation_key": "synthetic-p7c12-other-correlation"},
             {"kind": "FILE_CHANGE"},
             {"command_sha256": _sha256("synthetic-other-command")},
             {"target": "/synthetic/p7c12-other-target"},
@@ -375,6 +368,156 @@ class P7C12NegativeOfflineTests(unittest.TestCase):
             self.assertEqual(_run(request, expected, wire), MatcherResult.NO_MATCH_EXTRA_OPERATION)
 
 
+class AuthorityProjectionError(ValueError):
+    """Bounded test-only failure before any matcher projection is returned."""
+
+
+@dataclass(frozen=True)
+class RetainedAuthorityFixture:
+    journal_records: tuple[Mapping[str, Any], ...]
+    wire: Mapping[str, Any]
+    child_result: Mapping[str, Any]
+    parent_result: Mapping[str, Any] | None
+    parent_outcome: Mapping[str, Any] | None
+
+
+_APPROVAL_EVENT_RE = re.compile(r"^APPROVAL_REQUEST_([1-9][0-9]*)_OBSERVED$")
+_DENY_INTENT_RE = re.compile(r"^DENY_RESPONSE_([1-9][0-9]*)_DISPATCH_INTENT$")
+_DENY_RESULT_RE = re.compile(r"^DENY_RESPONSE_([1-9][0-9]*)_RESULT$")
+_RETAINED_TARGET_RE = re.compile(r"/root/\.codexcontrol-p7c11-escalation-probe-[0-9a-f]{32}")
+
+
+def _projection_require(condition: bool, reason: str) -> None:
+    if not condition:
+        raise AuthorityProjectionError(reason)
+
+
+def _valid_sha(value: object) -> bool:
+    return isinstance(value, str) and SHA256_RE.fullmatch(value) is not None
+
+
+def _candidate_target_from_wire(command: object, *, retained: bool) -> str:
+    """Recover one exact target in memory from an already validated wire."""
+    _projection_require(isinstance(command, str) and command, "WIRE_COMMAND_INVALID")
+    try:
+        vector = shlex.split(command, comments=False, posix=True)
+    except (TypeError, ValueError) as error:
+        raise AuthorityProjectionError("WIRE_COMMAND_NOT_SHLEX_CANONICAL") from error
+    _projection_require(shlex.join(vector) == command, "WIRE_COMMAND_NOT_SHLEX_CANONICAL")
+    _projection_require(vector[:2] == ["/bin/bash", "-lc"] and len(vector) == 3, "WIRE_COMMAND_VECTOR_INVALID")
+    try:
+        inner = shlex.split(vector[2], comments=False, posix=True)
+    except (TypeError, ValueError) as error:
+        raise AuthorityProjectionError("WIRE_INNER_NOT_SHLEX_CANONICAL") from error
+    _projection_require(shlex.join(inner) == vector[2] and len(inner) == 2 and inner[0] == "touch", "WIRE_INNER_INVALID")
+    target = inner[1]
+    _projection_require(vector[2] == f"touch {target}" and vector[2].count(target) == 1, "TARGET_CANDIDATE_INVALID")
+    if retained:
+        matches = _RETAINED_TARGET_RE.findall(vector[2])
+        _projection_require(len(matches) == 1 and matches[0] == target, "RETAINED_TARGET_CANDIDATE_INVALID")
+    return target
+
+
+def _require_deny_chronology(
+    records: Sequence[Mapping[str, Any]], *, request_ordinal: int,
+) -> None:
+    positions = {id(record): index for index, record in enumerate(records)}
+    intents = [(record, _DENY_INTENT_RE.fullmatch(str(record.get("event", "")))) for record in records]
+    results = [(record, _DENY_RESULT_RE.fullmatch(str(record.get("event", "")))) for record in records]
+    intents = [(record, match) for record, match in intents if match is not None]
+    results = [(record, match) for record, match in results if match is not None]
+    _projection_require(len(intents) == 1 and len(results) == 1, "DENY_CHRONOLOGY_CARDINALITY_INVALID")
+    intent, intent_match = intents[0]
+    result, result_match = results[0]
+    _projection_require(
+        int(intent_match.group(1)) == request_ordinal
+        and int(result_match.group(1)) == request_ordinal
+        and intent.get("request_count") == request_ordinal
+        and result.get("request_count") == request_ordinal,
+        "DENY_CHRONOLOGY_ORDINAL_INVALID",
+    )
+    _projection_require(
+        type(intent.get("attempt")) is int
+        and type(result.get("attempt")) is int
+        and intent.get("attempt") == result.get("attempt")
+        and intent.get("status") == "PENDING"
+        and result.get("result") == "DENIED_CONFIRMED",
+        "DENY_CHRONOLOGY_RESULT_INVALID",
+    )
+    request_records = [
+        record for record in records
+        if _APPROVAL_EVENT_RE.fullmatch(str(record.get("event", ""))) is not None
+    ]
+    _projection_require(len(request_records) == 1, "APPROVAL_REQUEST_CARDINALITY_INVALID")
+    request_position = positions[id(request_records[0])]
+    _projection_require(request_position < positions[id(intent)] < positions[id(result)], "DENY_CHRONOLOGY_ORDER_INVALID")
+
+
+def project_retained_authority(
+    fixture: RetainedAuthorityFixture, *, retained_target_shape: bool = False,
+) -> tuple[CapturedRequest, ExpectedAuthority, CorrelatedWireRecord]:
+    """Reconcile independent retained authorities, then project pure matcher inputs."""
+    records = fixture.journal_records
+    request_records = [
+        (record, _APPROVAL_EVENT_RE.fullmatch(str(record.get("event", ""))))
+        for record in records
+    ]
+    request_records = [(record, match) for record, match in request_records if match is not None]
+    _projection_require(len(request_records) == 1, "APPROVAL_REQUEST_CARDINALITY_INVALID")
+    journal_request, request_match = request_records[0]
+    ordinal = int(request_match.group(1))
+    _projection_require(type(journal_request.get("request_count")) is int and journal_request.get("request_count") == ordinal, "APPROVAL_REQUEST_ORDINAL_INVALID")
+    _projection_require(journal_request.get("kind") == "command_execution", "APPROVAL_REQUEST_KIND_INVALID")
+    _projection_require(
+        journal_request.get("thread_match") is True
+        and journal_request.get("turn_match") is True
+        and journal_request.get("cwd_match") is True,
+        "APPROVAL_REQUEST_IDENTITY_FLAGS_INVALID",
+    )
+    journal_wire_sha = journal_request.get("wire_command_sha256")
+    _projection_require(_valid_sha(journal_wire_sha), "APPROVAL_REQUEST_WIRE_SHA_INVALID")
+    _projection_require(journal_request.get("sentinel_reference_class") == c11.SENTINEL_EMBEDDED, "APPROVAL_REQUEST_SENTINEL_CLASS_INVALID")
+
+    wire = fixture.wire
+    _projection_require(wire.get("request_kind") == "command_execution", "WIRE_KIND_INVALID")
+    local_sequence = wire.get("local_request_sequence")
+    _projection_require(type(local_sequence) is int and local_sequence == ordinal, "WIRE_SEQUENCE_INVALID")
+    for key in ("thread_id_sha256", "turn_id_sha256", "actual_cwd_sha256", "expected_sentinel_path_sha256", "wire_command_sha256"):
+        _projection_require(_valid_sha(wire.get(key)), f"WIRE_{key.upper()}_INVALID")
+    wire_sha = wire["wire_command_sha256"]
+    _projection_require(journal_wire_sha == wire_sha, "JOURNAL_WIRE_SHA_MISMATCH")
+    command = wire.get("wire_command_plaintext")
+    _projection_require(_sha256(command) == wire_sha if isinstance(command, str) else False, "WIRE_COMMAND_SHA_MISMATCH")
+
+    # Identity hashes are projected only after the journal has proven all three matches.
+    target = _candidate_target_from_wire(command, retained=retained_target_shape)
+    candidate_target_sha = _sha256(target)
+    _projection_require(wire["expected_sentinel_path_sha256"] == candidate_target_sha, "WIRE_TARGET_SHA_MISMATCH")
+
+    child_hash = fixture.child_result.get("target_sentinel_path_sha256")
+    _projection_require(_valid_sha(child_hash) and child_hash == candidate_target_sha, "CHILD_TARGET_SHA_MISMATCH")
+    if fixture.parent_result is not None:
+        parent = fixture.parent_result
+        parent_hash = parent.get("parent_target_sentinel_path_sha256")
+        _projection_require(_valid_sha(parent_hash) and parent_hash == candidate_target_sha, "PARENT_TARGET_SHA_MISMATCH")
+        if "target_sentinel_path_sha256" in parent:
+            _projection_require(parent.get("target_sentinel_path_sha256") == candidate_target_sha, "PARENT_CHILD_TARGET_SHA_MISMATCH")
+    if fixture.parent_outcome is not None and "normal_final_result_present" in fixture.parent_outcome:
+        _projection_require(fixture.parent_outcome.get("normal_final_result_present") is True, "PARENT_OUTCOME_NOT_FINAL")
+
+    _require_deny_chronology(records, request_ordinal=ordinal)
+    thread_sha = wire["thread_id_sha256"]
+    turn_sha = wire["turn_id_sha256"]
+    cwd_sha = wire["actual_cwd_sha256"]
+    request = CapturedRequest("COMMAND_EXECUTION", ordinal, local_sequence, thread_sha, turn_sha, cwd_sha, wire_sha)
+    expected = ExpectedAuthority("COMMAND_EXECUTION", ordinal, local_sequence, thread_sha, turn_sha, cwd_sha, target, wire_sha)
+    correlated_wire = CorrelatedWireRecord(
+        "COMMAND_EXECUTION", ordinal, local_sequence, thread_sha, turn_sha, cwd_sha,
+        candidate_target_sha, command, wire_sha,
+    )
+    return request, expected, correlated_wire
+
+
 def _retained_c11_authority() -> tuple[CapturedRequest, ExpectedAuthority, CorrelatedWireRecord]:
     candidates = sorted(
         Path("/tmp").glob(
@@ -387,35 +530,109 @@ def _retained_c11_authority() -> tuple[CapturedRequest, ExpectedAuthority, Corre
     raw = c11.read_wire_authority(wire_path)
     journal = c11.read_authoritative_recovery_journal(wire_path.parent / "probe-recovery.json")
     child = c11.read_bounded_private_json(wire_path.parent / "probe-child-result.json")
-    if not child or not journal:
-        raise AssertionError("retained P7.C11 bounded authority is empty")
-    if raw["local_request_sequence"] != 1 or raw["request_kind"] != "command_execution":
-        raise AssertionError("retained P7.C11 request authority mismatch")
-    request_events = [record for record in journal if record.get("event") == "APPROVAL_REQUEST_1_OBSERVED"]
-    deny_results = [record for record in journal if record.get("event") == "DENY_RESPONSE_1_RESULT"]
-    if len(request_events) != 1 or len(deny_results) != 1 or deny_results[0].get("result") != "DENIED_CONFIRMED":
-        raise AssertionError("retained P7.C11 deny chronology mismatch")
-    target_matches = re.findall(r"/root/\.codexcontrol-p7c11-escalation-probe-[0-9a-f]{32}", raw["wire_command_plaintext"])
-    if len(target_matches) != 1:
-        raise AssertionError("retained P7.C11 target occurrence is not unique")
-    target = target_matches[0]
-    correlation = "retained-p7c11-authoritative-sequence-1"
-    request = CapturedRequest(
-        "COMMAND_EXECUTION", 1, raw["local_request_sequence"], raw["thread_id_sha256"],
-        raw["turn_id_sha256"], raw["actual_cwd_sha256"], correlation, raw["wire_command_sha256"],
+    c11.validate_child_result(child)
+    parent = c11.read_bounded_private_json(c11.REAL_PROBE_RESULT)
+    c11.validate_parent_final_result(parent)
+    outcome = c11.read_bounded_private_json(c11.REAL_PROBE_OUTCOME)
+    c11.validate_parent_execution_outcome(outcome)
+    fixture = RetainedAuthorityFixture(tuple(journal), raw, child, parent, outcome)
+    return project_retained_authority(fixture, retained_target_shape=True)
+
+
+def _synthetic_retained_authority() -> RetainedAuthorityFixture:
+    _request, expected, wire = _synthetic_authority()
+    journal = (
+        {
+            "event": "APPROVAL_REQUEST_1_OBSERVED", "request_count": 1,
+            "kind": "command_execution", "thread_match": True, "turn_match": True,
+            "cwd_match": True, "wire_command_sha256": wire.command_sha256,
+            "sentinel_reference_class": c11.SENTINEL_EMBEDDED,
+        },
+        {
+            "event": "DENY_RESPONSE_1_DISPATCH_INTENT", "status": "PENDING",
+            "attempt": 1, "request_count": 1,
+        },
+        {
+            "event": "DENY_RESPONSE_1_RESULT", "result": "DENIED_CONFIRMED",
+            "attempt": 1, "request_count": 1,
+        },
     )
-    expected = ExpectedAuthority(
-        "COMMAND_EXECUTION", 1, raw["local_request_sequence"], raw["thread_id_sha256"],
-        raw["turn_id_sha256"], raw["actual_cwd_sha256"], correlation, target,
-        raw["wire_command_sha256"],
-    )
-    wire = CorrelatedWireRecord(
-        "COMMAND_EXECUTION", 1, raw["local_request_sequence"], raw["thread_id_sha256"],
-        raw["turn_id_sha256"], raw["actual_cwd_sha256"], correlation,
-        raw["expected_sentinel_path_sha256"], raw["wire_command_plaintext"],
-        raw["wire_command_sha256"],
-    )
-    return request, expected, wire
+    wire_authority = {
+        "format": 1, "thread_id_sha256": wire.thread_sha256,
+        "turn_id_sha256": wire.turn_sha256, "actual_cwd_sha256": wire.cwd_sha256,
+        "expected_sentinel_path_sha256": wire.expected_target_sha256,
+        "wire_command_plaintext": wire.command_plaintext,
+        "wire_command_sha256": wire.command_sha256,
+        "request_kind": "command_execution", "local_request_sequence": 1,
+        "capture_status": "CAPTURED_ROOT_ONLY",
+    }
+    expected_target_sha = wire.expected_target_sha256
+    child = {"target_sentinel_path_sha256": expected_target_sha}
+    parent = {
+        "target_sentinel_path_sha256": expected_target_sha,
+        "parent_target_sentinel_path_sha256": expected_target_sha,
+    }
+    outcome = {"normal_final_result_present": True}
+    return RetainedAuthorityFixture(journal, wire_authority, child, parent, outcome)
+
+
+class P7C12RetainedAuthorityProjectionTests(unittest.TestCase):
+    def test_independent_authorities_project_only_after_all_bindings(self) -> None:
+        fixture = _synthetic_retained_authority()
+        request, expected, wire = project_retained_authority(fixture)
+        self.assertEqual(
+            set(request.__dict__),
+            {"kind", "request_ordinal", "local_sequence", "thread_sha256", "turn_sha256", "cwd_sha256", "command_sha256"},
+        )
+        self.assertEqual(strict_p7c12_match(request, expected, [wire]), MatcherResult.MATCH_EXACT_P7_APPROVAL_COMMAND)
+
+    def test_independent_authority_corruption_matrix_fails_before_match(self) -> None:
+        def mutate(
+            base: RetainedAuthorityFixture, *,
+            journal_changes: Mapping[int, Mapping[str, Any]] | None = None,
+            append_journal: Mapping[str, Any] | None = None,
+            wire_changes: Mapping[str, Any] | None = None,
+            child_changes: Mapping[str, Any] | None = None,
+            parent_changes: Mapping[str, Any] | None = None,
+        ) -> RetainedAuthorityFixture:
+            records = [dict(record) for record in base.journal_records]
+            for index, changes in (journal_changes or {}).items():
+                records[index].update(changes)
+            if append_journal is not None:
+                records.append(dict(append_journal))
+            return RetainedAuthorityFixture(
+                tuple(records), {**base.wire, **(wire_changes or {})},
+                {**base.child_result, **(child_changes or {})},
+                None if base.parent_result is None else {**base.parent_result, **(parent_changes or {})},
+                base.parent_outcome,
+            )
+
+        base = _synthetic_retained_authority()
+        request_record = base.journal_records[0]
+        result_record = base.journal_records[2]
+        cases = (
+            ("journal wire SHA", mutate(base, journal_changes={0: {"wire_command_sha256": "0" * 64}})),
+            ("journal kind", mutate(base, journal_changes={0: {"kind": "file_change"}})),
+            ("journal ordinal", mutate(base, journal_changes={0: {"request_count": 2}})),
+            ("journal thread flag", mutate(base, journal_changes={0: {"thread_match": False}})),
+            ("journal Turn flag", mutate(base, journal_changes={0: {"turn_match": False}})),
+            ("journal cwd flag", mutate(base, journal_changes={0: {"cwd_match": False}})),
+            ("journal sentinel class", mutate(base, journal_changes={0: {"sentinel_reference_class": c11.SENTINEL_EXACT_ARG}})),
+            ("DENY ordinal", mutate(base, journal_changes={1: {"event": "DENY_RESPONSE_2_DISPATCH_INTENT", "request_count": 2}})),
+            ("DENY attempt", mutate(base, journal_changes={2: {"attempt": 2}})),
+            ("DENY unknown result", mutate(base, journal_changes={2: {"result": "RESPONSE_UNKNOWN"}})),
+            ("DENY chronology", mutate(base, journal_changes={1: {"event": "DENY_RESPONSE_1_RESULT", "result": "DENIED_CONFIRMED"}, 2: {"event": "DENY_RESPONSE_1_DISPATCH_INTENT", "status": "PENDING"}})),
+            ("child target SHA", mutate(base, child_changes={"target_sentinel_path_sha256": "1" * 64})),
+            ("parent target SHA", mutate(base, parent_changes={"parent_target_sentinel_path_sha256": "2" * 64})),
+            ("wire target SHA", mutate(base, wire_changes={"expected_sentinel_path_sha256": "3" * 64})),
+            ("multiple approval records", mutate(base, append_journal=request_record)),
+            ("multiple DENY result records", mutate(base, append_journal=result_record)),
+        )
+        self.assertEqual(len(cases), 16)
+        for label, corrupted in cases:
+            with self.subTest(case=label):
+                with self.assertRaises(AuthorityProjectionError):
+                    project_retained_authority(corrupted)
 
 
 class P7C12RetainedGoldenOfflineTests(unittest.TestCase):

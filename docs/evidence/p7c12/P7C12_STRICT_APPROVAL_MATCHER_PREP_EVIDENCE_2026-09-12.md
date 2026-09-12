@@ -1,17 +1,18 @@
-# P7.C12 strict approval matcher preparation evidence — 2026-09-12
+# P7.C12 strict approval matcher preparation — Repair-1 evidence — 2026-09-12
 
-## Scope and base authority
+## Scope and lineage
 
-This is an offline, test-only matcher construction. No Codex process, app
-server, RPC, approval response, target operation, retained-authority rewrite,
-or hard-delete operation was performed.
+Repair-1 is an offline, test-only retained-golden-authority repair. No real
+probe, app-server, RPC, approval response, target operation, retained-file
+rewrite, hard delete, P8 work, or P9 work was performed.
 
-ARCHITECT_BASE_HEAD=38829736cf91cb4f5375c597e8a011675c796e19
-ARCHITECT_BASE_TREE=397c576011b456225f7130600e489020e711b690
-IMPLEMENTATION_BRANCH=impl-p7-c12-strict-approval-matcher-prep-2026-09-12
-IMPLEMENTATION_START_HEAD=38829736cf91cb4f5375c597e8a011675c796e19
-IMPLEMENTATION_START_TREE=397c576011b456225f7130600e489020e711b690
-ORIGIN_MAIN_AUTHORITY=UNCHANGED_AT_REQUIRED_HEAD
+REPAIR_BRANCH=impl-p7-c12-strict-approval-matcher-prep-repair1-2026-09-12
+REPAIR1_BASE_HEAD=4d57b95650c972d26baa33c51f80a85a70b17564
+REPAIR1_BASE_TREE=e7810d891e73dfc93a274053a8f431c5fcb2c022
+ARCHITECT_MAIN_HEAD=ab778b397ed478c8e24cf3408d821e97050e851a
+ARCHITECT_MAIN_TREE=897f70d220b6a2f12c0938738fb59325f51d2ef5
+ORIGIN_MAIN_AUTHORITY=UNCHANGED
+ORIGINAL_MATCHER_BLOB=00ba41a13ad492179989d97c7b5dc59f671b4883
 
 P7C11_FORENSIC_COMMIT=5f1bef2045dd526e22f9b3fb24d42c9f4827962a
 P7C11_FORENSIC_EVIDENCE_BLOB=4e56f592f99f16182169b0fb6ec68f304b506be5
@@ -21,133 +22,159 @@ P7C11_ACCEPTED_HARNESS_BLOB=fc67299d80c3d617280975182c097a92cb863b92
 
 ## Changed-file authority
 
-Exactly these two tracked files are in scope:
+Allowed tracked paths changed by Repair-1:
 
 - `tests/real/test_p7_c12_strict_approval_matcher.py`
 - `docs/evidence/p7c12/P7C12_STRICT_APPROVAL_MATCHER_PREP_EVIDENCE_2026-09-12.md`
 
-MATCHER_BLOB_SHA=00ba41a13ad492179989d97c7b5dc59f671b4883
-HELPER_BLOB_SHA=NONE
+NEW_MATCHER_BLOB=e3a94659dd6765f5d6fe5d35aa6b5e65172720f1
+HELPER_BLOB=NONE
 PRODUCTION_SRC_CHANGES=NONE
 HISTORICAL_P7C6_P7C11_CHANGES=NONE
 PREEXISTING_UNTRACKED_FILE=tests/real/__init__.py
 PREEXISTING_UNTRACKED_FILE_HANDLING=PRESERVED_UNSTAGED_UNMODIFIED
 
-## Matcher construction and finite classes
+## Matcher and correlation repair
 
-The new matcher is `strict_p7c12_match`. It returns only the following closed
-classification:
+The accepted strict matcher grammar is unchanged: exact command kind,
+ordinal/local sequence, thread/Turn/cwd identity, one wire, SHA binding,
+canonical `shlex` round trip, vector length 3, `/bin/bash`, `-lc`, literal
+two-token `touch <target>`, one target occurrence, exact inner tokens, and
+fail-closed rejection of alternate, compound, redirect, expansion, wildcard,
+wrapper, retry, and equivalent-executable forms.
 
-- `MATCH_EXACT_P7_APPROVAL_COMMAND`
-- `NO_MATCH_KIND`
-- `NO_MATCH_REQUEST_IDENTITY`
-- `NO_MATCH_WIRE_AUTHORITY`
-- `NO_MATCH_VECTOR`
-- `NO_MATCH_SHELL_EXECUTABLE`
-- `NO_MATCH_SHELL_OPTION`
-- `NO_MATCH_INNER_COMMAND`
-- `NO_MATCH_TARGET`
-- `NO_MATCH_EXTRA_OPERATION`
-- `NO_MATCH_AMBIGUOUS_OR_MULTIPLE`
-
-FINITE_MATCHER_CLASSES=11
+CORRELATION_AUTHORITY_FIELD=REMOVED_FROM_EXPECTED_REQUEST_WIRE_AND_FIXTURES
+CORRELATION_PROOF_FIELDS=ORDINAL_LOCAL_SEQUENCE_KIND_THREAD_TURN_CWD_WIRE_SHA
+MATCHER_REMAINS_PURE=YES
 MATCHER_SENDS_APPROVAL_RESPONSE=NO
 MATCHER_EXECUTES_COMMAND=NO
-MATCHER_HAS_REAL_EXECUTION_GATE=NO
+FINITE_MATCHER_CLASSES=11
 
-The match path requires all of the following: exact
-`COMMAND_EXECUTION` kind; exact request ordinal and local sequence; exact
-thread, Turn, cwd and correlation identity; exactly one correlated wire
-record; wire/request identity agreement; stable command SHA agreement across
-expected authority, request capture and wire record; valid canonical
-`shlex` round-trip; vector length exactly 3; outer token 0 exactly
-`/bin/bash`; outer token 1 exactly `-lc`; outer token 2 exactly the literal
-two-token script `touch <expected-target>`; exactly one target occurrence; and
-the exact two-token inner lexical result `touch`, exact expected target.
+## Retained authority projection
 
-EXACT_SHELL_EXECUTABLE_GATE=/bin/bash
-EXACT_SHELL_OPTION_GATE=-lc
-EXACT_INNER_EXECUTABLE_GATE=touch
-EXACT_INNER_TARGET_GATE=ONE_EXACT_EXPECTED_TARGET_TOKEN
-VECTOR_LENGTH_GATE=3
-TARGET_OCCURRENCE_GATE=1
-IDENTITY_CORRELATION_GATES=KIND_ORDINAL_SEQUENCE_THREAD_TURN_CWD_CORRELATION
-WIRE_CORRELATION_GATE=EXACTLY_ONE_RECORD_AND_IDENTITY_AGREEMENT
-COMMAND_SHA_BINDING_GATE=EXPECTED_REQUEST_WIRE_STABLE_EQUALITY
+The retained golden replay reads these sources separately through the accepted
+bounded/no-follow readers:
 
-## Offline proof matrix
+REQUEST_SIDE_AUTHORITY=RecoveryJournal
+WIRE_SIDE_AUTHORITY=ROOT_ONLY_WIRE
+CHILD_TARGET_AUTHORITY=PROBE_CHILD_RESULT
+PARENT_TARGET_AUTHORITY=GLOBAL_PARENT_RESULT
+PARENT_OUTCOME_AUTHORITY=GLOBAL_PARENT_OUTCOME
 
-POSITIVE_TEST_METHODS=4
-POSITIVE_TEST_RESULT=PASS
-POSITIVE_CASES=EXACT_SYNTHETIC;CANONICAL_SHLEX_ROUND_TRIP;25_REPEATED_INVOCATIONS
-POSITIVE_REPORTED_SUBTESTS=9_AUTHORITY_MUTATIONS
-AUTHORITY_MUTATION_CASES=9
-AUTHORITY_MUTATION_RESULT=ALL_FAIL_CLOSED
+JOURNAL_REQUEST_RECORD_COUNT=1
+JOURNAL_REQUEST_RECORD_RESULT=APPROVAL_REQUEST_1_OBSERVED_VALIDATED
+JOURNAL_REQUEST_KIND=COMMAND_EXECUTION
+JOURNAL_IDENTITY_THREAD_MATCH=TRUE
+JOURNAL_IDENTITY_TURN_MATCH=TRUE
+JOURNAL_IDENTITY_CWD_MATCH=TRUE
+JOURNAL_SENTINEL_REFERENCE_CLASS=EMBEDDED_OCCURRENCE
+JOURNAL_TO_WIRE_SHA_BINDING=PASS
+REQUEST_WIRE_INDEPENDENT_BINDING=PASS
 
-NEGATIVE_TEST_METHODS=5
+Wire identity hashes are projected into matcher objects only after the
+independent journal flags and journal-to-wire SHA equality pass. The matcher
+itself reads no files.
+
+DENY_REQUEST_ORDINAL=1
+DENY_DISPATCH_INTENT_COUNT=1
+DENY_RESULT_COUNT=1
+DENY_RESULT=DENIED_CONFIRMED
+DENY_REQUEST_BEFORE_INTENT=PASS
+DENY_INTENT_BEFORE_RESULT=PASS
+DENY_CHRONOLOGY_BINDING=PASS
+
+The dispatch intent is not treated as completion authority. Wrong ordinal,
+attempt mismatch, unknown result, duplicate result, and reordered chronology
+all fail closed before a matcher projection is returned.
+
+Candidate target reconstruction is private in memory and uses the validated
+wire grammar. No target plaintext is published.
+
+WIRE_TARGET_SHA_MATCH=YES
+CHILD_TARGET_SHA_MATCH=YES
+PARENT_TARGET_SHA_MATCH=YES
+TARGET_MULTI_AUTHORITY_BINDING=PASS
+
+## Independent-authority negative matrix
+
+The in-memory retained-authority fixture independently corrupted each case
+below. Every case failed in the projection gate before
+`MATCH_EXACT_P7_APPROVAL_COMMAND` could be established:
+
+1. journal wire command SHA;
+2. journal kind;
+3. journal ordinal/request count;
+4. journal thread-match flag;
+5. journal Turn-match flag;
+6. journal cwd-match flag;
+7. journal sentinel-reference class;
+8. DENY request ordinal;
+9. DENY attempt;
+10. DENY result `RESPONSE_UNKNOWN`;
+11. DENY chronology order;
+12. child target SHA;
+13. parent target SHA;
+14. wire expected target SHA;
+15. duplicate approval request record;
+16. duplicate DENY result record.
+
+INDEPENDENT_AUTHORITY_CORRUPTION_CASES=16
+INDEPENDENT_AUTHORITY_CORRUPTION_FAILED_BEFORE_MATCH=16
+INDEPENDENT_AUTHORITY_CORRUPTION_MATRIX=16_OF_16_FAIL_CLOSED
+
+## Offline matcher proof
+
+POSITIVE_EXACT_MATCH_TEST_METHODS=3
+POSITIVE_AUTHORITY_PROJECTION_TEST_METHODS=1
+POSITIVE_RESULT=PASS
+POSITIVE_REPORTED_SUBTESTS=8_AUTHORITY_MUTATIONS
 NEGATIVE_COMMAND_MATRIX_CASES=37
-NEGATIVE_REPORTED_SUBTESTS=43
-NEGATIVE_ASSERTION_CASES=56
-NEGATIVE_TEST_RESULT=PASS
-NEGATIVE_COVERAGE=KIND_ORDINAL_SEQUENCE_THREAD_TURN_CWD_MISSING_WIRE_DUPLICATE_WIRE_HASH_MISMATCH_MALFORMED_SHLEX_VECTOR_LENGTHS_SHELLS_OPTIONS_TARGET_FORMS_WHITESPACE_QUOTES_ESCAPES_EXTRA_ARGUMENTS_NEWLINE_COMPOUND_OPERATORS_REDIRECTS_SUBSTITUTION_EXPANSION_WILDCARD_WRAPPERS_SECOND_TOUCH_RETRY_EQUIVALENT_EXECUTABLE
-
+NEGATIVE_COMMAND_AND_IDENTITY_TEST_METHODS=5
+NEGATIVE_AUTHORITY_PROJECTION_TEST_METHODS=1
+NEGATIVE_REPORTED_SUBTESTS=59
+NEGATIVE_RESULT=PASS
 SUBSTRING_MATCH_CAN_NEVER_PRODUCE_MATCH=PASS
-SUBSTRING_REJECTION_CLASS=NO_MATCH_TARGET
 COMPOUND_COMMAND_REJECTION_CAN_NEVER_PRODUCE_MATCH=PASS
-COMPOUND_COMMAND_REJECTION_CLASS=NO_MATCH_EXTRA_OPERATION
 MALFORMED_INPUT_FAIL_CLOSED=PASS
-MALFORMED_INPUT_CLASS=NO_MATCH_WIRE_AUTHORITY
 VECTOR_LENGTHS_0_1_2_4_5_FAIL_CLOSED=PASS
 IDENTITY_COMPONENT_INDEPENDENT_MUTATIONS_FAIL_CLOSED=PASS
 REPEATED_INVOCATION_SIDE_EFFECTS=ZERO
 
-## Retained P7.C11 golden replay
+## Retained golden replay and validation
 
-The unique retained P7.C11 wire and recovery records were loaded locally
-through the accepted bounded, no-follow readers from the immutable harness.
-The child result was also read through the accepted bounded reader. The
-retained request and wire were projected into private in-memory matcher
-records; no retained plaintext, identity, cwd or target was emitted.
+The retained RecoveryJournal, root-only wire, child result, global parent
+result, and global parent outcome were read-only validated. The repaired
+projection then produced the pure matcher inputs and matched the retained
+wire in memory.
 
-RETAINED_C11_REQUEST_ORDINAL=1
-RETAINED_C11_LOCAL_SEQUENCE=1
-RETAINED_C11_KIND=COMMAND_EXECUTION
-RETAINED_C11_VECTOR_LENGTH=3
-RETAINED_C11_OUTER_SHELL_CLASS=BASH_ABSOLUTE
-RETAINED_C11_OUTER_OPTION_CLASS=DASH_LC
-RETAINED_C11_INNER_CLASS=TOUCH_EXECUTABLE_PLUS_EXACT_TARGET
-RETAINED_C11_REQUEST_WIRE_CORRELATION=PASS
-RETAINED_C11_COMMAND_SHA_BINDING=PASS
-RETAINED_C11_TARGET_SHA_BINDING=PASS
-RETAINED_C11_DENY_CHRONOLOGY_READ_ONLY=PASS
 P7C11_RETAINED_WIRE_GOLDEN_MATCH=MATCH_EXACT_P7_APPROVAL_COMMAND
-P7C12_RETAINED_C11_GOLDEN_REPLAY=PASS
-
-## Validation
+P7C12_REPAIR1_REQUEST_WIRE_INDEPENDENT_BINDING=PASS
+P7C12_REPAIR1_DENY_CHRONOLOGY_BINDING=PASS
+P7C12_REPAIR1_TARGET_MULTI_AUTHORITY_BINDING=PASS
+P7C12_REPAIR1_GOLDEN_REPLAY=PASS
 
 FOCUSED_TEST_COMMAND=PYTHONPATH=src python -m pytest -q tests/real/test_p7_c12_strict_approval_matcher.py
-FOCUSED_TESTS=10_PASSED
-FOCUSED_SUBTESTS=52_PASSED
+FOCUSED_TESTS=12_PASSED
+FOCUSED_SUBTESTS=67_PASSED
 COMPLETE_NON_REAL_REGRESSION_COMMAND=PYTHONPATH=src python -m pytest -q -k 'not real_authorities_are_unset_and_gate_is_disabled and not preflight_checks_exact_target_without_precreating_it'
-COMPLETE_NON_REAL_REGRESSION=1773_PASSED_7_SKIPPED
+COMPLETE_NON_REAL_REGRESSION=1775_PASSED_7_SKIPPED_6_DESELECTED
 COMPLETE_NON_REAL_REGRESSION_WARNINGS=2_PREEXISTING
-FULL_COLLECTION_CONSUMED_LATCH_FAILURES=6_EXPECTED_AND_REPORTED_SEPARATELY
 COMPILEALL=PASS
 GIT_DIFF_CHECK=PASS
 
-The six separately reported immutable failures are the five P7.C7–P7.C11
-`test_real_authorities_are_unset_and_gate_is_disabled` checks plus the
-historical P7.C11 `test_preflight_checks_exact_target_without_precreating_it`.
-Each fails only because the intentionally consumed P7.C7–P7.C11 latch
-authority is present. No latch/result/outcome file was deleted, rewritten, or
-used as a writable test fixture.
+The six separately reported historical consumed-latch failures are not run in
+Repair-1: the five P7.C7–P7.C11 `real_authorities_are_unset_and_gate_is_disabled`
+checks and the historical P7.C11 `preflight_checks_exact_target_without_precreating_it`
+check would fail only because consumed one-shot latch authority is present.
+No latch, result, outcome, SQLite state, or historical authority was deleted,
+rewritten, or used as a writable fixture.
 
-## Security and effect accounting
+## Leakage and zero-effect accounting
 
 LEAKAGE_SCAN=PASS
-LEAKAGE_SCAN_SCOPE=NEW_MATCHER_AND_P7C12_EVIDENCE
+LEAKAGE_SCAN_SCOPE=REPAIR1_SOURCE_AND_EVIDENCE_EXACT_RETAINED_VALUES
+LEAKAGE_SCAN_RAW_RETAINED_COMMAND=ABSENT
 LEAKAGE_SCAN_RAW_RETAINED_TARGET=ABSENT
-LEAKAGE_SCAN_RAW_RETAINED_WIRE=ABSENT
 LEAKAGE_SCAN_RAW_RETAINED_IDENTITIES=ABSENT
 LEAKAGE_SCAN_RAW_ROOT_ONLY_JSON=ABSENT
 P7C11_AUTHORIZATION_ENVIRONMENT_CREATED=NO
@@ -169,6 +196,7 @@ TELEGRAM_CALLS=0
 PROCESS_SIGNALS=0
 TARGET_FILESYSTEM_MUTATIONS=0
 RETAINED_AUTHORITY_MUTATIONS=0
+HISTORICAL_LATCH_MUTATIONS=0
 RETAINED_SQLITE_WRITES=0
 
 ## Final authority
@@ -176,6 +204,10 @@ RETAINED_SQLITE_WRITES=0
 P7C12_MATCHER_CONSTRUCTED=YES
 P7C12_MATCHER_OFFLINE_PROOF=PASS
 P7C12_RETAINED_C11_GOLDEN_REPLAY=PASS
+P7C12_REPAIR1_REQUEST_WIRE_INDEPENDENT_BINDING=PASS
+P7C12_REPAIR1_DENY_CHRONOLOGY_BINDING=PASS
+P7C12_REPAIR1_TARGET_MULTI_AUTHORITY_BINDING=PASS
+P7C12_REPAIR1_GOLDEN_REPLAY=PASS
 P7C12_REAL_EXECUTION_AUTHORIZED=NO
 P7C12_REAL_ALLOW_AUTHORIZED=NO
 P7C12_HARD_DELETE_EXECUTION_AUTHORIZED=NO
