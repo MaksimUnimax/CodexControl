@@ -1865,6 +1865,16 @@ class Turn4GateResult:
     active_proof: bool
     request_observer_joined: bool
     terminal_waiter_joined: bool
+    request_observer_class: str
+    preliminary_request_done: bool
+
+
+class Turn4RequestObserverClass(StrEnum):
+    """Terminal classes for the observation-only Turn-4 request waiter."""
+
+    REQUEST_OBSERVED = "REQUEST_OBSERVED"
+    CANCELLED_BY_HARNESS_WITHOUT_REQUEST = "CANCELLED_BY_HARNESS_WITHOUT_REQUEST"
+    OBSERVER_ERROR = "OBSERVER_ERROR"
 
 
 def _turn4_task_fact(task: asyncio.Task[Any]) -> tuple[Any | None, bool]:
@@ -1875,6 +1885,23 @@ def _turn4_task_fact(task: asyncio.Task[Any]) -> tuple[Any | None, bool]:
         return task.result(), False
     except (asyncio.CancelledError, Exception):
         return None, True
+
+
+def _classify_turn4_request_observer(
+    task: asyncio.Task[Any], *, harness_cancel_requested: bool,
+) -> tuple[Turn4RequestObserverClass, int, bool]:
+    """Classify the request observer only after its final join has completed."""
+    if not task.done():
+        return Turn4RequestObserverClass.OBSERVER_ERROR, 0, True
+    if task.cancelled():
+        if harness_cancel_requested:
+            return Turn4RequestObserverClass.CANCELLED_BY_HARNESS_WITHOUT_REQUEST, 0, False
+        return Turn4RequestObserverClass.OBSERVER_ERROR, 0, True
+    try:
+        task.result()
+    except BaseException:
+        return Turn4RequestObserverClass.OBSERVER_ERROR, 0, True
+    return Turn4RequestObserverClass.REQUEST_OBSERVED, 1, False
 
 
 async def _join_turn4_task(task: asyncio.Task[Any], *, timeout: float, stage: str) -> None:
@@ -1915,6 +1942,8 @@ async def observe_owned_turn4(
     active_proof = False
     observer_fault = False
     terminal_fault = False
+    request_cancel_requested = False
+    preliminary_request_done = False
 
     try:
         done, _ = await asyncio.wait(
@@ -1984,15 +2013,23 @@ async def observe_owned_turn4(
     finally:
         # The request observer remains owned through terminal convergence.
         await asyncio.sleep(0)
-        if request_task.done():
-            _, request_fault = _turn4_task_fact(request_task)
-            observer_fault = observer_fault or request_fault
-            if not request_fault:
-                unexpected_request_count = 1
+        # This is only a diagnostic snapshot. It is deliberately not used for
+        # the final PASS predicate because a request may complete immediately
+        # after this point while the owned terminal waiter is being joined.
+        preliminary_request_done = request_task.done()
         if not terminal_task.done():
             await _join_turn4_task(terminal_task, timeout=join_timeout, stage="Turn-4 terminal waiter")
+        # Let a request delivered while the terminal waiter was closing finish
+        # its owned observer task before deciding whether cancellation wins.
+        await asyncio.sleep(0)
         if not request_task.done():
+            request_cancel_requested = True
             await _join_turn4_task(request_task, timeout=join_timeout, stage="Turn-4 request observer")
+        request_observer_class, final_unexpected_request_count, final_observer_fault = _classify_turn4_request_observer(
+            request_task, harness_cancel_requested=request_cancel_requested,
+        )
+        unexpected_request_count = final_unexpected_request_count
+        observer_fault = observer_fault or final_observer_fault
 
     interrupt_ok = (
         interrupt is not None
@@ -2001,6 +2038,7 @@ async def observe_owned_turn4(
     )
     passed = (
         active_proof and not observer_fault and not terminal_fault
+        and request_observer_class is Turn4RequestObserverClass.CANCELLED_BY_HARNESS_WITHOUT_REQUEST
         and unexpected_request_count == 0
         and interrupt_ok
         and getattr(terminal, "status", None) is TurnTerminalStatus.FAILED
@@ -2011,6 +2049,8 @@ async def observe_owned_turn4(
         unexpected_request_count=unexpected_request_count, same_tick=same_tick,
         active_proof=active_proof, request_observer_joined=request_task.done(),
         terminal_waiter_joined=terminal_task.done(),
+        request_observer_class=request_observer_class,
+        preliminary_request_done=preliminary_request_done,
     )
 
 
@@ -3053,7 +3093,10 @@ class _Turn4FakeProtocolClient:
 
 
 class _Turn4FakeLifecycle:
-    def __init__(self, binding: TurnBinding, *, terminal_ready: bool = False) -> None:
+    def __init__(
+        self, binding: TurnBinding, *, terminal_ready: bool = False,
+        complete_on_interrupt: bool = True,
+    ) -> None:
         self.binding = binding
         self.terminal_event = asyncio.Event()
         if terminal_ready:
@@ -3061,11 +3104,20 @@ class _Turn4FakeLifecycle:
         self.terminal_status = TurnTerminalStatus.FAILED
         self.interrupt_calls = 0
         self.on_interrupt: Callable[[], Any] | None = None
+        self.complete_on_interrupt = complete_on_interrupt
+        self.on_wait_cancel: Callable[[], Any] | None = None
 
     async def wait_turn(self, binding: TurnBinding) -> TurnTerminalResult:
         if binding != self.binding:
             raise AssertionError("wrong Turn-4 binding")
-        await self.terminal_event.wait()
+        try:
+            await self.terminal_event.wait()
+        except asyncio.CancelledError:
+            if self.on_wait_cancel is not None:
+                callback = self.on_wait_cancel()
+                if hasattr(callback, "__await__"):
+                    await callback
+            raise
         return TurnTerminalResult(binding, self.terminal_status, ())
 
     async def interrupt_turn(self, binding: TurnBinding) -> TurnInterruptResult:
@@ -3076,9 +3128,15 @@ class _Turn4FakeLifecycle:
             callback = self.on_interrupt()
             if hasattr(callback, "__await__"):
                 await callback
-        self.terminal_event.set()
+        if self.complete_on_interrupt:
+            self.terminal_event.set()
         terminal = TurnTerminalResult(binding, TurnTerminalStatus.FAILED, ())
         return TurnInterruptResult(TurnInterruptStatus.CONFIRMED, binding, terminal)
+
+
+class _Turn4ErrorProtocolClient(_Turn4FakeProtocolClient):
+    async def next_server_request(self) -> Any:
+        raise RuntimeError("synthetic observer failure")
 
 
 class P7C13OfflineFlowTests(unittest.TestCase):
@@ -3298,6 +3356,7 @@ class P7C13OfflineFlowTests(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertIs(result.interrupt.status, TurnInterruptStatus.CONFIRMED)
         self.assertEqual(0, result.unexpected_request_count)
+        self.assertEqual(Turn4RequestObserverClass.CANCELLED_BY_HARNESS_WITHOUT_REQUEST, result.request_observer_class)
         self.assertTrue(result.request_observer_joined)
         self.assertTrue(result.terminal_waiter_joined)
 
@@ -3390,6 +3449,62 @@ class P7C13OfflineFlowTests(unittest.TestCase):
         self.assertFalse(result.passed)
         self.assertTrue(result.same_tick)
         self.assertEqual(0, interrupt_calls)
+
+    def test_turn4_late_request_after_preliminary_snapshot_is_nonpass(self) -> None:
+        async def scenario() -> tuple[Turn4GateResult, _Turn4FakeProtocolClient, EffectBudget, int, int]:
+            client = _Turn4FakeProtocolClient()
+            lifecycle = _Turn4FakeLifecycle(
+                TurnBinding("p", "thread", "turn-4"), complete_on_interrupt=False,
+            )
+            # The request is delivered from terminal-waiter cancellation. This
+            # is precisely after the preliminary done() snapshot and before
+            # the final request-observer join.
+            lifecycle.on_wait_cancel = lambda: client.requests.put_nowait(object())
+            budget = EffectBudget()
+            budget.counts = {"approval_responses": 1, "allow_responses": 1}
+            controller_callbacks = 0
+            delete_callbacks = 0
+            result = await observe_owned_turn4(
+                client=client, turn_lifecycle=lifecycle, binding=lifecycle.binding,
+                budget=budget, active_timeout=0.01, interrupt_timeout=0.01,
+                join_timeout=0.1,
+            )
+            if result.passed:
+                controller_callbacks += 1
+                delete_callbacks += 1
+            return result, client, budget, controller_callbacks, delete_callbacks
+
+        result, client, budget, controller_callbacks, delete_callbacks = asyncio.run(scenario())
+        self.assertFalse(result.preliminary_request_done)
+        self.assertEqual(Turn4RequestObserverClass.REQUEST_OBSERVED, result.request_observer_class)
+        self.assertEqual(1, result.unexpected_request_count)
+        self.assertFalse(result.passed)
+        self.assertEqual(0, client.response_calls)
+        self.assertEqual(1, budget.count("approval_responses"))
+        self.assertEqual(1, budget.count("allow_responses"))
+        self.assertEqual(0, budget.count("deny_responses"))
+        self.assertEqual(0, controller_callbacks)
+        self.assertEqual(0, delete_callbacks)
+        self.assertTrue(result.request_observer_joined)
+        self.assertTrue(result.terminal_waiter_joined)
+
+    def test_turn4_observer_exception_is_nonpass_and_not_harness_cancellation(self) -> None:
+        async def scenario() -> tuple[Turn4GateResult, _Turn4ErrorProtocolClient]:
+            client = _Turn4ErrorProtocolClient()
+            lifecycle = _Turn4FakeLifecycle(TurnBinding("p", "thread", "turn-4"))
+            result = await observe_owned_turn4(
+                client=client, turn_lifecycle=lifecycle, binding=lifecycle.binding,
+                budget=EffectBudget(), active_timeout=0.1, interrupt_timeout=0.1,
+            )
+            return result, client
+
+        result, client = asyncio.run(scenario())
+        self.assertEqual(Turn4RequestObserverClass.OBSERVER_ERROR, result.request_observer_class)
+        self.assertEqual(0, result.unexpected_request_count)
+        self.assertFalse(result.passed)
+        self.assertEqual(0, client.response_calls)
+        self.assertTrue(result.request_observer_joined)
+        self.assertTrue(result.terminal_waiter_joined)
 
     def test_turn4_observer_and_terminal_waiter_are_joined_without_detached_tasks(self) -> None:
         async def scenario() -> Turn4GateResult:

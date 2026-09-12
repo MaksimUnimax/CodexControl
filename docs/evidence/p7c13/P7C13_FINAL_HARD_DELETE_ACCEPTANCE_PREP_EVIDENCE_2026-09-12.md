@@ -1,6 +1,6 @@
-# P7.C13 preparation Repair-5 evidence — 2026-09-12
+# P7.C13 preparation Repair-6 evidence — 2026-09-12
 
-Status: **REPAIR-5 PREPARATION READY / ZERO REAL EFFECT / NO REAL EXECUTION**
+Status: **REPAIR-6 PREPARATION READY / ZERO REAL EFFECT / NO REAL EXECUTION**
 
 ## Authority, lineage and scope
 
@@ -8,7 +8,13 @@ Status: **REPAIR-5 PREPARATION READY / ZERO REAL EFFECT / NO REAL EXECUTION**
 
 `REPAIR5_BASE_TREE=2968187b6300e1ed03e336340aa906c199819d48`
 
-`PRIOR_HARNESS_BLOB=61853860ed0955df6119edb288d22573299cd1b3`
+`REPAIR5_PRIOR_HARNESS_BLOB=61853860ed0955df6119edb288d22573299cd1b3`
+
+`REPAIR6_BASE_HEAD=c09b5b3dfb197a647bd2f732ed343d42bf4aec0e`
+
+`REPAIR6_BASE_TREE=4ecd65c7a251b5931b579b3b324724731fda785b`
+
+`PRIOR_HARNESS_BLOB=cb64f44bc71339300e2d697167daa08b0b601f15`
 
 `P7C12_MATCHER_BLOB=f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1`
 
@@ -16,15 +22,19 @@ Status: **REPAIR-5 PREPARATION READY / ZERO REAL EFFECT / NO REAL EXECUTION**
 
 `ARCHITECT_MAIN_TREE=bd7e027d014401e45c4149fdf1f3db3f020100b3`
 
-`FINAL_HARNESS_BLOB=cb64f44bc71339300e2d697167daa08b0b601f15`
+`REPAIR6_ARCHITECT_MAIN_HEAD=13617b8e5364cd66b32d488b2c9767e106aa70d2`
+
+`REPAIR6_ARCHITECT_MAIN_TREE=5d5fbc6a583b4fcb87de026737189e18ae96e0b3`
+
+`FINAL_HARNESS_BLOB=5a1fe8e32cd985b1e1845d73266211632e33950c`
 
 `FINAL_EVIDENCE_BLOB=DERIVED_BY_FINAL_REMOTE_READBACK`
 
-`HELPER_BLOB=NONE — Repair-5 helper is in the harness file`
+`HELPER_BLOB=NONE — no optional helper; Repair-6 changes are in the harness file`
 
-The branch starts at the exact accepted Repair-4 commit and remains linear. No
-merge, rebase, squash or history rewrite was used. Tracked modifications are
-limited to this evidence file and the P7.C13 harness. The pre-existing
+The Repair-6 branch starts at the exact accepted Repair-5 commit and remains
+linear. No merge, rebase, squash or history rewrite was used. Tracked
+modifications are limited to this evidence file and the P7.C13 harness. The pre-existing
 untracked `tests/real/__init__.py` was preserved. No `src/**`, accepted matcher,
 historical P7.C6–P7.C12 file, schema/migration, ADR, deployment, Telegram,
 CURRENT_WORK or ROADMAP file changed.
@@ -79,6 +89,40 @@ the non-PASS Turn-4 gate before controller DB open and before
 therefore unreachable after an unexpected request. The one exact interrupt is
 available only for cleanup of the exact actual Turn-4 binding.
 
+## Repair-6 post-join request classification
+
+The sole Repair-6 production change is the final Turn-4 request-observer
+close/join snapshot. The old preliminary `request_task.done()` value is now
+diagnostic only. The terminal waiter is joined first; the request observer is
+then given its owned final scheduler turn, cancelled and joined only if still
+pending, and classified from its terminal state after that join.
+
+| Final observer class | Terminal fact | Unexpected requests | Gate result |
+|---|---|---:|---|
+| `REQUEST_OBSERVED` | task completed normally with one request | 1 | NON-PASS |
+| `CANCELLED_BY_HARNESS_WITHOUT_REQUEST` | harness cancellation completed without delivery | 0 | PASS remains possible |
+| `OBSERVER_ERROR` | exception, non-harness cancellation or ambiguous state | 0 | NON-PASS |
+
+The deterministic late-window test controls scheduling through the fake
+lifecycle: its preliminary request-task snapshot is `done=False`; terminal
+waiter cancellation then synchronously delivers one fake request while the
+terminal waiter is being joined; the post-join observer task completes
+normally and is classified `REQUEST_OBSERVED`. It proves
+`unexpected_request_count=1`, `passed=False`, protocol response calls `0`,
+Turn-3 accounting `approval_responses=1`, `allow_responses=1`,
+`deny_responses=0`, controller callback count `0`, delete callback count `0`,
+and both owned tasks `done=True`.
+
+The no-request active/interrupt path is classified
+`CANCELLED_BY_HARNESS_WITHOUT_REQUEST`, remains PASS-capable, and is not an
+observer fault. The synthetic observer exception is classified
+`OBSERVER_ERROR` and is NON-PASS. Requests before active timeout, during
+interrupt, before terminal convergence, in the same scheduler slice, and
+after the preliminary snapshot are all NON-PASS with no second response.
+The production Turn-4 gate remains before controller DB binding and before
+`DialogueDeleteService.delete()`; a late request therefore cannot reach either
+callback. No Turn-4 response capability was added.
+
 ## Preserved Repair-4 authorities
 
 The accepted C11 root-only wire authority, C12 matcher and independent
@@ -90,15 +134,15 @@ fresh topology remain present and covered by the focused regression suites.
 
 ## Validation
 
-- Focused P7.C13 Repair-5: `73 passed`, `36 subtests`.
+- Focused P7.C13 Repair-6: `75 passed`, `36 subtests`.
 - Accepted P7.C12 plus relevant P7.C2/C3/C4/C5 fake/non-real regressions:
   `119 passed`, `133 subtests`.
 - Complete non-real pytest with real authorization gates unset:
-  `1849 passed`, `7 skipped`, `6 failures`; the six failures are the preserved
+  `1851 passed`, `7 skipped`, `6 failures`; the six failures are the preserved
   historical P7.C7–P7.C11 consumed-latch/absence authorities, including the
   existing P7.C11 preflight error. No historical latch was deleted or changed.
 - Ordinary unittest discovery with real authorization gates unset:
-  `1862 run`, `5 failures`, `1 error`, `7 skipped`; these are the same six
+  `1864 run`, `5 failures`, `1 error`, `7 skipped`; these are the same six
   preserved historical consumed-latch/absence authorities.
 - `python -m compileall -q src tests`: PASS before final evidence edit.
 - `git diff --check`: PASS before final evidence edit.
@@ -110,7 +154,7 @@ fresh topology remain present and covered by the focused regression suites.
 
 ## Zero-real-effect accounting
 
-All Repair-5 testing used synthetic state or injected fakes. No future gate
+All Repair-6 testing used synthetic state or injected fakes. No future gate
 token was set or invented, and `--p7c13-real-run` was not executed.
 
 `REAL_CODEX_PROCESS_STARTS=0`
@@ -159,10 +203,11 @@ token was set or invented, and `--p7c13-real-run` was not executed.
 
 `HISTORICAL_AUTHORITY_MUTATIONS=0`
 
-P7C13_REPAIR5_EXTERNAL_USER_CLASSIFICATION=PASS
-P7C13_REPAIR5_TURN4_UNEXPECTED_REQUEST_GATE=PASS
-P7C13_REPAIR5_TURN4_NO_SECOND_RESPONSE=PASS
-P7C13_REPAIR5_TASK_OWNERSHIP=PASS
+P7C13_REPAIR6_POST_JOIN_REQUEST_SNAPSHOT=PASS
+P7C13_REPAIR6_HARNESS_CANCELLATION_CLASS=PASS
+P7C13_REPAIR6_NO_SECOND_RESPONSE=PASS
+P7C13_REPAIR6_DELETE_UNREACHABLE_ON_LATE_REQUEST=PASS
+P7C13_REPAIR6_TASK_OWNERSHIP=PASS
 P7C13_PREP_HARNESS_READY=YES
 P7C13_REAL_EXECUTION_AUTHORIZED=NO
 P7C13_REAL_ALLOW_AUTHORIZED=NO
