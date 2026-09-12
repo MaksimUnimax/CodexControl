@@ -1262,7 +1262,10 @@ class PreparedFutureRealExecutor(FutureRealExecutor):
         self.order.append("boot")
         command = tuple(self.child_factory(self.boot_path) if self.child_factory is not None else self.child_command)
         if not command and self.child_factory is None:
-            command = (sys.executable, __file__, "--p7c13-future-child", "--boot-authority", str(self.boot_path))
+            command = (
+                sys.executable, "-m", "tests.real.test_p7_c13_final_hard_delete_acceptance",
+                "--p7c13-future-child", "--boot-authority", str(self.boot_path),
+            )
         self.order.append("child")
         result = self.watchdog.run(command, result_path=self.result_path, result_validator=lambda path: _child_result_file_is_valid(path, boot_record))
         state = "COMPLETED" if result.status == "COMPLETED" and result.child_result_valid else "FAILED"

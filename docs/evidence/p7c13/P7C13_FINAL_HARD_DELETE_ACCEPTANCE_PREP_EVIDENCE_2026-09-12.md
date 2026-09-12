@@ -20,7 +20,9 @@ Only this evidence file and `tests/real/test_p7_c13_final_hard_delete_acceptance
 
 The final harness and evidence blobs are reported by the post-commit remote readback; the evidence blob is necessarily computed from this final evidence content.
 
-`FINAL_HARNESS_BLOB=4e92eac9789b908e08411801276822113d10663a`
+`FINAL_HARNESS_BLOB=b60a38c90317ec83063f314eb189af9c66e735cb`
+
+`FINAL_EVIDENCE_BLOB=DERIVED_BY_FINAL_REMOTE_READBACK`
 
 `HELPER_BLOB=NONE`
 
