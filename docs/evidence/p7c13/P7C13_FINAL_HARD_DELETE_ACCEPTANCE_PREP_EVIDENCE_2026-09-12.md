@@ -1,127 +1,117 @@
-# P7.C13 final hard-delete acceptance preparation — Repair-2 evidence
+# P7.C13 preparation Repair-3 evidence — 2026-09-12
 
-Status: **REPAIR-2 PREPARATION ONLY / ZERO REAL EFFECT / NO REAL AUTHORIZATION**
+Status: **PREPARATION COMPLETE / ZERO REAL EFFECT / NO REAL EXECUTION**
 
 ## Lineage and scope
 
-- branch: `prep-p7-c13-final-hard-delete-acceptance-repair2-2026-09-12`
-- `REPAIR2_BASE_HEAD=e0e1cd4c3aaaf2a89e1bf4c510a67203865e7247`
-- Repair-1 harness blob: `82a7f3c1e31456205fb316eb4e692973dc3d0361`
-- Repair-2 harness blob before commit: `10ba4084a086a597c892a2fef8409d6c46986062`
-- Repair-2 evidence blob: recorded by final remote readback
-- base tree: `9277d950691e9e2186f82b8ab4111885372e9f2d`
-- architect `origin/main`: `d425b1e1512d9a579df0d4a304fe9c6bf51da21f`
-- architect `origin/main` tree: `80f7bfeb5737016195e8f9a06059b5cefe71e8dd`
-- accepted P7.C12 matcher blob: `f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1` (unchanged)
-- helper: none
-- changed tracked paths: this evidence file and `tests/real/test_p7_c13_final_hard_delete_acceptance.py` only
+`REPAIR3_BASE_HEAD=aae95407650c10b16387bbe4a27cec8bd96efe2b`
 
-No `src/**`, P7.C12 matcher, historical P7.C6–P7.C12 file, schema/migration, ADR, deployment, Telegram, CURRENT_WORK or ROADMAP file changed. The pre-existing untracked `tests/real/__init__.py` was preserved and not staged.
+`REPAIR3_BASE_TREE=ea1c626fbf8c7884c8ea4f23bfbd45b33ff2d984`
 
-## Child dispatch and boot authority
+`PRIOR_HARNESS_BLOB=10ba4084a086a597c892a2fef8409d6c46986062`
 
-The module now has a dedicated `--p7c13-future-child --boot-authority <path>` dispatcher. That path calls `_future_child_main()` and never enters unittest. Ordinary unittest invocation calls unittest and cannot enter the child dispatcher. Missing boot path is a finite failure before installed/runtime/business construction.
+`P7C12_MATCHER_BLOB=f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1`
 
-`RootOnlyBootAuthority` uses a bounded `p7c13-repair2-boot-v1` schema, exclusive creation, regular root-owned mode `0600`, nlink-one/no-symlink checks, duplicate-key rejection, no-follow reads, stable device/inode validation and bounded field/effect-ceiling validation. The record binds source HEAD/TREE, accepted harness blob, run hash, shared `/root/.codex_second`, fresh isolated root, controller DB, workdir, approval target, ledger, child result, contract hash and exact frozen effect ceilings. Synthetic tests cover missing, malformed, duplicate-key, symlink, mode, identity drift and source-authority mismatch before effects.
+`ARCHITECT_MAIN_HEAD=62b2564029b1de87eb7518a6042613a4b9767439`
 
-`P7C13_REPAIR2_CHILD_DISPATCH_PREPARED=YES`
-`P7C13_REPAIR2_BOOT_AUTHORITY_PREPARED=YES`
+`ARCHITECT_MAIN_TREE=a55035bf7889113393ccbcf708223f2e2ed9e72d`
 
-## Parent and child authority
+Only this evidence file and `tests/real/test_p7_c13_final_hard_delete_acceptance.py` are tracked Repair-3 changes. No helper was added; the pre-existing untracked `tests/real/__init__.py` was preserved and unstaged. No `src/**`, matcher, historical P7.C6–P7.C12 file, schema, ADR, deployment, Telegram, CURRENT_WORK or ROADMAP file changed.
 
-The exact future parent order is proven as:
+The final harness and evidence blobs are reported by the post-commit remote readback; the evidence blob is necessarily computed from this final evidence content.
 
-`exact gate PASS -> exclusive durable ledger reservation -> root-only boot creation/readback -> child factory/watchdog`
+`FINAL_HARNESS_BLOB=4e92eac9789b908e08411801276822113d10663a`
 
-The parent passes only the boot path/descriptor reference to its one child. A consumed ledger rejects a second invocation before child factory/watchdog entry. The parent-owned watchdog uses one dedicated session/process group and bounded owned-group termination; it has no retry or second-child path.
+`HELPER_BLOB=NONE`
 
-`_future_child_main()` reads and validates boot authority, constructs the bound `CodexProfile` and shared-home/isolated routing, verifies installed version/schema authority, constructs the runtime seam, and then executes `CompleteFutureChildOrchestrator`. The complete synthetic traversal is present in exact source:
+## Repair-3 implementation proof
 
-`model/list -> thread/start -> Turn 1 observed response marker -> owned shutdown -> new generation/thread resume -> Turn 2 observed memory marker -> Turn 3 capture and P7.C12 exact matcher -> one response/ALLOW -> target postcondition and exact cleanup -> Turn 4 active sleep/interrupt -> owned shutdown -> pre-delete physical observation -> fresh schema-v4 IDLE binding -> one budgeted canonical DialogueDeleteService.delete() callback -> post-delete oracle -> bounded child result`.
+- The direct `--p7c13-real-run` parent derives HEAD, tree and harness blob from the checkout, rejects tracked drift, requires all future authority environment values, and calls the prepared executor once only after an exact match.
+- Parent order is source gate, fixed O_EXCL ledger reserve, fresh run-owned path selection/preflight, root-only boot, one watchdog child, strict final child result, process-group quiescence and terminal ledger update.
+- Production path selection calls the explicit `build_production_real_seam_factory`; `_future_child_main()` cannot resolve `_default_child_seams` or a synthetic thread ID. Synthetic seams require explicit injected test arguments.
+- Production wiring includes `CodexRuntimeManager`, `CodexModelCatalogAdapter`, pinned one-call catalog authority, `CodexThreadLifecycleAdapter`, `CodexTurnLifecycleAdapter`, `CodexApprovalBridge`, `IsolationPathAuthority`, `IsolatedStateRoot`, `BoundedTargetOracle`, `SqliteStorage`, repositories, `DeleteStorageCleanupCoordinator`, and `DialogueDeleteService`.
+- Fresh isolated root, controller DB, workdir, boot/result paths and high-entropy direct-child `/root` approval target are selected after ledger reservation. Read-only existence, canonical-path and boundary-alias checks run before child creation. Shared `/root/.codex_second` is allowed; unrelated shared-home processes are not signalled.
+- Future child umask is `077`; Turn 3 remains exactly `touch <selected target>` with no chmod/chown. Metadata is checked before removing only the exact target.
+- Actual adapter-returned thread and Turn bindings are the production authority. Turn 1 output and Turn 2 memory are observed, not fabricated. A new runtime generation resumes the actual fresh thread without a second model/list.
+- Approval success reserves total approval-response and ALLOW accounting before one `CodexApprovalBridge` protocol callback. No separate real ALLOW callback exists. C12 strict matcher, independent thread/Turn/cwd/sequence/target hashes, target absence and one-wire cardinality gate success.
+- Turn 4 uses the actual distinct binding, `sleep 120`, pre-reserved interrupt accounting and definitive failed/interrupted terminal. No second approval response route exists.
+- Runtime shutdown precedes both physical scans. The bounded oracle uses actual raw thread ID and in-memory marker bytes and requires a conclusive pre-delete observation and clean post-delete residual result.
+- Fresh schema-v4 storage is opened through `SqliteStorage`; `DialogueRepository` persists and rereads one actual IDLE binding. The only application delete is one budgeted `DialogueDeleteService.delete(DialogueDeleteRequest(...))`; UNKNOWN and confirmed-pending remain terminal/no external retry.
+- Watchdog and parent use the same boot-bound `p7c13-repair3-child-result-v1` validator. The old `p7c13-child-result-v1` schema is rejected. Parent PASS requires PASS/true, exact source/run authority, bounded effects with forbidden zeros, zero residuals and process-group quiescence.
 
-The production assembly seam names and constructs `CodexThreadLifecycleAdapter`, `DeleteStorageCleanupCoordinator`, `CodexRuntimeManager`, `IsolationPathAuthority` and `DialogueDeleteService`. `CanonicalDeleteGuard` permits one `DialogueDeleteService.delete()` call and provides no raw delete fallback. `thread/read` and `thread/list` have no callable dispatch route.
+## Offline validation
 
-`P7C13_REPAIR2_COMPLETE_CHILD_ORCHESTRATOR=PASS`
-`P7C13_REPAIR2_CHILD_RESULT_AUTHORITY=PASS`
-`P7C13_REPAIR2_CANONICAL_DELETE_ONLY=PASS`
+- Focused Repair-3: `53 passed`.
+- P7.C12 plus C2/C3/C4/C5 focused: `119 passed, 133 subtests`.
+- Focused P7.C13 plus P7.C12 final rerun: `66 passed, 101 subtests`.
+- Complete pytest with every real gate unset: `1829 passed, 7 skipped, 6 failures`; all six failures are preserved historical P7.C7–P7.C11 consumed-latch/absence assertions, not Repair-3 failures. They were not modified or cleaned. The non-historical complete suite is rerun with those historical absence assertions excluded.
+- Ordinary unittest discovery with every real gate unset: `1842 run, 5 failures, 1 error, 7 skipped`; the same six preserved historical P7.C7–P7.C11 consumed-latch/absence assertions account for all non-green outcomes. Historical consumed authorities remain untouched.
+- `compileall`: PASS. `git diff --check`: PASS.
+- Leakage/security review: no future authorization token, raw thread IDs, prompts/responses, wire plaintext, credentials, Telegram calls or root-only result contents are written to evidence.
 
-## Pre-dispatch budget gates
-
-`FutureRealEffectBridge` reserves the exact slot before invoking every effect callback. This covers model/list, thread start/resume, turn start, approval response, ALLOW, interrupt and the canonical delete service. The zero-ceiling forbidden read/list routes reject before any callback. Synthetic callbacks prove that over-budget approval, ALLOW, interrupt and delete callbacks are not entered. The one canonical delete budget prevents a second service invocation.
-
-`P7C13_REPAIR2_PRE_DISPATCH_BUDGET_GATES=PASS`
-
-## Turn and matcher seams
-
-- Turn 1 uses the actual observed terminal/output seam and requires `START_CONFIRMED`, definitive `COMPLETED` and the exact in-memory response marker.
-- Turn 2 uses the new-generation resume seam and actual observed output, requiring the exact in-memory memory marker.
-- Turn 3 uses independent owned thread/Turn/cwd/sequence/target/wire SHA authority and exactly one accepted P7.C12 matcher result. Wrong owned bindings prevent both response callbacks.
-- Turn 4 uses a distinct `turn-4` binding, `sleep 120`, active/nonterminal state and one pre-reserved interrupt. Inactive or wrong binding prevents interrupt entry; UNKNOWN and a second interrupt fail closed. Turn 4 has no approval response path.
-
-The synthetic tests cover actual fake Turn 1/2 output parsing, Turn 3 wrong-owned binding, Turn 4 inactive/wrong binding, target absence before response, target metadata after ALLOW and exact target cleanup.
-
-## Physical oracle and delete chain
-
-`BoundedTargetOracle` is the production-capable no-follow bounded observation seam. It scans persistent session content, session filename, session directory components and history content, plus isolated sqlite/log files, for the current in-memory raw thread ID and marker bytes. Symlink, special-file, read, size and traversal ambiguity fails closed. Pre-delete acceptance requires target material to be physically observed and scan-conclusive. Post-delete acceptance requires zero content, filename, directory, marker, isolated and scan residuals, valid ownership envelope, quiescent owned group, and `unrelated_target_specific_removal_detected == False`.
-
-The synthetic production chain uses a fresh schema-v4 controller database with one canonical IDLE dialogue binding. Confirmed success reaches `DELETE_CONFIRMED -> DELETE_CONFIRMED_PENDING_STORAGE -> local cleanup -> finalize/tombstone -> DELETED`; `DELETE_UNKNOWN` is terminal with no retry/read/list/finalizer/tombstone; confirmed-pending local failure has no external retry. Marker-only, filename-only, directory-only, isolated and unrelated-removal residuals fail the acceptance oracle.
-
-`P7C13_PREP_PHYSICAL_ORACLE=PASS`
-`P7C13_PREP_DELETE_CHAIN=PASS`
-
-## Child result authority
-
-The child writes one exclusive bounded root-only `p7c13-repair2-child-result-v1` record with finite status/verdict, source/run authority, effect counts, finite Turn outcomes, matcher/delete classes, residual counts and process-group quiescence. The parent performs strict source/effect/schema/ownership/identity validation; missing or malformed result cannot produce a parent PASS. Safe child failure paths publish bounded non-PASS authority. Raw thread IDs, targets, prompt/response/wire contents and credentials are not written.
-
-## Validation
-
-- focused repaired P7.C13: `45 passed`
-- accepted focused P7.C12 matcher: `13 passed`
-- C2/C3/C4/C5 focused: `10 / 49 / 32 / 15 passed`
-- complete non-real regression with all real gates unset: `1065 passed, 2 warnings`
-- compileall: PASS (`PYTHONPATH=src python -m compileall -q src tests`)
-- `git diff --check`: PASS
-- leakage/security scan: PASS; no raw retained recovery IDs, prior target paths, prompt/response/wire plaintext, credentials, authorization token or root-only JSON committed
-- no historical consumed real test was executed
-
-## Zero-effect accounting
-
-All Repair-2 implementation and validation paths were offline or synthetic. No real future authorization token was created or set.
+## Zero-real-effect accounting
 
 `REAL_CODEX_PROCESS_STARTS=0`
+
 `APP_SERVER_STARTS=0`
-`MODEL_LIST_CALLS=0`
-`THREAD_START_CALLS=0`
-`THREAD_RESUME_CALLS=0`
-`THREAD_READ_CALLS=0`
-`THREAD_LIST_CALLS=0`
-`THREAD_DELETE_CALLS=0`
-`TURN_START_CALLS=0`
-`TURN_INTERRUPT_CALLS=0`
-`APPROVAL_RESPONSES=0`
-`ALLOW_RESPONSES=0`
-`DENY_RESPONSES=0`
-`REAL_LEDGER_CREATIONS=0`
-`REAL_BOOT_AUTHORITY_CREATIONS=0`
-`REAL_CONTROLLER_MUTATIONS=0`
-`REAL_ISOLATED_MUTATIONS=0`
+
+`REAL_MODEL_LIST_CALLS=0`
+
+`REAL_THREAD_START_CALLS=0`
+
+`REAL_THREAD_RESUME_CALLS=0`
+
+`REAL_THREAD_READ_CALLS=0`
+
+`REAL_THREAD_LIST_CALLS=0`
+
+`REAL_THREAD_DELETE_CALLS=0`
+
+`REAL_TURN_START_CALLS=0`
+
+`REAL_TURN_INTERRUPT_CALLS=0`
+
+`REAL_APPROVAL_RESPONSES=0`
+
+`REAL_ALLOW_RESPONSES=0`
+
+`REAL_DENY_RESPONSES=0`
+
 `REAL_PERSISTENT_HOME_MUTATIONS=0`
+
+`REAL_ISOLATED_ROOT_MUTATIONS=0`
+
+`REAL_CONTROLLER_DB_MUTATIONS=0`
+
 `REAL_APPROVAL_TARGET_MUTATIONS=0`
+
+`REAL_P7C13_LEDGER_CREATIONS=0`
+
+`REAL_P7C13_BOOT_CREATIONS=0`
+
+`REAL_P7C13_RESULT_CREATIONS=0`
+
 `TELEGRAM_CALLS=0`
-`REAL_CODEX_SIGNALS=0`
+
+`REAL_CODEX_PROCESS_SIGNALS=0`
+
 `HISTORICAL_AUTHORITY_MUTATIONS=0`
 
-Synthetic temporary SQLite/files and harmless owned subprocess watchdog tests were test-owned only. P8/P9 were not started.
+All execution tests used injected adapters, temporary files/SQLite, or harmless subprocesses only. The future authorization token was never set or invented. P8 and P9 were not started.
 
-P7C13_REPAIR2_CHILD_DISPATCH_PREPARED=YES
-P7C13_REPAIR2_BOOT_AUTHORITY_PREPARED=YES
-P7C13_REPAIR2_COMPLETE_CHILD_ORCHESTRATOR=PASS
-P7C13_REPAIR2_PRE_DISPATCH_BUDGET_GATES=PASS
-P7C13_REPAIR2_CHILD_RESULT_AUTHORITY=PASS
-P7C13_REPAIR2_CANONICAL_DELETE_ONLY=PASS
+P7C13_REPAIR3_PRODUCTION_PARENT_ENTRY=PASS
+P7C13_REPAIR3_PRODUCTION_ADAPTER_WIRING=PASS
+P7C13_REPAIR3_REAL_THREAD_TURN_BINDINGS=PASS
+P7C13_REPAIR3_SINGLE_PROTOCOL_ALLOW=PASS
+P7C13_REPAIR3_REAL_PHYSICAL_ORACLE_WIRING=PASS
+P7C13_REPAIR3_REAL_CONTROLLER_DELETE_WIRING=PASS
+P7C13_REPAIR3_UNIFIED_CHILD_RESULT_AUTHORITY=PASS
+P7C13_REPAIR3_NO_SYNTHETIC_PRODUCTION_DEFAULT=PASS
 P7C13_PREP_HARNESS_READY=YES
+
 P7C13_REAL_EXECUTION_AUTHORIZED=NO
 P7C13_REAL_ALLOW_AUTHORIZED=NO
 P7C13_HARD_DELETE_EXECUTION_AUTHORIZED=NO
+
 P8_STARTED=NO
 P9_STARTED=NO

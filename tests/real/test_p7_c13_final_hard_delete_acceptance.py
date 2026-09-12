@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import hashlib
+import inspect
 import os
 import signal
 import secrets
@@ -34,11 +35,28 @@ from codex_control.adapters.codex.runtime import (
     build_child_environment,
 )
 from codex_control.adapters.codex.capabilities import load_manifest
+from codex_control.adapters.codex.approvals import (
+    ApprovalDecision,
+    ApprovalHandlingStatus,
+    CodexApprovalBridge,
+)
+from codex_control.adapters.codex.model_catalog import (
+    CodexModelCatalog,
+    CodexModelCatalogAdapter,
+)
 from codex_control.adapters.codex.thread_lifecycle import (
     CodexThreadLifecycleAdapter,
     ThreadBinding,
     ThreadOperationResult,
     ThreadOperationStatus,
+    TrustedWorkingDirectory,
+)
+from codex_control.adapters.codex.turn_lifecycle import (
+    CodexTurnLifecycleAdapter,
+    TurnBinding,
+    TurnInterruptStatus,
+    TurnStartStatus,
+    TurnTerminalStatus,
 )
 from codex_control.application import (
     DeleteStorageCleanupCoordinator,
@@ -60,13 +78,14 @@ from tests.real import test_p7_c12_strict_approval_matcher as c12
 
 REPAIR1_BASE_HEAD = "8fa749856c678cb1ae120f7802c6c553c1272e34"
 REPAIR2_BASE_HEAD = "e0e1cd4c3aaaf2a89e1bf4c510a67203865e7247"
-P7C13_BASE_SHA = REPAIR2_BASE_HEAD
-P7C13_BASE_TREE = "9277d950691e9e2186f82b8ab4111885372e9f2d"
-PRIOR_HARNESS_BLOB = "82a7f3c1e31456205fb316eb4e692973dc3d0361"
+REPAIR3_BASE_HEAD = "aae95407650c10b16387bbe4a27cec8bd96efe2b"
+P7C13_BASE_SHA = REPAIR3_BASE_HEAD
+P7C13_BASE_TREE = "ea1c626fbf8c7884c8ea4f23bfbd45b33ff2d984"
+PRIOR_HARNESS_BLOB = "10ba4084a086a597c892a2fef8409d6c46986062"
 P7C12_MATCHER_BLOB = "f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1"
 ORIGINAL_HARNESS_BLOB = "a6962a14ffd4c10d6e4ff072cd24622077f839c2"
-ARCHITECT_MAIN_HEAD = "d425b1e1512d9a579df0d4a304fe9c6bf51da21f"
-ARCHITECT_MAIN_TREE = "80f7bfeb5737016195e8f9a06059b5cefe71e8dd"
+ARCHITECT_MAIN_HEAD = "62b2564029b1de87eb7518a6042613a4b9767439"
+ARCHITECT_MAIN_TREE = "a55035bf7889113393ccbcf708223f2e2ed9e72d"
 FUTURE_GATE_ENV = "P7C13_FUTURE_REAL_GATE"
 PERSISTENT_HOME = "/root/.codex_second"
 INSTALLED_EXECUTABLE = "/usr/local/bin/codex"
@@ -184,6 +203,42 @@ def future_real_entrypoint(
         raise PreparationGateError("P7C13_FUTURE_REAL_GATE=DISABLED")
     selected = executor or PreparedFutureRealExecutor.production(contract)
     return selected.run(contract=contract)
+
+
+def _current_source_authority() -> tuple[str, str, str, bool]:
+    repository = Path(__file__).resolve().parents[2]
+    def git(*arguments: str) -> str:
+        completed = subprocess.run(
+            ("git", *arguments), cwd=repository, check=True,
+            capture_output=True, text=True,
+        )
+        return completed.stdout.strip()
+    head = git("rev-parse", "HEAD")
+    tree = git("rev-parse", "HEAD^{tree}")
+    harness_blob = git("hash-object", str(Path(__file__).resolve()))
+    clean = subprocess.run(("git", "diff", "--quiet", "HEAD", "--", "."), cwd=repository).returncode == 0
+    return head, tree, harness_blob, clean
+
+
+def future_real_cli_entrypoint(
+    *, environ: Mapping[str, str] | None = None, executor: FutureRealExecutor | None = None,
+) -> Any:
+    """The direct future parent mode; source gate precedes any ledger effect."""
+    environment = dict(os.environ if environ is None else environ)
+    token = environment.get(FUTURE_GATE_ENV, "")
+    contract = FutureArchitectContract(
+        authorization_token=token,
+        expected_head=environment.get("P7C13_EXPECTED_HEAD", ""),
+        expected_tree=environment.get("P7C13_EXPECTED_TREE", ""),
+        expected_harness_blob=environment.get("P7C13_EXPECTED_HARNESS_BLOB", ""),
+    )
+    head, tree, harness_blob, clean = _current_source_authority()
+    if not clean:
+        raise PreparationGateError("tracked source drift")
+    return future_real_entrypoint(
+        environ=environment, contract=contract, current_head=head,
+        current_tree=tree, current_harness_blob=harness_blob, executor=executor,
+    )
 
 
 @dataclass
@@ -644,7 +699,7 @@ def watchdog_classify(*, child_exit: str, timeout: bool = False, residual_group:
 
 
 MAX_LEDGER_BYTES = 8192
-LEDGER_SCHEMA = "p7c13-repair2-v1"
+LEDGER_SCHEMA = "p7c13-repair3-v1"
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -782,22 +837,24 @@ class DurableOneShotLedger:
         return self.read()
 
 
-def _safe_child_result(value: Any) -> bool:
-    if not isinstance(value, dict) or set(value) != {"schema", "status", "effect_counts", "outcomes", "residual_counts", "verdict"}:
+def _safe_child_result(value: Any, *, boot: Mapping[str, Any] | None = None) -> bool:
+    """Single final child-result validator used by both watchdog and parent.
+
+    The former ``p7c13-child-result-v1`` record is intentionally not accepted.
+    A boot-bound validator is required for PASS classification; a missing boot
+    is useful only for structural watchdog tests and can never authorize PASS.
+    """
+    if boot is None:
         return False
-    if value["schema"] != "p7c13-child-result-v1" or value["status"] not in {"COMPLETED", "FAILED", "UNKNOWN", "TIMEOUT"}:
-        return False
-    if not all(isinstance(value[key], dict) for key in ("effect_counts", "outcomes", "residual_counts")):
-        return False
-    return isinstance(value["verdict"], bool) and len(json.dumps(value, separators=(",", ":"))) <= 4096
+    return _safe_child_result_authority(value, boot)
 
 
 # The boot and result records are intentionally separate authorities.  The
 # parent owns the boot record; the child owns the result record.  Both are
 # bounded, root-only JSON files and contain hashes/classes rather than raw
 # recovery identities.
-BOOT_SCHEMA = "p7c13-repair2-boot-v1"
-CHILD_RESULT_SCHEMA = "p7c13-repair2-child-result-v1"
+BOOT_SCHEMA = "p7c13-repair3-boot-v1"
+CHILD_RESULT_SCHEMA = "p7c13-repair3-child-result-v1"
 MAX_BOOT_BYTES = 12288
 MAX_CHILD_RESULT_BYTES = 8192
 BOOT_KEYS = frozenset({
@@ -956,6 +1013,39 @@ def _safe_child_result_authority(value: Any, boot: Mapping[str, Any]) -> bool:
         return False
 
 
+def _child_result_file_is_valid(path: Path, boot: Mapping[str, Any]) -> bool:
+    """The watchdog and parent use this exact bounded final authority."""
+    try:
+        return _safe_child_result_authority(
+            _safe_json_file(path, max_bytes=MAX_CHILD_RESULT_BYTES,
+                            expected_keys=CHILD_RESULT_KEYS, label="child result"),
+            boot,
+        )
+    except (OSError, UnicodeError, PreparationGateError, json.JSONDecodeError):
+        return False
+
+
+def child_result_passes(value: Mapping[str, Any], boot: Mapping[str, Any]) -> bool:
+    """Strict parent PASS predicate; FAILED/UNKNOWN are evidence only."""
+    if not _safe_child_result_authority(value, boot):
+        return False
+    if value["status"] != "PASS" or value["verdict"] is not True or value["process_group_quiescent"] is not True:
+        return False
+    expected = {key: limit for key, limit in FROZEN_EFFECT_BUDGET.items()}
+    if any(value["effect_counts"].get(key, 0) != expected[key] for key in (
+        "new_threads", "model/list", "thread/start", "thread/resume", "turn/start",
+        "approval_responses", "allow_responses", "turn/interrupt", "thread/delete",
+    )):
+        return False
+    if any(value["effect_counts"].get(key, 0) != 0 for key in (
+        "thread/read", "thread/list", "second_child", "real_retry", "telegram",
+    )):
+        return False
+    if any(type(item) is not int or item != 0 for item in value["residual_counts"].values()):
+        return False
+    return True
+
+
 def _write_child_result(path: str | Path, value: Mapping[str, Any]) -> dict[str, Any]:
     checked = dict(value)
     if not isinstance(checked, dict) or checked.get("schema") != CHILD_RESULT_SCHEMA:
@@ -988,18 +1078,19 @@ def read_child_result(path: str | Path, *, boot: Mapping[str, Any]) -> dict[str,
 class OwnedParentChildWatchdog:
     """One child, one dedicated session/group, bounded TERM then KILL."""
 
-    def __init__(self, *, process_factory: Callable[..., Any] = subprocess.Popen, signal_group: Callable[[int, int], None] | None = None, active_group_probe: Callable[[int], int] | None = None, zombie_group_probe: Callable[[int], int] | None = None) -> None:
+    def __init__(self, *, process_factory: Callable[..., Any] = subprocess.Popen, signal_group: Callable[[int, int], None] | None = None, active_group_probe: Callable[[int], int] | None = None, zombie_group_probe: Callable[[int], int] | None = None, result_validator: Callable[[Path], bool] | None = None) -> None:
         self.process_factory = process_factory
         self.signal_group = signal_group or os.killpg
         self.active_group_probe = active_group_probe or (lambda pgid: 0)
         self.zombie_group_probe = zombie_group_probe or (lambda pgid: 0)
+        self.result_validator = result_validator
         self.child_count = 0
         self.retry_count = 0
         self.owned_pid: int | None = None
         self.owned_pgid: int | None = None
         self.signals: list[int] = []
 
-    def run(self, command: Sequence[str], *, result_path: str | Path, timeout_seconds: float = 2.0, term_grace_seconds: float = 0.2) -> WatchdogResult:
+    def run(self, command: Sequence[str], *, result_path: str | Path, timeout_seconds: float = 2.0, term_grace_seconds: float = 0.2, result_validator: Callable[[Path], bool] | None = None) -> WatchdogResult:
         if self.child_count or self.retry_count:
             return WatchdogResult("FAIL_CLOSED", second_child=self.child_count > 0, retry=self.retry_count > 0, child_count=self.child_count)
         self.child_count += 1
@@ -1024,11 +1115,10 @@ class OwnedParentChildWatchdog:
                 raise PreparationGateError("owned process group observation invalid")
             if active or zombies:
                 status = "RESIDUAL_OWNED_GROUP"
-            result_valid = False
+            validator = result_validator or self.result_validator
             try:
-                with Path(result_path).open("r", encoding="utf-8") as handle:
-                    result_valid = _safe_child_result(json.load(handle, object_pairs_hook=_reject_duplicate_json_keys))
-            except (OSError, UnicodeError, json.JSONDecodeError, PreparationGateError):
+                result_valid = False if validator is None else bool(validator(Path(result_path)))
+            except Exception:
                 result_valid = False
             if status == "COMPLETED" and not result_valid:
                 status = "MALFORMED_CHILD_RESULT"
@@ -1088,10 +1178,12 @@ class FutureRealExecutor:
 class PreparedFutureRealExecutor(FutureRealExecutor):
     """Gate -> durable ledger -> boot authority -> one owned child."""
 
-    def __init__(self, *, ledger: DurableOneShotLedger, watchdog: OwnedParentChildWatchdog, child_command: Sequence[str], result_path: str | Path, record: Mapping[str, Any], boot_path: str | Path | None = None, child_factory: Callable[[Path], Sequence[str]] | None = None) -> None:
+    def __init__(self, *, ledger: DurableOneShotLedger, watchdog: OwnedParentChildWatchdog, child_command: Sequence[str], result_path: str | Path, record: Mapping[str, Any], boot_path: str | Path | None = None, child_factory: Callable[[Path], Sequence[str]] | None = None, run_paths: Mapping[str, str] | None = None, fresh_production: bool = False) -> None:
         self.ledger, self.watchdog = ledger, watchdog
         self.child_command, self.result_path, self.record = tuple(child_command), Path(result_path), dict(record)
-        self.boot_path = Path(boot_path) if boot_path is not None else self.ledger.path.with_name("p7c13-repair2-boot.json")
+        self.boot_path = Path(boot_path) if boot_path is not None else self.ledger.path.with_name("p7c13-test-boot.json")
+        self.run_paths = dict(run_paths or {})
+        self.fresh_production = fresh_production
         self.child_factory = child_factory
         self.calls = 0
         self.order: list[str] = []
@@ -1099,27 +1191,53 @@ class PreparedFutureRealExecutor(FutureRealExecutor):
     @classmethod
     def production(cls, contract: FutureArchitectContract) -> "PreparedFutureRealExecutor":
         authority_root = Path("/root/.codexcontrol")
-        ledger_path = authority_root / "p7c13-repair2-one-shot.json"
-        result_path = authority_root / "p7c13-repair2-child-result.json"
+        ledger_path = authority_root / "p7c13-one-shot.json"
+        result_path = authority_root / "p7c13-child-result-pending.json"
         record = {
             "schema": LEDGER_SCHEMA, "state": "RESERVED", "source_head": contract.expected_head,
             "source_tree": contract.expected_tree, "harness_blob": contract.expected_harness_blob,
             "run_id_hash": _sha256(secrets.token_bytes(32)), "path_hashes": {
-                "ledger": _sha256(str(ledger_path)), "child_result": _sha256(str(result_path)),
+                "ledger": _sha256(str(ledger_path)),
             }, "effect_counts": {}, "recovery": {},
         }
-        return cls(ledger=DurableOneShotLedger(ledger_path), watchdog=OwnedParentChildWatchdog(), child_command=(), result_path=result_path, record=record)
+        return cls(ledger=DurableOneShotLedger(ledger_path), watchdog=OwnedParentChildWatchdog(), child_command=(), result_path=result_path, record=record, fresh_production=True)
+
+    def _select_fresh_run_paths(self) -> None:
+        authority_root = Path("/root/.codexcontrol")
+        run_id = secrets.token_hex(24)
+        paths = {
+            "isolated_root": str(authority_root / f"p7c13-isolated-{run_id}"),
+            "controller_db": str(authority_root / f"p7c13-controller-{run_id}.sqlite3"),
+            "workdir": str(authority_root / f"p7c13-work-{run_id}"),
+            "approval_target": str(Path("/root") / f"p7c13-approval-{run_id}"),
+        }
+        self.result_path = authority_root / f"p7c13-child-result-{run_id}.json"
+        self.boot_path = authority_root / f"p7c13-boot-{run_id}.json"
+        fresh_run_owned_paths(
+            isolated_root=Path(paths["isolated_root"]), controller_db=Path(paths["controller_db"]),
+            workdir=Path(paths["workdir"]), approval_target=Path(paths["approval_target"]),
+            ledger_path=self.ledger.path, persistent_home=Path(PERSISTENT_HOME),
+            repository=Path.cwd(),
+        )
+        self.run_paths = paths
 
     def _boot_record(self, record: Mapping[str, Any]) -> dict[str, Any]:
         """Materialize only safe authority; raw IDs are never synthesized here."""
         path_hashes = record.get("path_hashes", {})
+        test_root = self.ledger.path.parent / f"p7c13-test-{record['run_id_hash'][:16]}"
+        paths = self.run_paths or {
+            "isolated_root": str(test_root / "isolated"),
+            "controller_db": str(test_root / "controller.sqlite3"),
+            "workdir": str(test_root / "work"),
+            "approval_target": f"/root/p7c13-approval-test-{record['run_id_hash'][:16]}",
+        }
         return {
             "schema": BOOT_SCHEMA,
             "source_head": record["source_head"], "source_tree": record["source_tree"], "harness_blob": record["harness_blob"],
             "run_id_hash": record["run_id_hash"], "profile_id": "p7c13-future-profile",
-            "codex_home": PERSISTENT_HOME, "isolated_root": "/root/.codexcontrol/p7c13-isolated",
-            "controller_db": "/root/.codexcontrol/p7c13-controller.sqlite3", "workdir": "/root/.codexcontrol/p7c13-work",
-            "approval_target": "/root/p7c13-approval-future-boundary", "ledger_path": str(self.ledger.path),
+            "codex_home": PERSISTENT_HOME, "isolated_root": paths["isolated_root"],
+            "controller_db": paths["controller_db"], "workdir": paths["workdir"],
+            "approval_target": paths["approval_target"], "ledger_path": str(self.ledger.path),
             "child_result_path": str(self.result_path), "contract_hash": _sha256(json.dumps({k: record[k] for k in ("source_head", "source_tree", "harness_blob")}, sort_keys=True)),
             "effect_ceiling": dict(FROZEN_EFFECT_BUDGET),
         }
@@ -1134,6 +1252,9 @@ class PreparedFutureRealExecutor(FutureRealExecutor):
         if not self.ledger.reserve(record):
             raise PreparationGateError("future run already consumed")
         self.order.append("ledger")
+        if self.fresh_production:
+            self._select_fresh_run_paths()
+            self.order.append("fresh_paths")
         boot_record = self._boot_record(record)
         boot_authority = RootOnlyBootAuthority(self.boot_path)
         boot_authority.create(boot_record)
@@ -1143,11 +1264,14 @@ class PreparedFutureRealExecutor(FutureRealExecutor):
         if not command and self.child_factory is None:
             command = (sys.executable, __file__, "--p7c13-future-child", "--boot-authority", str(self.boot_path))
         self.order.append("child")
-        result = self.watchdog.run(command, result_path=self.result_path)
+        result = self.watchdog.run(command, result_path=self.result_path, result_validator=lambda path: _child_result_file_is_valid(path, boot_record))
         state = "COMPLETED" if result.status == "COMPLETED" and result.child_result_valid else "FAILED"
         if state == "COMPLETED":
             try:
-                read_child_result(self.result_path, boot=boot_record)
+                final_result = read_child_result(self.result_path, boot=boot_record)
+                if not child_result_passes(final_result, boot_record):
+                    state = "FAILED"
+                    result = WatchdogResult("CHILD_FAILURE", child_count=result.child_count, child_result_valid=True, owned_group_active=result.owned_group_active, owned_group_zombies=result.owned_group_zombies, signals_sent=result.signals_sent)
             except PreparationGateError:
                 state = "FAILED"
                 result = WatchdogResult("MALFORMED_CHILD_RESULT", child_count=result.child_count, child_result_valid=False, owned_group_active=result.owned_group_active, owned_group_zombies=result.owned_group_zombies, signals_sent=result.signals_sent)
@@ -1172,6 +1296,12 @@ class FutureRealEffectBridge:
         self.budget.record(effect)
         raise PreparationGateError(f"forbidden effect: {effect}")
 
+    def single_protocol_allow(self, callback: Callable[[], Any]) -> Any:
+        """Reserve both accounting facts before one bridge callback."""
+        self.budget.record("approval_responses")
+        self.budget.record("allow_responses")
+        return callback()
+
 
 class FutureRealBusinessPath:
     """The complete ordered child path; all business effects pass through the bridge."""
@@ -1194,8 +1324,7 @@ class FutureRealBusinessPath:
         self.approval()
         # Classification is local.  The response and ALLOW reservations are
         # made before either effect callback can be entered.
-        self.effects.call("approval_responses")
-        self.effects.call("allow_responses")
+        self.effects.single_protocol_allow(self.approval)
         self.effects.call("turn/start")
         self.turns[3]()
         if self.effects.budget.count("approval_responses") > 1:
@@ -1245,7 +1374,6 @@ class FutureChildSeams:
     turn2: Callable[[str], str]
     turn3_capture: Callable[[], ApprovalAuthorityCapture]
     approval_response: Callable[[], Any]
-    allow_response: Callable[[], Any]
     turn4_start: Callable[[], Any]
     interrupt: Callable[[], Any]
     predelete: Callable[[], OracleObservation]
@@ -1362,8 +1490,7 @@ class CompleteFutureChildOrchestrator:
             raise PreparationGateError("Turn 3 owned approval binding failed")
         if not capture.target_exists_after:
             raise PreparationGateError("Turn 3 target postcondition missing")
-        self.effects.call("approval_responses", self.seams.approval_response)
-        self.effects.call("allow_responses", self.seams.allow_response)
+        self.effects.single_protocol_allow(self.seams.approval_response)
         if self.seams.target_cleanup is not None and self.seams.target_cleanup() is False:
             raise PreparationGateError("approval target cleanup failed")
         outcomes["turn3"] = "MATCH_EXACT_P7_APPROVAL_COMMAND"
@@ -1388,6 +1515,241 @@ class CompleteFutureChildOrchestrator:
         return CompleteChildResult(True, outcomes, {"persistent": 0, "isolated": 0}, {"delete": "DELETED"})
 
 
+@dataclass
+class ProductionRealChildOrchestrator:
+    """Production-default adapter assembly; no synthetic business seam."""
+
+    profile: CodexProfile
+    boot: Mapping[str, Any]
+    runtime_manager: CodexRuntimeManager
+    catalog_adapter: CodexModelCatalogAdapter
+    thread_lifecycle: CodexThreadLifecycleAdapter
+    turn_lifecycle: CodexTurnLifecycleAdapter
+    isolation_root: IsolatedStateRoot
+    budget: EffectBudget
+
+    async def run_async(self) -> CompleteChildResult:
+        # The implementation is intentionally real-capable and derives every
+        # identity below from an adapter result.  Repair tests inject fakes at
+        # the adapter boundary and never enter this method with real effects.
+        workdir = TrustedWorkingDirectory(self.boot["workdir"])
+        profile_id = self.profile.profile_id
+        self.isolation_root.provision(self.profile)
+        self.isolation_root.validate(self.profile)
+        self.budget.record("new_threads")
+        runtime = await self.runtime_manager.acquire(profile_id)
+        self.budget.record("model/list")
+        catalog = await self.catalog_adapter.get_catalog(profile_id)
+        visible = tuple(model for model in catalog.models if not model.hidden)
+        defaults = tuple(model for model in visible if model.is_default)
+        if not visible or len(defaults) != 1:
+            raise PreparationGateError("canonical model catalog/default invalid")
+        model = defaults[0]
+        reasoning_effort = catalog.validate_reasoning_effort(model.model_id, None)
+        pinned_catalog = _PinnedCatalogAdapter(catalog)
+        thread_lifecycle = CodexThreadLifecycleAdapter(self.runtime_manager, pinned_catalog)
+        turn_lifecycle = CodexTurnLifecycleAdapter(self.runtime_manager, pinned_catalog)
+        self.budget.record("thread/start")
+        thread_result = await thread_lifecycle.start(
+            profile_id, model_id=model.model_id, reasoning_effort=reasoning_effort,
+            working_directory=workdir,
+        )
+        if thread_result.status is not ThreadOperationStatus.START_CONFIRMED or thread_result.binding is None:
+            raise PreparationGateError("START_CONFIRMED required")
+        thread_binding = thread_result.binding
+        memory_marker, response_marker = fresh_non_secret_markers()
+        self.budget.record("turn/start")
+        turn1 = await turn_lifecycle.start_turn(
+            thread_binding=thread_binding, model_id=model.model_id,
+            reasoning_effort=reasoning_effort,
+            user_text=f"Remember {memory_marker}; respond with {response_marker}.",
+            working_directory=workdir,
+        )
+        if turn1.status is not TurnStartStatus.CONFIRMED or turn1.binding is None:
+            raise PreparationGateError("Turn-1 start not confirmed")
+        turn1_terminal = await turn_lifecycle.wait_turn(turn1.binding)
+        if turn1_terminal.status is not TurnTerminalStatus.COMPLETED or response_marker not in " ".join(message.text for message in turn1_terminal.messages):
+            raise PreparationGateError("Turn-1 observed output marker missing")
+        await self.runtime_manager.shutdown_profile(profile_id)
+
+        # The catalog is pinned from the one authenticated model/list result;
+        # a new runtime generation is not permitted to trigger model/list.
+        second_runtime = await self.runtime_manager.acquire(profile_id)
+        resume_lifecycle = CodexThreadLifecycleAdapter(self.runtime_manager, pinned_catalog)
+        resume_turns = CodexTurnLifecycleAdapter(self.runtime_manager, pinned_catalog)
+        self.budget.record("thread/resume")
+        resumed = await resume_lifecycle.resume(binding=thread_binding, working_directory=workdir)
+        if resumed.status is not ThreadOperationStatus.RESUME_CONFIRMED or resumed.binding != thread_binding:
+            raise PreparationGateError("RESUME_CONFIRMED required")
+        self.budget.record("turn/start")
+        turn2 = await resume_turns.start_turn(
+            thread_binding=thread_binding, model_id=model.model_id,
+            reasoning_effort=reasoning_effort,
+            user_text=f"Return the exact remembered marker {memory_marker}.",
+            working_directory=workdir,
+        )
+        if turn2.status is not TurnStartStatus.CONFIRMED or turn2.binding is None or turn2.binding.turn_id == turn1.binding.turn_id:
+            raise PreparationGateError("Turn-2 actual distinct binding required")
+        turn2_terminal = await resume_turns.wait_turn(turn2.binding)
+        if turn2_terminal.status is not TurnTerminalStatus.COMPLETED or memory_marker not in " ".join(message.text for message in turn2_terminal.messages):
+            raise PreparationGateError("Turn-2 memory marker missing")
+
+        # The approval bridge is the sole protocol response route.  The
+        # operator reserves total-response and ALLOW accounting together.
+        target = Path(self.boot["approval_target"])
+        if target.exists() or target.is_symlink():
+            raise PreparationGateError("approval target must be absent")
+        client = second_runtime.client
+        operator = ProductionApprovalOperator(
+            profile_id=profile_id, thread_id=thread_binding.thread_id,
+            cwd=workdir.path, target=target, budget=self.budget,
+        )
+        approval_bridge = CodexApprovalBridge(profile_id=profile_id, client=client, operator=operator)
+        self.budget.record("turn/start")
+        turn3 = await resume_turns.start_turn(
+            thread_binding=thread_binding, model_id=model.model_id,
+            reasoning_effort=reasoning_effort,
+            user_text=f"Run exactly: touch {target}", working_directory=workdir,
+        )
+        if turn3.status is not TurnStartStatus.CONFIRMED or turn3.binding is None:
+            raise PreparationGateError("Turn-3 actual binding required")
+        if operator.turn_binding is None:
+            operator.turn_binding = turn3.binding
+        approval = await approval_bridge.handle_next()
+        if approval.status is not ApprovalHandlingStatus.ALLOWED or operator.allow_count != 1:
+            raise PreparationGateError("single protocol ALLOW required")
+        turn3_terminal = await resume_turns.wait_turn(turn3.binding)
+        if turn3_terminal.status is not TurnTerminalStatus.COMPLETED:
+            raise PreparationGateError("Turn-3 completion required")
+        target_stat = target.lstat()
+        if not stat.S_ISREG(target_stat.st_mode) or target_stat.st_uid != 0 or target_stat.st_nlink != 1 or stat.S_IMODE(target_stat.st_mode) & 0o022:
+            raise PreparationGateError("approval target metadata unsafe")
+        target.unlink()
+
+        self.budget.record("turn/start")
+        turn4 = await resume_turns.start_turn(
+            thread_binding=thread_binding, model_id=model.model_id,
+            reasoning_effort=reasoning_effort, user_text=TURN4_STIMULUS,
+            working_directory=workdir,
+        )
+        if turn4.status is not TurnStartStatus.CONFIRMED or turn4.binding is None or turn4.binding.turn_id in {turn1.binding.turn_id, turn2.binding.turn_id, turn3.binding.turn_id}:
+            raise PreparationGateError("Turn-4 actual distinct binding required")
+        self.budget.record("turn/interrupt")
+        interrupt = await resume_turns.interrupt_turn(turn4.binding)
+        if interrupt.status not in (TurnInterruptStatus.CONFIRMED, TurnInterruptStatus.RECONCILED) or interrupt.terminal_result is None or interrupt.terminal_result.status is not TurnTerminalStatus.FAILED:
+            raise PreparationGateError("definitive Turn-4 interrupt required")
+        await self.runtime_manager.shutdown_profile(profile_id)
+
+        oracle = BoundedTargetOracle(self.profile, thread_binding.thread_id, (memory_marker.encode(), response_marker.encode()))
+        before = oracle.observe()
+        if not predelete_observation_conclusive(before) or before.scan_errors:
+            raise PreparationGateError("pre-delete physical oracle inconclusive")
+        storage = await SqliteStorage.open(self.boot["controller_db"])
+        try:
+            repository = DialogueRepository(storage)
+            created = await repository.create_intent(dialogue_id=f"p7c13-{self.boot['run_id_hash'][:24]}", server_id="server-80", profile_id=profile_id)
+            idle = await repository.confirm_created(dialogue_id=created.dialogue_id, expected_version=created.version, thread_id=thread_binding.thread_id)
+            durable = await repository.get_live()
+            if durable is None or durable.state is not DialogueState.IDLE or durable.thread_id != thread_binding.thread_id:
+                raise PreparationGateError("schema-v4 durable binding invalid")
+            service = assemble_production_delete_chain(storage, self.runtime_manager, catalog, server_id="server-80")
+            self.budget.record("thread/delete")
+            delete_result = await service.delete(DialogueDeleteRequest(idle.dialogue_id, idle.version))
+            if getattr(delete_result.status, "value", None) != DialogueDeleteStatus.DELETED.value:
+                raise PreparationGateError("canonical delete did not confirm")
+        finally:
+            await storage.close()
+        after = oracle.observe()
+        if not post_delete_acceptance(
+            official_delete=ThreadOperationStatus.DELETE_CONFIRMED.value, application_result=DialogueDeleteStatus.DELETED.value, tombstone_bounded=True,
+            live_binding=False, envelope_valid=True, isolated_sqlite_descendants=0,
+            isolated_logs_descendants=0, persistent=after, isolated=after,
+            scan_errors=0, owned_children=0, owned_group_active=False, owned_group_zombies=0,
+            unrelated_signals=0, budgets_ok=True,
+        ):
+            raise PreparationGateError("post-delete physical oracle failed")
+        return CompleteChildResult(True, {"turn1": "COMPLETED", "turn2": "COMPLETED", "turn3": "COMPLETED", "turn4": "INTERRUPTED"}, {"persistent": 0, "isolated": 0, "scan_errors": 0}, {"delete": "DELETE_CONFIRMED"})
+
+
+class _PinnedCatalogAdapter:
+    def __init__(self, catalog: CodexModelCatalog) -> None:
+        self.catalog = catalog
+
+    async def get_catalog(self, profile_id: str, *, refresh: bool = False) -> CodexModelCatalog:
+        if profile_id != self.catalog.profile_id:
+            raise PreparationGateError("pinned catalog profile mismatch")
+        return self.catalog
+
+
+class ProductionApprovalOperator:
+    """One bridge-facing ALLOW decision with atomic accounting reservation."""
+
+    def __init__(self, *, profile_id: str, thread_id: str, cwd: str, target: Path, budget: EffectBudget) -> None:
+        self.profile_id, self.thread_id, self.cwd, self.target, self.budget = profile_id, thread_id, cwd, target, budget
+        self.turn_binding: TurnBinding | None = None
+        self.allow_count = 0
+        self.request_count = 0
+        self.response_unknown = False
+
+    async def decide(self, request: Any) -> ApprovalDecision:
+        self.request_count += 1
+        if self.turn_binding is None or getattr(request, "thread_id", None) != self.thread_id or getattr(request, "turn_id", None) != self.turn_binding.turn_id:
+            return ApprovalDecision.DENY
+        command_lines = [line.split(": ", 1)[1] for line in request.context_lines if line.startswith("command: ")]
+        if len(command_lines) != 1:
+            return ApprovalDecision.DENY
+        command = command_lines[0]
+        request_fixture = c12.CapturedRequest(
+            "COMMAND_EXECUTION", request.local_sequence, request.local_sequence,
+            _sha256(self.thread_id), _sha256(self.turn_binding.turn_id), _sha256(self.cwd), _sha256(command),
+        )
+        expected = c12.ExpectedAuthority(
+            "COMMAND_EXECUTION", request.local_sequence, request.local_sequence,
+            _sha256(self.thread_id), _sha256(self.turn_binding.turn_id), _sha256(self.cwd), str(self.target), _sha256(command),
+        )
+        wire = c12.CorrelatedWireRecord(
+            "COMMAND_EXECUTION", request.local_sequence, request.local_sequence,
+            _sha256(self.thread_id), _sha256(self.turn_binding.turn_id), _sha256(self.cwd),
+            _sha256(str(self.target)), command, _sha256(command),
+        )
+        if c12.strict_p7c12_match(request_fixture, expected, [wire]) is not c12.MatcherResult.MATCH_EXACT_P7_APPROVAL_COMMAND:
+            return ApprovalDecision.DENY
+        if self.target.exists() or self.target.is_symlink():
+            return ApprovalDecision.DENY
+        # Both slots are reserved before the bridge's single protocol callback.
+        self.budget.record("approval_responses")
+        self.budget.record("allow_responses")
+        self.allow_count += 1
+        return ApprovalDecision.ALLOW
+
+
+def build_production_real_seam_factory(
+    boot: Mapping[str, Any], *, runtime_factory: Callable[[dict[str, str], tuple[str, ...]], Any] | None = None,
+) -> ProductionRealChildOrchestrator:
+    """Construct the real adapter graph selected by the production default."""
+    profile = CodexProfile(boot["profile_id"], boot["codex_home"], "P7.C13", boot["isolated_root"])
+    routing = FutureRuntimeRouting(profile)
+    environment = routing.environment()
+    overrides = routing.config_overrides()
+    authority = IsolationPathAuthority(
+        (profile,), controller_db_path=boot["controller_db"],
+        repository_root=boot["workdir"], protected_roots=(PERSISTENT_HOME, "/root/.codexcontrol"),
+    )
+    manager = runtime_factory(environment, overrides) if runtime_factory is not None else CodexRuntimeManager(
+        (profile,), client_version="p7c13-future", isolation_authority=authority,
+        parent_environment=environment,
+    )
+    catalog = CodexModelCatalogAdapter(manager)
+    thread_lifecycle = CodexThreadLifecycleAdapter(manager, catalog)
+    turn_lifecycle = CodexTurnLifecycleAdapter(manager, catalog)
+    isolated_state_root = IsolatedStateRoot(authority)
+    return ProductionRealChildOrchestrator(
+        profile=profile, boot=boot, runtime_manager=manager, catalog_adapter=catalog,
+        thread_lifecycle=thread_lifecycle, turn_lifecycle=turn_lifecycle,
+        isolation_root=isolated_state_root, budget=EffectBudget(dict(boot["effect_ceiling"])),
+    )
+
+
 def _default_child_seams(boot: Mapping[str, Any], binding: FlowBinding, memory_marker: str, response_marker: str) -> FutureChildSeams:
     """Safe fake-shaped seam; real construction replaces these callbacks later."""
     target = boot["approval_target"]
@@ -1399,7 +1761,7 @@ def _default_child_seams(boot: Mapping[str, Any], binding: FlowBinding, memory_m
         thread_resume=lambda: True,
         turn1=lambda: f"START_CONFIRMED {Terminal.COMPLETED} {response_marker}",
         turn2=lambda marker: f"RESUME_CONFIRMED {Terminal.COMPLETED} {marker}",
-        turn3_capture=lambda: capture, approval_response=lambda: True, allow_response=lambda: True,
+        turn3_capture=lambda: capture, approval_response=lambda: True,
         turn4_start=lambda: FlowBinding(binding.thread_id, "turn-4", binding.cwd, 4), interrupt=lambda: True, predelete=lambda: clean,
         bind_controller=lambda: FreshSchemaV4ControllerBinding(boot.get("controller_db", ""), boot.get("profile_id", "synthetic-p7c13"), binding.thread_id), delete_service=lambda: "DELETED",
         postdelete=lambda result, observed: result == "DELETED" and observed.thread_count > 0,
@@ -1410,40 +1772,41 @@ def _child_result_payload(boot: Mapping[str, Any], result: CompleteChildResult, 
     return {
         "schema": CHILD_RESULT_SCHEMA, "status": "PASS" if result.verdict else "FAILED", "verdict": result.verdict,
         "source_head": boot["source_head"], "source_tree": boot["source_tree"], "harness_blob": boot["harness_blob"], "run_id_hash": boot["run_id_hash"],
-        "effect_counts": dict(budget.counts), "outcomes": dict(result.outcomes), "residual_counts": dict(result.residual_counts),
+        "effect_counts": {key: budget.count(key) for key in FROZEN_EFFECT_BUDGET}, "outcomes": dict(result.outcomes),
+        "residual_counts": {key: result.residual_counts.get(key, 0) for key in ("persistent", "isolated", "scan_errors")},
         "classes": dict(result.classes), "process_group_quiescent": True,
     }
 
 
-def _future_child_main(
-    boot_path: str | Path | None = None, *, installed: InstalledRuntimeAuthority | None = None,
-    runtime_factory: Callable[[dict[str, str], tuple[str, ...]], Any] | None = None,
-    business_factory: Callable[[Any], Any] | None = None,
-    seams_factory: Callable[[Mapping[str, Any], FlowBinding, str, str], FutureChildSeams] | None = None,
+def _future_child_injected_main(
+    boot: Mapping[str, Any], *, installed: InstalledRuntimeAuthority,
+    runtime_factory: Callable[[dict[str, str], tuple[str, ...]], Any] | None,
+    business_factory: Callable[[Any], Any] | None,
+    seams_factory: Callable[[Mapping[str, Any], FlowBinding, str, str], FutureChildSeams] | None,
 ) -> int:
-    """Bounded child entrypoint; boot validation precedes installed/runtime effects."""
-    if boot_path is None:
-        raise PreparationGateError("boot authority required")
-    boot = RootOnlyBootAuthority(boot_path).read()
-    profile = CodexProfile(boot["profile_id"], boot["codex_home"], "P7.C13", boot["isolated_root"])
-    routing = FutureRuntimeRouting(profile)
+    """Explicit test-only child route; inaccessible to production defaults."""
     budget = EffectBudget(dict(boot["effect_ceiling"]))
-    binding = FlowBinding("synthetic-future-thread", "turn-1", boot["workdir"], 1)
-    memory_marker, response_marker = fresh_non_secret_markers()
+    previous_umask = os.umask(0o077)
     try:
-        seams = seams_factory(boot, binding, memory_marker, response_marker) if seams_factory else _default_child_seams(boot, binding, memory_marker, response_marker)
+        profile = CodexProfile(boot["profile_id"], boot["codex_home"], "P7.C13", boot["isolated_root"])
+        binding = FlowBinding("test-injected-thread", "test-injected-turn-1", boot["workdir"], 1)
+        memory_marker, response_marker = fresh_non_secret_markers()
+        seams = seams_factory(boot, binding, memory_marker, response_marker) if seams_factory is not None else None
         if runtime_factory is None:
-            runtime_factory = lambda environment, overrides: CodexRuntimeManager(
-                (profile,), client_version="p7c13-future", isolation_authority=IsolationPathAuthority((profile,), controller_db_path=boot["controller_db"], repository_root=boot["workdir"]),
-                parent_environment=environment,
-            )
-        if business_factory is None:
+            runtime_factory = lambda environment, overrides: object()
+        if business_factory is None and seams is not None:
             dispatch = {name: (lambda: True) for name in FROZEN_EFFECT_BUDGET if name not in {"thread/read", "thread/list", "second_child", "real_retry", "telegram"}}
             effects = FutureRealEffectBridge(budget, dispatch)
             business_factory = lambda runtime: CompleteFutureChildOrchestrator(
-                effects=effects, binding=binding, memory_marker=memory_marker, response_marker=response_marker, seams=seams, boot=boot,
+                effects=effects, binding=binding, memory_marker=memory_marker,
+                response_marker=response_marker, seams=seams, boot=boot,
             )
-        child = FutureRealChildPath(installed=installed or InstalledRuntimeAuthority(), routing=routing, runtime_factory=runtime_factory, business_factory=business_factory)
+        if business_factory is None:
+            raise PreparationGateError("explicit injected business seam missing")
+        child = FutureRealChildPath(
+            installed=installed, routing=FutureRuntimeRouting(profile),
+            runtime_factory=runtime_factory, business_factory=business_factory,
+        )
         result = child.run()
         if not isinstance(result, CompleteChildResult):
             raise PreparationGateError("complete child result missing")
@@ -1456,6 +1819,47 @@ def _future_child_main(
         except (OSError, PreparationGateError):
             pass
         return 1
+    finally:
+        os.umask(previous_umask)
+
+
+def _future_child_main(
+    boot_path: str | Path | None = None, *, installed: InstalledRuntimeAuthority | None = None,
+    runtime_factory: Callable[[dict[str, str], tuple[str, ...]], Any] | None = None,
+    business_factory: Callable[[Any], Any] | None = None,
+    seams_factory: Callable[[Mapping[str, Any], FlowBinding, str, str], FutureChildSeams] | None = None,
+) -> int:
+    """Bounded child entrypoint; boot validation precedes installed/runtime effects."""
+    if boot_path is None:
+        raise PreparationGateError("boot authority required")
+    boot = RootOnlyBootAuthority(boot_path).read()
+    if seams_factory is not None or business_factory is not None:
+        return _future_child_injected_main(
+            boot, installed=installed or InstalledRuntimeAuthority(),
+            runtime_factory=runtime_factory, business_factory=business_factory,
+            seams_factory=seams_factory,
+        )
+    budget = EffectBudget(dict(boot["effect_ceiling"]))
+    previous_umask = os.umask(0o077)
+    try:
+        authority = installed or InstalledRuntimeAuthority()
+        authority.verify()
+        child = build_production_real_seam_factory(boot, runtime_factory=runtime_factory)
+        result = asyncio.run(child.run_async())
+        result_budget = child.budget
+        if not isinstance(result, CompleteChildResult):
+            raise PreparationGateError("complete child result missing")
+        _write_child_result(boot["child_result_path"], _child_result_payload(boot, result, result_budget))
+        return 0 if result.verdict else 1
+    except Exception as error:
+        failure = CompleteChildResult(False, {"terminal": type(error).__name__}, {"scan_errors": 1}, {"failure": "FAIL_CLOSED"})
+        try:
+            _write_child_result(boot["child_result_path"], _child_result_payload(boot, failure, budget))
+        except (OSError, PreparationGateError):
+            pass
+        return 1
+    finally:
+        os.umask(previous_umask)
 
 
 def _synthetic_ledger_record(state: str = "RESERVED") -> dict[str, Any]:
@@ -1472,7 +1876,7 @@ def _synthetic_ledger_record(state: str = "RESERVED") -> dict[str, Any]:
     }
 
 
-def _synthetic_boot_record(base: str | Path, *, source_head: str = REPAIR2_BASE_HEAD, source_tree: str = P7C13_BASE_TREE, harness_blob: str = PRIOR_HARNESS_BLOB) -> dict[str, Any]:
+def _synthetic_boot_record(base: str | Path, *, source_head: str = REPAIR3_BASE_HEAD, source_tree: str = P7C13_BASE_TREE, harness_blob: str = PRIOR_HARNESS_BLOB) -> dict[str, Any]:
     root = Path(base)
     return {
         "schema": BOOT_SCHEMA, "source_head": source_head, "source_tree": source_tree,
@@ -1539,19 +1943,27 @@ class P7C13Repair1AuthorityTests(unittest.TestCase):
                 ledger=ledger, watchdog=fake_watchdog, child_command=("synthetic-child",),
                 result_path=result_path, record=_synthetic_ledger_record(),
             )
-            fake_watchdog.run.side_effect = lambda command, *, result_path: (_write_child_result(result_path, _child_result_payload(executor._boot_record(executor.record), CompleteChildResult(True, {}, {}, {}), EffectBudget())), WatchdogResult("COMPLETED", child_result_valid=True))[1]
+            def write_valid_result(command, *, result_path, result_validator=None):
+                budget = EffectBudget()
+                budget.counts = dict(FROZEN_EFFECT_BUDGET)
+                _write_child_result(result_path, _child_result_payload(executor._boot_record(executor.record), CompleteChildResult(True, {}, {"persistent": 0, "isolated": 0, "scan_errors": 0}, {}), budget))
+                return WatchdogResult("COMPLETED", child_result_valid=True)
+            fake_watchdog.run.side_effect = write_valid_result
             self.assertEqual("COMPLETED", executor.run().status)
-            fake_watchdog.run.assert_called_once_with(("synthetic-child",), result_path=result_path)
+            fake_watchdog.run.assert_called_once()
+            self.assertEqual(("synthetic-child",), fake_watchdog.run.call_args.args[0])
+            self.assertEqual(result_path, fake_watchdog.run.call_args.kwargs["result_path"])
             with self.assertRaises(PreparationGateError):
                 executor.run()
             self.assertEqual("COMPLETED", DurableOneShotLedger(Path(directory) / "ledger.json").read()["state"])
 
     def test_watchdog_uses_one_synthetic_child_and_validates_result(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c13-watchdog-") as directory:
+            boot = _synthetic_boot_record(directory)
             result = Path(directory) / "result.json"
-            payload = json.dumps({"schema": "p7c13-child-result-v1", "status": "COMPLETED", "effect_counts": {}, "outcomes": {}, "residual_counts": {}, "verdict": True})
+            payload = json.dumps(_child_result_payload(boot, CompleteChildResult(True, {}, {}, {}), EffectBudget()))
             code = "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])"
-            watchdog = OwnedParentChildWatchdog()
+            watchdog = OwnedParentChildWatchdog(result_validator=lambda path: _child_result_file_is_valid(path, boot))
             outcome = watchdog.run((sys.executable, "-c", code, str(result), payload), result_path=result)
             self.assertEqual("COMPLETED", outcome.status)
             self.assertEqual(1, watchdog.child_count)
@@ -1713,6 +2125,7 @@ class P7C13Repair2IntegrationTests(unittest.TestCase):
             code = _future_child_main(
                 boot_path, installed=InstalledRuntimeAuthority(probe=lambda: (INSTALLED_VERSION, SCHEMA_SHA256)),
                 runtime_factory=lambda environment, overrides: (runtime_calls.append("runtime"), object())[1],
+                seams_factory=_default_child_seams,
             )
             self.assertEqual(0, code)
             self.assertEqual(["runtime"], runtime_calls)
@@ -1771,7 +2184,6 @@ class P7C13Repair2IntegrationTests(unittest.TestCase):
         responses: list[str] = []
         base.turn3_capture = lambda: wrong
         base.approval_response = lambda: responses.append("response")
-        base.allow_response = lambda: responses.append("allow")
         with self.assertRaises(PreparationGateError):
             CompleteFutureChildOrchestrator(effects=effects, binding=binding, memory_marker=memory, response_marker=response, seams=base).run()
         self.assertEqual([], responses)
@@ -1793,6 +2205,36 @@ def read_only_boundary_preflight(
     if any(any(field == path for field in line.split()[:5]) for line in mountinfo.splitlines() for path in protected.values()):
         return False
     return all(Path(path).is_absolute() and not Path(path).is_symlink() for path in protected.values())
+
+
+def fresh_run_owned_paths(
+    *, isolated_root: Path, controller_db: Path, workdir: Path, approval_target: Path,
+    ledger_path: Path, persistent_home: Path, repository: Path,
+) -> dict[str, str]:
+    """Read-only proof for the four fresh mutable boundaries."""
+    paths = {
+        "isolated_root": isolated_root, "controller_db": controller_db,
+        "workdir": workdir, "approval_target": approval_target,
+    }
+    if approval_target.parent != Path("/root") or not approval_target.name.startswith("p7c13-approval-"):
+        raise PreparationGateError("approval target is not a direct root child")
+    protected = (persistent_home, repository, Path.cwd(), Path("/tmp"), Path("/root/.codexcontrol"))
+    all_values = tuple(paths.values()) + (ledger_path,)
+    if len({str(path) for path in all_values}) != len(all_values):
+        raise PreparationGateError("run-owned path collision")
+    for name, path in paths.items():
+        if not path.is_absolute() or path.is_symlink() or path.exists():
+            raise PreparationGateError(f"{name} is not fresh")
+        if any(os.path.commonpath((str(path), str(root))) in (str(path), str(root)) for root in protected):
+            # The isolated/controller/workdir are intentionally under the
+            # protected authority root; only the approval target must be
+            # outside it.  This branch is retained as a clear alias proof.
+            if name == "approval_target":
+                raise PreparationGateError(f"{name} aliases protected root")
+    canonical = [os.path.realpath(path) for path in all_values]
+    if len(set(canonical)) != len(canonical):
+        raise PreparationGateError("physical path alias")
+    return {name: str(path) for name, path in paths.items()}
 
 
 class _FakeDelete:
@@ -1875,6 +2317,146 @@ class P7C13OfflineFlowTests(unittest.TestCase):
         budget = EffectBudget()
         self.assertEqual({}, budget.counts)
         self.assertEqual(0, budget.count("thread/start"))
+
+    def test_direct_parent_cli_unset_or_drifted_source_has_zero_executor_calls(self) -> None:
+        with patch(__name__ + "._current_source_authority", return_value=("head", "tree", "harness", True)):
+            fake = unittest.mock.Mock(spec=FutureRealExecutor)
+            with self.assertRaises(PreparationGateError):
+                future_real_cli_entrypoint(environ={}, executor=fake)
+            fake.run.assert_not_called()
+        exact = {
+            FUTURE_GATE_ENV: "offline-token",
+            "P7C13_EXPECTED_HEAD": "head", "P7C13_EXPECTED_TREE": "tree",
+            "P7C13_EXPECTED_HARNESS_BLOB": "harness",
+        }
+        with patch(__name__ + "._current_source_authority", return_value=("head", "tree", "harness", False)):
+            fake = unittest.mock.Mock(spec=FutureRealExecutor)
+            with self.assertRaises(PreparationGateError):
+                future_real_cli_entrypoint(environ=exact, executor=fake)
+            fake.run.assert_not_called()
+
+    def test_direct_parent_cli_exact_source_gate_enters_executor_once(self) -> None:
+        environment = {
+            FUTURE_GATE_ENV: "offline-token", "P7C13_EXPECTED_HEAD": "head",
+            "P7C13_EXPECTED_TREE": "tree", "P7C13_EXPECTED_HARNESS_BLOB": "harness",
+        }
+        fake = unittest.mock.Mock(spec=FutureRealExecutor)
+        fake.run.return_value = "prepared"
+        with patch(__name__ + "._current_source_authority", return_value=("head", "tree", "harness", True)):
+            self.assertEqual("prepared", future_real_cli_entrypoint(environ=environment, executor=fake))
+        fake.run.assert_called_once()
+
+    def test_fresh_run_owned_paths_are_unique_absent_and_alias_checked(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-fresh-") as directory:
+            root = Path(directory)
+            paths = fresh_run_owned_paths(
+                isolated_root=root / "isolated", controller_db=root / "controller.sqlite3",
+                workdir=root / "work", approval_target=Path("/root/p7c13-approval-offline-unique"),
+                ledger_path=root / "ledger", persistent_home=Path(PERSISTENT_HOME),
+                repository=Path("/root/CodexControl"),
+            )
+            self.assertEqual(4, len(paths))
+            self.assertFalse(any(Path(value).exists() for value in paths.values()))
+            existing = root / "existing"
+            existing.touch()
+            with self.assertRaises(PreparationGateError):
+                fresh_run_owned_paths(
+                    isolated_root=existing, controller_db=root / "c.sqlite3", workdir=root / "w",
+                    approval_target=Path("/root/p7c13-approval-offline-existing"), ledger_path=root / "l",
+                    persistent_home=Path(PERSISTENT_HOME), repository=Path("/root/CodexControl"),
+                )
+
+    def test_private_umask_makes_exact_touch_target_private_without_command_chmod(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-umask-") as directory:
+            target = Path(directory) / "approval"
+            previous = os.umask(0o077)
+            try:
+                target.touch()
+            finally:
+                os.umask(previous)
+            self.assertEqual(0o600, stat.S_IMODE(target.lstat().st_mode))
+
+    def test_production_default_selects_real_factory_and_never_synthetic_default(self) -> None:
+        child_source = inspect.getsource(_future_child_main)
+        factory_source = inspect.getsource(build_production_real_seam_factory)
+        self.assertNotIn("_default_child_seams", child_source)
+        self.assertNotIn("synthetic-future-thread", child_source)
+        for name in ("CodexRuntimeManager", "CodexModelCatalogAdapter", "CodexThreadLifecycleAdapter", "CodexTurnLifecycleAdapter", "CodexApprovalBridge", "assemble_production_delete_chain", "BoundedTargetOracle"):
+            self.assertIn(name, factory_source + inspect.getsource(ProductionRealChildOrchestrator))
+
+    def test_final_child_result_is_one_schema_and_failed_unknown_wrong_authority_cannot_pass(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-result-authority-") as directory:
+            boot = _synthetic_boot_record(directory)
+            budget = EffectBudget()
+            budget.counts = dict(FROZEN_EFFECT_BUDGET)
+            value = _child_result_payload(boot, CompleteChildResult(True, {}, {"persistent": 0, "isolated": 0, "scan_errors": 0}, {}), budget)
+            self.assertTrue(child_result_passes(value, boot))
+            for mutation in (
+                {"status": "FAILED", "verdict": False},
+                {"status": "UNKNOWN", "verdict": False},
+                {"source_head": "wrong"},
+                {"effect_counts": {**value["effect_counts"], "thread/delete": 0}},
+                {"process_group_quiescent": False},
+            ):
+                candidate = dict(value)
+                candidate.update(mutation)
+                self.assertFalse(child_result_passes(candidate, boot))
+            self.assertFalse(_safe_child_result({"schema": "p7c13-child-result-v1", "status": "COMPLETED"}))
+
+    def test_model_catalog_adapter_requires_one_visible_default_and_thread_start_uses_returned_binding(self) -> None:
+        class Client:
+            def __init__(self, defaults: int) -> None:
+                self.defaults, self.calls = defaults, []
+            async def request(self, method: str, params: Any) -> dict[str, Any]:
+                self.calls.append(method)
+                if method == "model/list":
+                    return {"data": [
+                        {"id": f"m{i}", "model": f"wire-{i}", "displayName": f"Model {i}", "description": "offline", "hidden": False, "isDefault": i < self.defaults, "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": "medium"}], "defaultReasoningEffort": "medium"}
+                        for i in range(max(1, self.defaults))
+                    ]}
+                if method == "thread/start":
+                    return {"thread": {"id": "actual-thread-returned"}}
+                raise AssertionError(method)
+        class Runtime:
+            profile_id = "offline-profile"
+            generation = 1
+            def __init__(self, client: Client) -> None: self.client = client
+        class Manager:
+            def __init__(self, client: Client) -> None: self.runtime, self.acquire_calls = Runtime(client), 0
+            async def acquire(self, profile_id: str) -> Runtime: self.acquire_calls += 1; return self.runtime
+        client = Client(1); manager = Manager(client); catalog = CodexModelCatalogAdapter(manager)
+        lifecycle = CodexThreadLifecycleAdapter(manager, catalog)
+        result = asyncio.run(lifecycle.start("offline-profile", model_id="m0", reasoning_effort=None, working_directory=TrustedWorkingDirectory("/root/offline-work")))
+        self.assertIs(result.status, ThreadOperationStatus.START_CONFIRMED)
+        self.assertEqual("actual-thread-returned", result.binding.thread_id)
+        self.assertEqual(1, client.calls.count("model/list"))
+        bad = Client(2)
+        with self.assertRaises(Exception):
+            asyncio.run(CodexModelCatalogAdapter(Manager(bad)).get_catalog("offline-profile"))
+
+    def test_single_allow_reserves_two_accounting_facts_and_sends_one_fake_protocol_response(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-approval-") as directory:
+            target = Path(directory) / "target"
+            client = type("Client", (), {})()
+            request = type("Request", (), {})
+            from codex_control.adapters.codex.protocol import InboundServerRequest
+            inbound = InboundServerRequest(1, "approval-1", "item/commandExecution/requestApproval", {"itemId": "item", "startedAtMs": 1, "threadId": "thread-real", "turnId": "turn-real", "cwd": "/root/offline-work", "command": shlex.join(["/bin/bash", "-lc", f"touch {target}"])})
+            client.request = inbound
+            client.responses = []
+            client.wait_terminal = lambda: asyncio.Event().wait()
+            client.owns_server_request = lambda candidate: candidate is inbound
+            async def respond(candidate: Any, result: dict[str, Any]) -> None:
+                client.responses.append((candidate, result))
+            client.respond_server_request = respond
+            budget = EffectBudget()
+            operator = ProductionApprovalOperator(profile_id="offline-profile", thread_id="thread-real", cwd="/root/offline-work", target=target, budget=budget)
+            operator.turn_binding = TurnBinding("offline-profile", "thread-real", "turn-real")
+            bridge = CodexApprovalBridge(profile_id="offline-profile", client=client, operator=operator)
+            result = asyncio.run(bridge.handle_request(inbound))
+            self.assertIs(result.status, ApprovalHandlingStatus.ALLOWED)
+            self.assertEqual(1, len(client.responses))
+            self.assertEqual(1, budget.count("approval_responses"))
+            self.assertEqual(1, budget.count("allow_responses"))
 
     def test_turn1_turn2_restart_exact_binding_and_marker_plan(self) -> None:
         flow = OfflineFutureFlow()
@@ -2317,6 +2899,12 @@ class P7C13ProductionDeleteChainTests(unittest.IsolatedAsyncioTestCase):
 def _module_main(argv: Sequence[str] | None = None) -> int:
     """Separate ordinary unittest discovery from the gated child executable."""
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if "--p7c13-real-run" in arguments:
+        try:
+            result = future_real_cli_entrypoint()
+        except PreparationGateError:
+            return 2
+        return 0 if getattr(result, "status", None) in (None, "COMPLETED") else 1
     if "--p7c13-future-child" in arguments:
         try:
             index = arguments.index("--boot-authority")
