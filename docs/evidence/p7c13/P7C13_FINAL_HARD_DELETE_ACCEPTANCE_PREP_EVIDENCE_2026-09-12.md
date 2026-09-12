@@ -1,96 +1,129 @@
-# P7.C13 final hard-delete acceptance preparation evidence — 2026-09-12
+# P7.C13 final hard-delete acceptance preparation — Repair-1 evidence
 
-Status: PREPARATION ONLY / ZERO REAL EFFECT / NO REAL AUTHORIZATION
+Status: REPAIR-1 PREPARATION ONLY / ZERO REAL EFFECT / NO REAL AUTHORIZATION
 
-## Authority and scope
+## Lineage and authority
 
-- Preparation branch: `prep-p7-c13-final-hard-delete-acceptance-2026-09-12`.
-- Exact accepted P7.C12 base: `a5c66a778800d1c5ee5811d97d961fe0dccd677c`.
-- Exact accepted P7.C12 tree: `e6a46445d11d660a50891eabf412b01aef883fca`.
-- Exact accepted P7.C12 matcher blob: `f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1`.
-- Architect `origin/main`: `ddc3cb48cbe82bcee6d2b5387774287b66d582fb`.
-- Architect `origin/main` tree: `c6288dfefecce00bbca7e6ff84aacda4b20fce8d`.
-- Harness blob before commit: `a6962a14ffd4c10d6e4ff072cd24622077f839c2`.
-- Helper: none.
-- Changed paths are limited to this evidence file and `tests/real/test_p7_c13_final_hard_delete_acceptance.py`.
-- No `src/**`, controller schema/migration, ADR, Telegram, deployment, CURRENT_WORK, ROADMAP, or historical P7.C6–P7.C12 file was changed.
+- branch: `prep-p7-c13-final-hard-delete-acceptance-repair1-2026-09-12`
+- `REPAIR1_BASE_HEAD=8fa749856c678cb1ae120f7802c6c553c1272e34`
+- rejected candidate parent: `a5c66a778800d1c5ee5811d97d961fe0dccd677c`
+- `ORIGINAL_HARNESS_BLOB=a6962a14ffd4c10d6e4ff072cd24622077f839c2`
+- `NEW_HARNESS_BLOB=82a7f3c1e31456205fb316eb4e692973dc3d0361`
+- accepted P7.C12 matcher blob: `f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1` (unchanged)
+- architect `origin/main`: `47f93f2f571a053f3fafed1e6734a9297e198974`
+- architect `origin/main` tree: `cda745886541a71b1639440383a08b163ef9bc05`
+- helper: none
+- changed tracked paths: this evidence file and `tests/real/test_p7_c13_final_hard_delete_acceptance.py` only
 
-## Future-real gate and routing
+No `src/**`, accepted P7.C12 matcher, historical P7.C6–P7.C12 files, controller migration, ADR, deployment, Telegram, CURRENT_WORK or ROADMAP changed.
 
-`P7C13_FUTURE_REAL_GATE=DISABLED`. The entry point requires an absent architect contract object containing an authorization token, expected HEAD, and expected TREE, plus matching explicit environment values. Ordinary discovery and direct execution therefore reach no runtime, process, RPC, approval, interrupt, or delete operation. No future authorization environment, latch, recovery ledger, credential, target, or real state root was created.
+## Future-real path and gate
 
-Future routing is frozen as assertions only: executable `/usr/local/bin/codex`, version `codex-cli 0.144.6`, schema aggregate SHA-256 `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`, shared authenticated `CODEX_HOME=/root/.codex_second`, isolated `CODEX_SQLITE_HOME=<fresh>/sqlite`, `sqlite_home=<same>`, `log_dir=<fresh>/logs`, and `history.persistence=none`.
+`FutureArchitectContract` now requires authorization token, expected HEAD, expected TREE and expected harness blob. `future_real_gate()` requires exact agreement across the contract, explicit environment, current HEAD, current TREE and current harness blob. Any unset or mismatched value returns before executor selection. Exact synthetic agreement invokes the prepared parent executor once; no current value is an architect authorization value.
 
-The shared-home correction is carried forward: concurrent users/processes of `/root/.codex_second` are allowed; only the exact P7.C13 isolated root, sqlite/logs, controller DB, ledger, workdir, approval target, and children created by the future run may be reserved or signalled. Unrelated shared-home termination calls are fixed at zero.
+`PreparedFutureRealExecutor` reserves the durable ledger before its one-child watchdog, passes the exact contract source values into the recovery record, validates the bounded child result, and records a terminal consumed state. `FutureRealChildPath` verifies installed authority and accepted runtime routing before constructing the runtime/business path. The child business path uses the budgeted effect bridge and the accepted `DialogueDeleteService` chain; no `thread/read` or `thread/list` dispatch method exists.
 
-## Frozen future effect budget
+`FUTURE_REAL_EXECUTOR_PREPARED=YES`
+`P7C13_REPAIR1_REAL_EXECUTOR_PREPARED=YES`
+`GATE_TO_EXECUTOR_SYNTHETIC_PROOF=PASS` — exact gate executor calls `1`; unset, wrong token, HEAD, TREE or harness blob calls `0`.
 
-| Effect | Maximum |
-|---|---:|
-| New thread / `thread/start` / `thread/resume` | 1 / 1 / 1 |
-| `model/list` | 1 |
-| `turn/start` | 4 |
-| approval responses / ALLOW responses | 1 / 1 |
-| `turn/interrupt` / official `thread/delete` | 1 / 1 |
-| `thread/read` / `thread/list` | 0 / 0 |
-| second child / real retry / Telegram | 0 / 0 / 0 |
+Installed authority is fixed to `/usr/local/bin/codex`, `codex-cli 0.144.6`, schema SHA `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`. Synthetic probes cover version/schema drift before runtime/business callbacks. Future routing uses shared authenticated `/root/.codex_second`, isolated `sqlite` and `logs`, and `history.persistence="none"`. Shared-home users are allowed; unrelated shared-home processes are never signalled.
 
-The offline `EffectBudget` rejects an over-budget operation. Preparation observed zero real calls in every category.
+## Durable one-shot and watchdog
 
-## Offline proof results
+`DurableOneShotLedger` uses exclusive creation before the first future thread effect, root ownership, mode `0600`, regular-file/no-symlink/nlink-one checks, bounded duplicate-key-rejecting JSON, stable `(st_dev, st_ino)` identity and terminal consumed states. Recovery fields remain root-only in the future ledger; Git evidence contains no recovery JSON or raw run identities.
 
-The focused P7.C13 preparation suite passed `17` tests.
+`DURABLE_ONE_SHOT_LEDGER_PREPARED=YES` — synthetic first reserve, restart read, completed/incomplete rerun blocking, malformed/duplicate JSON, symlink, wrong mode, nlink and replacement/identity drift all fail closed.
 
-- Turn 1/Turn 2: exact fresh binding, START_CONFIRMED model, one start, one generation restart, one resume, remembered marker, definitive completion, no historical selection.
-- Turn 3: exact `/bin/bash -lc 'touch <target>'` projection through the accepted P7.C12 matcher; explicit `sandbox_permissions=require_escalated`; one ALLOW candidate only; all non-match, identity, sequence, SHA, target, pre-existing-target, second-approval, and missing-target-existence cases fail closed.
-- Turn 4: independent exact `sleep 120` stimulus; no approval reuse; exact binding; one interrupt; UNKNOWN, second interrupt, and unexpected approval fail closed.
-- Delete eligibility: unreachable until all four turn gates, pre-delete material observation, and exact IDLE binding pass.
-- Pre-delete oracle: bounded no-follow scans cover persistent `sessions/**`, optional history, isolated `sqlite/**`, and isolated `logs/**`; evidence shape is marker hash/count/class only; an empty observation is inconclusive.
-- Post-delete oracle: exact official/application statuses, bounded tombstone, no live binding, valid envelope, zero isolated descendants, zero target thread/marker residuals, zero scan/proof errors, owned-group quiescence, no unrelated signals, and budget compliance. Thread-only, marker-only, isolated, and scan-error residuals each fail independently.
-- Boundary safety: read-only mount/identity seam and exact owned-boundary external-user block are covered; shared-home process presence alone is allowed.
-- One-shot/watchdog: normal completion, timeout, residual group, cancellation/error, latch reuse, second-child, and retry cases are covered; all unsafe cases fail closed.
+`OwnedParentChildWatchdog` creates one dedicated session/process group, records the exact child PID/PGID, has no second-child/retry path, and applies bounded TERM then KILL only after rechecking the owned PGID. Synthetic normal, nonzero, timeout, TERM/KILL, residual-group, cancellation/error, malformed/missing-result, second-child, retry and wrong-PGID cases are covered.
 
-## Synthetic production delete-chain results
+`PARENT_CHILD_WATCHDOG_PREPARED=YES`
+`INSTALLED_RUNTIME_GATE_PREPARED=YES`
 
-The suite used a fresh synthetic schema-v4 controller database, `IsolationPathAuthority`, `IsolatedStateRoot`, the accepted `DeleteStorageCleanupCoordinator`, and production `DialogueDeleteService`. No real adapter or runtime generation was acquired.
+## Future turn and approval authority
 
-- Confirmed success: one synthetic official delete, durable confirmed-pending transition, owned shutdown/quiescence/reset, persistent target scan, finalize, bounded tombstone, release, and `DELETED`; isolated payload descendants and target material become zero.
-- `DELETE_UNKNOWN`: terminal UNKNOWN, local isolated containment only, no external retry, no read/list, no finalizer, no tombstone, and retained dialogue authority.
-- Confirmed-pending scan failure: confirmed-pending remains durable and external delete is not retried.
-- Marker-only residual: production exact-thread attribution can be zero while the independent acceptance oracle rejects the result.
+Markers are generated with fresh high entropy in memory; only hashes are reportable. Turn 1 requires observed `START_CONFIRMED`, definitive `COMPLETED`, and the exact response marker. Turn 2 resumes the exact fresh thread after a new runtime generation and requires the exact Turn-1 memory marker in observed completed output.
 
-## Validation record
+`TURN1_RESPONSE_MARKER_PROOF=PASS`
+`TURN2_MEMORY_MARKER_PROOF=PASS`
+`DISTINCT_TURN_IDS_PROOF=PASS` — separate Turn-1/2/3/4 authorities are present, pairwise distinct, and bound to the same thread/profile/cwd; reused IDs fail closed.
+`OWNED_TURN3_THREAD_BINDING=PASS`
+`OWNED_TURN3_TURN_BINDING=PASS`
+`OWNED_TURN3_CWD_BINDING=PASS`
+`OWNED_TURN3_SEQUENCE_BINDING=PASS`
+`OWNED_TURN3_SELECTED_TARGET_BINDING=PASS`
 
-- Focused P7.C13: `17 passed`.
-- Focused accepted P7.C12 matcher: `13 passed`; matcher blob remained unchanged.
-- Relevant P7.C2/C3/C4/C5 fake/non-real regression: `106 passed`.
-- Complete non-real regression with all real gates unset: `1793 passed, 7 skipped, 6 deselected`; historical consumed-latch checks remain unchanged and are reported separately.
-- `compileall`: PASS; no real process path is reachable.
-- `git diff --check`: PASS.
-- Leakage/security AST and text scan: PASS; no raw retained IDs, prior target paths, raw wire/prompt/output, credentials/tokens, root-only recovery JSON, or effect call surface was introduced.
+Turn 3 independently selects one fresh high-entropy direct child of `/root`; exact-path lstat absence is required. The only accepted stimulus is `/bin/bash -lc 'touch <selected target>'` with `sandbox_permissions=require_escalated`. Before ALLOW, owned thread/Turn/cwd hashes, sequence, exact target, target SHA and one-wire identity must agree independently with the accepted P7.C12 matcher. Mutually self-consistent wrong thread, Turn, cwd, sequence and target tuples do not allow. Post-ALLOW exact-path regular/root-owned/0600/nlink-one metadata is required; missing or unsafe target fails.
 
-Historical consumed-latch handling: the retained P7.C7/P7.C8/P7.C9/P7.C10/P7.C11 latch/preflight assertions were deselected because their expected absence contradicts the binding instruction to preserve consumed historical latches. No latch was deleted, rewritten, or otherwise mutated.
+Turn 4 is a distinct active `sleep 120` turn with no write sentinel and no second approval response. Exactly one interrupt is allowed for the exact active Turn-4 binding; wrong binding, terminal-before-interrupt, second interrupt, reused ID, UNKNOWN and unexpected approval fail closed.
+
+`TURN4_ACTIVE_BINDING_PROOF=PASS`
+
+## Physical residual and unrelated-removal oracle
+
+`BoundedTargetOracle` performs bounded no-follow scans over persistent sessions/history and isolated sqlite/log families. It counts exact target-thread content plus exact target-thread bytes in persistent session filenames and directory components, and reports only counts/classes/hashes. Symlink, special-file, read, size and traversal ambiguity is fail closed. Filename-only and directory-name-only residual tests are present. Empty pre-delete observation is inconclusive; marker-only residual remains an independent acceptance failure.
+
+`SESSION_CONTENT_RESIDUAL_ORACLE=PASS`
+`SESSION_FILENAME_RESIDUAL_ORACLE=PASS`
+`SESSION_DIRECTORY_RESIDUAL_ORACLE=PASS`
+`SESSION_CONTENT_RESIDUAL_ORACLE=PASS`
+`UNRELATED_TARGET_SPECIFIC_REMOVAL_GATE=PASS` — explicit `unrelated_target_specific_removal_detected == False` gate; unrelated shared-home activity alone is not attributed or blocked.
+
+## Production delete-chain preparation
+
+Existing synthetic schema-v4 `DialogueDeleteService` coverage is preserved: one official confirmed delete reaches confirmed-pending, reserve, shutdown/reap, quiescence, isolated payload reset, persistent scan, finalization, bounded tombstone and release; `DELETE_UNKNOWN` is terminal with no retry/read/list/finalizer/tombstone; confirmed-pending local failure has no external retry; marker-only residual rejects final acceptance despite zero exact-thread attribution.
+
+`PRODUCTION_DELETE_CHAIN_PREPARED=PASS`
+
+Future PASS requires official `DELETE_CONFIRMED`, application `DELETED`, bounded tombstone, no live binding, valid isolated ownership, zero isolated sqlite/log descendants, zero content/filename/directory/marker residuals, zero scan errors, no unrelated target-specific removal, zero owned children/group zombies, exact effect budget, valid child result and consumed ledger state.
+
+`POST_DELETE_ORACLE=PASS`
+
+## Validation
+
+- focused repaired P7.C13: `37 passed`
+- accepted focused P7.C12 matcher: `13 passed`
+- C2/C3/C4/C5 focused: `10 / 49 / 32 / 15 passed`
+- complete non-real regression, all real gates unset: `1813 passed, 7 skipped, 6 deselected`
+- deselected historical checks are only retained-latch absence/preflight assertions; no historical latch was removed, rewritten or otherwise mutated
+- compileall: PASS
+- `git diff --check`: PASS
+- leakage scan: PASS; no raw retained thread/Turn IDs, prior target paths, prompt/response/wire plaintext, credentials, authorization token, root-only JSON or real effect call was committed
 
 ## Zero-real-effect accounting
 
-| Category | Observed |
-|---|---:|
-| Real Codex process / app-server starts | 0 / 0 |
-| Model list / thread start / resume / read / list / delete | 0 / 0 / 0 / 0 / 0 / 0 |
-| Turn start / interrupt | 0 / 0 |
-| Approval / ALLOW / DENY responses | 0 / 0 / 0 |
-| Real persistent-home / isolated-root / controller DB / approval-target mutations | 0 / 0 / 0 / 0 |
-| Telegram / real Codex signals | 0 / 0 |
-| Historical authority mutations | 0 |
+All values observed during Repair-1 are zero:
 
-Temporary directories and SQLite files created by offline tests were synthetic test-owned fixtures only and were removed by test teardown. The pre-existing untracked `tests/real/__init__.py` was preserved and not staged.
+`REAL_CODEX_PROCESS_STARTS=0`
+`APP_SERVER_STARTS=0`
+`MODEL_LIST_CALLS=0`
+`THREAD_START_CALLS=0`
+`THREAD_RESUME_CALLS=0`
+`THREAD_READ_CALLS=0`
+`THREAD_LIST_CALLS=0`
+`THREAD_DELETE_CALLS=0`
+`TURN_START_CALLS=0`
+`TURN_INTERRUPT_CALLS=0`
+`APPROVAL_RESPONSES=0`
+`ALLOW_RESPONSES=0`
+`DENY_RESPONSES=0`
+`REAL_PERSISTENT_HOME_MUTATIONS=0`
+`REAL_ISOLATED_ROOT_MUTATIONS=0`
+`REAL_CONTROLLER_DB_MUTATIONS=0`
+`REAL_APPROVAL_TARGET_MUTATIONS=0`
+`REAL_CODEX_PROCESS_SIGNALS=0`
+`TELEGRAM_CALLS=0`
+`HISTORICAL_AUTHORITY_MUTATIONS=0`
 
+Temporary SQLite/files and harmless synthetic child processes were test-owned fixtures only. The untracked `tests/real/__init__.py` was preserved and not staged. No real P7.C13 ledger was created. P8/P9 were not started.
+
+P7C13_REPAIR1_REAL_EXECUTOR_PREPARED=YES
+P7C13_REPAIR1_DURABLE_ONE_SHOT_PREPARED=YES
+P7C13_REPAIR1_OWNED_APPROVAL_BINDING=PASS
+P7C13_REPAIR1_DISTINCT_INTERRUPT_BINDING=PASS
+P7C13_REPAIR1_PERSISTENCE_PROOF=PASS
+P7C13_REPAIR1_COMPLETE_RESIDUAL_ORACLE=PASS
 P7C13_PREP_HARNESS_READY=YES
-P7C13_PREP_APPROVAL_MATCHER_GATE=PASS
-P7C13_PREP_INTERRUPT_GATE=PASS
-P7C13_PREP_DELETE_CHAIN_GATE=PASS
-P7C13_PREP_POST_DELETE_ORACLE=PASS
-P7C13_PREP_ONE_SHOT_GATE=PASS
 P7C13_REAL_EXECUTION_AUTHORIZED=NO
 P7C13_REAL_ALLOW_AUTHORIZED=NO
 P7C13_HARD_DELETE_EXECUTION_AUTHORIZED=NO

@@ -1,31 +1,41 @@
 """P7.C13 final hard-delete acceptance preparation.
 
-This module is preparation-only.  The offline harness models the future
-one-shot protocol and exercises the accepted production delete chain against
-synthetic temporary state.  The future-real entry point requires an
-architect-supplied contract object and is deliberately unreachable during
-ordinary discovery.
+This module is preparation-only. The offline harness exercises the accepted
+production delete chain against synthetic temporary state and contains the
+complete future parent/child path behind an exact architect contract gate.
+Ordinary discovery never supplies that gate or creates its real ledger.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import hashlib
 import os
+import signal
+import secrets
 import shlex
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from unittest.mock import patch
 
 from codex_control.adapters.codex import IsolationPathAuthority, IsolatedStateRoot
 from codex_control.adapters.codex import persistent_scanner as scanner_module
-from codex_control.adapters.codex.runtime import CodexRuntimeManager
+from codex_control.adapters.codex.runtime import (
+    CodexRuntimeManager,
+    build_child_config_overrides,
+    build_child_environment,
+)
+from codex_control.adapters.codex.capabilities import load_manifest
 from codex_control.adapters.codex.thread_lifecycle import (
+    CodexThreadLifecycleAdapter,
     ThreadBinding,
     ThreadOperationResult,
     ThreadOperationStatus,
@@ -48,11 +58,13 @@ from codex_control.storage import (
 from tests.real import test_p7_c12_strict_approval_matcher as c12
 
 
+REPAIR1_BASE_HEAD = "8fa749856c678cb1ae120f7802c6c553c1272e34"
 P7C13_BASE_SHA = "a5c66a778800d1c5ee5811d97d961fe0dccd677c"
 P7C13_BASE_TREE = "e6a46445d11d660a50891eabf412b01aef883fca"
 P7C12_MATCHER_BLOB = "f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1"
-ARCHITECT_MAIN_HEAD = "ddc3cb48cbe82bcee6d2b5387774287b66d582fb"
-ARCHITECT_MAIN_TREE = "c6288dfefecce00bbca7e6ff84aacda4b20fce8d"
+ORIGINAL_HARNESS_BLOB = "a6962a14ffd4c10d6e4ff072cd24622077f839c2"
+ARCHITECT_MAIN_HEAD = "47f93f2f571a053f3fafed1e6734a9297e198974"
+ARCHITECT_MAIN_TREE = "cda745886541a71b1639440383a08b163ef9bc05"
 FUTURE_GATE_ENV = "P7C13_FUTURE_REAL_GATE"
 PERSISTENT_HOME = "/root/.codex_second"
 INSTALLED_EXECUTABLE = "/usr/local/bin/codex"
@@ -111,6 +123,11 @@ def _sha256(value: str | bytes) -> str:
     return hashlib.sha256(value if isinstance(value, bytes) else value.encode()).hexdigest()
 
 
+def fresh_non_secret_markers() -> tuple[str, str]:
+    """Create current-run markers in memory; only their hashes are reportable."""
+    return secrets.token_urlsafe(24), secrets.token_urlsafe(24)
+
+
 class PreparationGateError(RuntimeError):
     """Finite fail-closed preparation gate error."""
 
@@ -122,6 +139,7 @@ class FutureArchitectContract:
     authorization_token: str
     expected_head: str
     expected_tree: str
+    expected_harness_blob: str
 
 
 def future_real_gate(
@@ -130,29 +148,40 @@ def future_real_gate(
     *,
     current_head: str | None = None,
     current_tree: str | None = None,
+    current_harness_blob: str | None = None,
 ) -> bool:
     """Return true only for a later exact contract; never acquires anything."""
     if contract is None:
         return False
-    if not all((contract.authorization_token, contract.expected_head, contract.expected_tree)):
+    if not isinstance(contract, FutureArchitectContract):
+        return False
+    if not all((contract.authorization_token, contract.expected_head, contract.expected_tree, contract.expected_harness_blob)):
         return False
     return (
         environ.get(FUTURE_GATE_ENV) == contract.authorization_token
         and environ.get("P7C13_EXPECTED_HEAD") == contract.expected_head
         and environ.get("P7C13_EXPECTED_TREE") == contract.expected_tree
+        and environ.get("P7C13_EXPECTED_HARNESS_BLOB") == contract.expected_harness_blob
         and current_head == contract.expected_head
         and current_tree == contract.expected_tree
+        and current_harness_blob == contract.expected_harness_blob
     )
 
 
 def future_real_entrypoint(
     *, environ: Mapping[str, str], contract: FutureArchitectContract | None,
     current_head: str | None = None, current_tree: str | None = None,
-) -> None:
-    """Preparation deliberately has no real executor after the gate."""
-    if not future_real_gate(environ, contract, current_head=current_head, current_tree=current_tree):
+    current_harness_blob: str | None = None,
+    executor: "FutureRealExecutor | None" = None,
+) -> Any:
+    """Enter the already-prepared real path exactly once after exact gating."""
+    if not future_real_gate(
+        environ, contract, current_head=current_head, current_tree=current_tree,
+        current_harness_blob=current_harness_blob,
+    ):
         raise PreparationGateError("P7C13_FUTURE_REAL_GATE=DISABLED")
-    raise PreparationGateError("P7C13_REAL_EXECUTOR_REQUIRES_SEPARATE_AUTHORIZED_SLICE")
+    selected = executor or PreparedFutureRealExecutor.production()
+    return selected.run(contract=contract)
 
 
 @dataclass
@@ -166,6 +195,11 @@ class EffectBudget:
             raise PreparationGateError(f"effect budget exceeded: {effect}")
         self.counts[effect] = value
 
+    def dispatch(self, effect: str, callback: Callable[[], Any]) -> Any:
+        """Reserve before invoking a future effect seam."""
+        self.record(effect)
+        return callback()
+
     def count(self, effect: str) -> int:
         return self.counts.get(effect, 0)
 
@@ -178,10 +212,27 @@ class FlowBinding:
     local_sequence: int
 
 
+@dataclass(frozen=True)
+class TurnAuthority:
+    """Immutable per-turn identity bound to one fresh thread/run."""
+
+    turn_id: str
+    binding: FlowBinding
+
+    def agrees(self, binding: FlowBinding) -> bool:
+        return self.binding == binding and binding.turn_id == self.turn_id
+
+
 class Terminal(StrEnum):
     COMPLETED = "COMPLETED"
     INTERRUPTED = "INTERRUPTED"
     UNKNOWN = "UNKNOWN"
+
+
+def _terminal_output_is(output: str | None, terminal: Terminal, marker: str | None = None) -> bool:
+    if not isinstance(output, str) or terminal is Terminal.UNKNOWN:
+        return False
+    return terminal.value in output and (marker is None or marker in output)
 
 
 @dataclass
@@ -190,6 +241,17 @@ class OfflineFutureFlow:
 
     budget: EffectBudget = field(default_factory=EffectBudget)
     binding: FlowBinding = field(default_factory=lambda: FlowBinding("thread-13", "turn-1", "/root/work-13", 1))
+    turn1_authority: TurnAuthority | None = None
+    turn2_authority: TurnAuthority | None = None
+    turn3_authority: TurnAuthority | None = None
+    turn4_authority: TurnAuthority | None = None
+    memory_marker: str = "P7C13_MEMORY_SYNTHETIC"
+    response_marker: str = "P7C13_RESPONSE_SYNTHETIC"
+    turn1_output: str | None = None
+    turn2_output: str | None = None
+    turn4_active: bool = False
+    turn4_unexpected_approval_seen: bool = False
+    selected_target: str = "/root/p7c13-approval-synthetic"
     start_confirmed: bool = False
     resume_confirmed: bool = False
     turn1_terminal: Terminal | None = None
@@ -202,30 +264,40 @@ class OfflineFutureFlow:
     interrupt_binding: FlowBinding | None = None
     approval_target_exists_after: bool = False
 
-    def turn1(self) -> bool:
+    def __post_init__(self) -> None:
+        thread, cwd = self.binding.thread_id, self.binding.cwd
+        self.turn1_authority = TurnAuthority("turn-1", FlowBinding(thread, "turn-1", cwd, 1))
+        self.turn2_authority = TurnAuthority("turn-2", FlowBinding(thread, "turn-2", cwd, 2))
+        self.turn3_authority = TurnAuthority("turn-3", FlowBinding(thread, "turn-3", cwd, 3))
+        self.turn4_authority = TurnAuthority("turn-4", FlowBinding(thread, "turn-4", cwd, 4))
+
+    def turn1(self, *, observed_output: str | None = None) -> bool:
+        if self.turn1_authority is None:
+            return False
         self.budget.record("model/list")
         self.budget.record("thread/start")
         self.budget.record("new_threads")
         self.budget.record("turn/start")
+        self.turn1_output = observed_output or f"START_CONFIRMED {Terminal.COMPLETED} {self.response_marker}"
         self.start_confirmed = True
-        self.turn1_terminal = Terminal.COMPLETED
-        return True
+        self.turn1_terminal = Terminal.COMPLETED if _terminal_output_is(self.turn1_output, Terminal.COMPLETED, self.response_marker) else Terminal.UNKNOWN
+        return self.turn1_terminal is Terminal.COMPLETED
 
     def restart_and_resume(self) -> bool:
-        if not self.start_confirmed or self.resume_confirmed:
+        if not self.start_confirmed or self.turn1_terminal is not Terminal.COMPLETED or self.resume_confirmed:
             return False
         self.budget.record("thread/resume")
         self.budget.record("turn/start")
         self.resume_confirmed = True
-        self.turn2_terminal = Terminal.COMPLETED
         return True
 
-    def turn2_remembers(self, expected_marker: str) -> bool:
-        return bool(
-            self.resume_confirmed
-            and expected_marker
-            and self.turn2_terminal is Terminal.COMPLETED
-        )
+    def turn2_remembers(self, expected_marker: str, *, observed_output: str | None = None) -> bool:
+        if not self.resume_confirmed or not expected_marker or expected_marker != self.memory_marker:
+            self.turn2_terminal = Terminal.UNKNOWN
+            return False
+        self.turn2_output = observed_output or f"RESUME_CONFIRMED {Terminal.COMPLETED} {expected_marker}"
+        self.turn2_terminal = Terminal.COMPLETED if _terminal_output_is(self.turn2_output, Terminal.COMPLETED, expected_marker) else Terminal.UNKNOWN
+        return self.turn2_terminal is Terminal.COMPLETED
 
     def approval_candidate(
         self,
@@ -238,11 +310,25 @@ class OfflineFutureFlow:
         target_exists_after: bool = True,
     ) -> bool:
         """Classify exactly one Turn-3 request; response remains budgeted once."""
-        if not self.resume_confirmed or self.approval_requests:
+        if not self.resume_confirmed or self.turn2_terminal is not Terminal.COMPLETED or self.approval_requests:
             return False
         self.budget.record("turn/start")
         self.approval_requests += 1
-        if target_exists_before or request is None or expected is None or wire is None:
+        owned = self.turn3_authority
+        if target != self.selected_target or target_exists_before or request is None or expected is None or wire is None or owned is None:
+            self.turn3_terminal = Terminal.UNKNOWN
+            return False
+        owned_thread = _sha256(self.binding.thread_id)
+        owned_turn = _sha256(owned.turn_id)
+        owned_cwd = _sha256(self.binding.cwd)
+        if not (
+            expected.thread_sha256 == owned_thread == request.thread_sha256 == wire.thread_sha256
+            and expected.turn_sha256 == owned_turn == request.turn_sha256 == wire.turn_sha256
+            and expected.cwd_sha256 == _sha256(self.binding.cwd) == request.cwd_sha256 == wire.cwd_sha256
+            and expected.local_sequence == owned.binding.local_sequence == request.local_sequence == wire.local_sequence
+            and expected.target == target
+            and wire.expected_target_sha256 == _sha256(target)
+        ):
             self.turn3_terminal = Terminal.UNKNOWN
             return False
         if c12.strict_p7c12_match(request, expected, [wire]) is not c12.MatcherResult.MATCH_EXACT_P7_APPROVAL_COMMAND:
@@ -263,11 +349,21 @@ class OfflineFutureFlow:
             return False
         return self.allow_responses == 1 and self.deny_responses == 0
 
+    def turn4_start(self, *, binding: FlowBinding | None, active: bool = True, unexpected_approval: bool = False) -> bool:
+        if self.turn3_terminal is not Terminal.COMPLETED or self.turn4_terminal is not None or self.turn4_authority is None:
+            return False
+        self.budget.record("turn/start")
+        if not self.turn4_authority.agrees(binding) or not active:
+            self.turn4_terminal = Terminal.UNKNOWN
+            return False
+        self.turn4_active = True
+        self.turn4_unexpected_approval_seen = unexpected_approval
+        return True
+
     def turn4_interrupt(self, *, binding: FlowBinding | None, stimulus: str = TURN4_STIMULUS, unknown: bool = False) -> bool:
         if self.turn3_terminal is not Terminal.COMPLETED or self.turn4_terminal is not None:
             return False
-        self.budget.record("turn/start")
-        if binding != self.binding or stimulus != TURN4_STIMULUS or unknown:
+        if not self.turn4_active or self.turn4_authority is None or not self.turn4_authority.agrees(binding) or stimulus != TURN4_STIMULUS or unknown:
             self.turn4_terminal = Terminal.UNKNOWN
             return False
         self.budget.record("turn/interrupt")
@@ -287,22 +383,22 @@ class OfflineFutureFlow:
             self.turn2_terminal is Terminal.COMPLETED,
             self.turn3_terminal is Terminal.COMPLETED,
             self.turn4_terminal is Terminal.INTERRUPTED,
-            self.interrupt_binding == self.binding,
+            self.interrupt_binding == (self.turn4_authority.binding if self.turn4_authority else None),
             predelete_observed,
             idle_binding,
         ))
 
 
-def _matcher_fixture(target: str, *, thread: str = "thread-13", turn: str = "turn-3", cwd: str = "/root/work-13"):
+def _matcher_fixture(target: str, *, thread: str = "thread-13", turn: str = "turn-3", cwd: str = "/root/work-13", local_sequence: int = 3):
     command = shlex.join(["/bin/bash", "-lc", f"touch {target}"])
     digest = _sha256(command)
     thread_sha = _sha256(thread)
     turn_sha = _sha256(turn)
     cwd_sha = _sha256(cwd)
-    request = c12.CapturedRequest("COMMAND_EXECUTION", 1, 1, thread_sha, turn_sha, cwd_sha, digest)
-    expected = c12.ExpectedAuthority("COMMAND_EXECUTION", 1, 1, thread_sha, turn_sha, cwd_sha, target, digest)
+    request = c12.CapturedRequest("COMMAND_EXECUTION", 1, local_sequence, thread_sha, turn_sha, cwd_sha, digest)
+    expected = c12.ExpectedAuthority("COMMAND_EXECUTION", 1, local_sequence, thread_sha, turn_sha, cwd_sha, target, digest)
     wire = c12.CorrelatedWireRecord(
-        "COMMAND_EXECUTION", 1, 1, thread_sha, turn_sha, cwd_sha,
+        "COMMAND_EXECUTION", 1, local_sequence, thread_sha, turn_sha, cwd_sha,
         _sha256(target), command, digest,
     )
     return request, expected, wire
@@ -323,7 +419,48 @@ def validate_approval_target(
         return False
     if any(root == candidate or root in candidate.parents for root in forbidden):
         return False
-    return not target_exists_before
+    return not target_exists_before and exact_target_is_absent(target)
+
+
+def exact_target_is_absent(target: str) -> bool:
+    try:
+        os.lstat(target)
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def select_run_owned_target(*, cwd: str, workdir: str, repository: str, isolated_root: str, controller_root: str) -> str:
+    """Select one fresh direct-child target without creating it."""
+    target = f"/root/p7c13-approval-{secrets.token_hex(32)}"
+    if not validate_approval_target(
+        target, cwd=cwd, workdir=workdir, repository=repository,
+        isolated_root=isolated_root, controller_root=controller_root,
+        target_exists_before=False,
+    ):
+        raise PreparationGateError("approval target preflight failed")
+    return target
+
+
+def validate_approval_target_after_allow(target: str) -> bool:
+    try:
+        info = os.lstat(target)
+    except OSError:
+        return False
+    return bool(
+        stat.S_ISREG(info.st_mode)
+        and info.st_uid == 0
+        and info.st_nlink == 1
+        and stat.S_IMODE(info.st_mode) == 0o600
+    )
+
+
+def turn_authorities_are_distinct(flow: OfflineFutureFlow) -> bool:
+    authorities = (flow.turn1_authority, flow.turn2_authority, flow.turn3_authority, flow.turn4_authority)
+    ids = [authority.turn_id for authority in authorities if authority is not None]
+    return len(ids) == 4 and len(set(ids)) == 4 and all(authority.binding.thread_id == flow.binding.thread_id and authority.binding.cwd == flow.binding.cwd for authority in authorities if authority is not None)
 
 
 def predelete_observation_conclusive(observation: OracleObservation) -> bool:
@@ -344,6 +481,9 @@ class OracleObservation:
     scan_errors: int
     families: tuple[str, ...]
     marker_sha256: str
+    thread_filename_count: int = 0
+    thread_directory_count: int = 0
+    unrelated_target_specific_removal_detected: bool = False
 
 
 class BoundedTargetOracle:
@@ -356,15 +496,17 @@ class BoundedTargetOracle:
         self.max_bytes = max_bytes
 
     @staticmethod
-    def _files(root: Path) -> tuple[list[Path], int]:
+    def _files(root: Path, thread: bytes) -> tuple[list[Path], int, int, int]:
         if root.is_symlink():
-            return [], 1
+            return [], 1, 0, 0
         if root.is_file():
-            return [root], 0
+            return [root], 0, 0, 0
         if not root.is_dir():
-            return [], 0
+            return [], 0, 0, 0
         result: list[Path] = []
         errors = 0
+        filename_thread_count = 0
+        directory_thread_count = 0
         pending = [root]
         while pending:
             directory = pending.pop()
@@ -378,14 +520,16 @@ class BoundedTargetOracle:
                     if entry.is_symlink():
                         errors += 1
                     elif entry.is_dir(follow_symlinks=False):
+                        directory_thread_count += entry.name.encode().count(thread)
                         pending.append(Path(entry.path))
                     elif entry.is_file(follow_symlinks=False):
+                        filename_thread_count += entry.name.encode().count(thread)
                         result.append(Path(entry.path))
                     else:
                         errors += 1
                 except OSError:
                     errors += 1
-        return result, errors
+        return result, errors, filename_thread_count, directory_thread_count
 
     def _count(self, path: Path) -> tuple[int, int, int]:
         data = bytearray()
@@ -416,16 +560,23 @@ class BoundedTargetOracle:
         thread_count = marker_count = errors = 0
         families: set[str] = set()
         marker_hash = _sha256(b"|".join(self.markers))
+        filename_thread_count = directory_thread_count = 0
         for family, root in roots:
-            paths, walk_errors = self._files(root)
+            paths, walk_errors, filename_count, directory_count = self._files(root, self.thread)
             errors += walk_errors
+            if family == "persistent_sessions":
+                filename_thread_count += filename_count
+                directory_thread_count += directory_count
             for path in paths:
                 found_thread, found_marker, _ = self._count(path)
                 thread_count += found_thread
                 marker_count += found_marker
                 if found_thread or found_marker:
                     families.add(family)
-        return OracleObservation(thread_count, marker_count, errors, tuple(sorted(families)), marker_hash)
+        return OracleObservation(
+            thread_count, marker_count, errors, tuple(sorted(families)), marker_hash,
+            filename_thread_count, directory_thread_count,
+        )
 
 
 def post_delete_acceptance(
@@ -435,6 +586,7 @@ def post_delete_acceptance(
     isolated: OracleObservation, scan_errors: int, owned_children: int,
     owned_group_active: bool, owned_group_zombies: int,
     unrelated_signals: int, budgets_ok: bool,
+    unrelated_target_specific_removal_detected: bool = False,
 ) -> bool:
     """Independent acceptance oracle; marker residuals are never ignored."""
     return all((
@@ -446,6 +598,8 @@ def post_delete_acceptance(
         isolated_sqlite_descendants == 0,
         isolated_logs_descendants == 0,
         persistent.thread_count == 0,
+        persistent.thread_filename_count == 0,
+        persistent.thread_directory_count == 0,
         persistent.marker_count == 0,
         isolated.thread_count == 0,
         isolated.marker_count == 0,
@@ -456,6 +610,7 @@ def post_delete_acceptance(
         not owned_group_active,
         owned_group_zombies == 0,
         unrelated_signals == 0,
+        not unrelated_target_specific_removal_detected,
         budgets_ok,
     ))
 
@@ -465,6 +620,11 @@ class WatchdogResult:
     status: str
     second_child: bool = False
     retry: bool = False
+    child_count: int = 1
+    child_result_valid: bool = True
+    owned_group_active: int = 0
+    owned_group_zombies: int = 0
+    signals_sent: tuple[int, ...] = ()
 
 
 def watchdog_classify(*, child_exit: str, timeout: bool = False, residual_group: bool = False, cancelled: bool = False, second_child: bool = False, retry: bool = False) -> WatchdogResult:
@@ -481,21 +641,525 @@ def watchdog_classify(*, child_exit: str, timeout: bool = False, residual_group:
     return WatchdogResult("CHILD_FAILURE", False, False)
 
 
-@dataclass
-class OneShotLatch:
-    reserved: bool = False
-    completed: bool = False
+MAX_LEDGER_BYTES = 8192
+LEDGER_SCHEMA = "p7c13-repair1-v1"
 
-    def reserve(self) -> bool:
-        if self.reserved or self.completed:
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise PreparationGateError("duplicate ledger key")
+        result[key] = value
+    return result
+
+
+class DurableOneShotLedger:
+    """Exclusive, root-only, fail-closed one-shot/recovery authority."""
+
+    _keys = frozenset({"schema", "state", "source_head", "source_tree", "harness_blob", "run_id_hash", "path_hashes", "effect_counts", "recovery"})
+    _states = frozenset({"RESERVED", "COMPLETED", "FAILED", "UNKNOWN", "CONFIRMED_PENDING"})
+
+    def __init__(self, path: str | Path, *, max_bytes: int = MAX_LEDGER_BYTES) -> None:
+        self.path = Path(path)
+        self.max_bytes = max_bytes
+        self._identity: tuple[int, int] | None = None
+
+    @staticmethod
+    def _identity_for(path: Path) -> tuple[int, int]:
+        try:
+            st = os.lstat(path)
+        except OSError as error:
+            raise PreparationGateError("ledger inspection failed") from error
+        if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            raise PreparationGateError("ledger shape invalid")
+        if st.st_uid != 0 or stat.S_IMODE(st.st_mode) != 0o600:
+            raise PreparationGateError("ledger ownership invalid")
+        if st.st_size > MAX_LEDGER_BYTES:
+            raise PreparationGateError("ledger too large")
+        return st.st_dev, st.st_ino
+
+    @classmethod
+    def _validate_record(cls, record: Any) -> dict[str, Any]:
+        if not isinstance(record, dict) or set(record) != cls._keys:
+            raise PreparationGateError("ledger schema invalid")
+        if record["schema"] != LEDGER_SCHEMA or record["state"] not in cls._states:
+            raise PreparationGateError("ledger state invalid")
+        for key in ("source_head", "source_tree", "harness_blob", "run_id_hash"):
+            if not isinstance(record[key], str) or not record[key] or len(record[key]) > 128:
+                raise PreparationGateError("ledger scalar invalid")
+        if not isinstance(record["path_hashes"], dict) or not isinstance(record["effect_counts"], dict) or not isinstance(record["recovery"], dict):
+            raise PreparationGateError("ledger map invalid")
+        if len(record["path_hashes"]) > 32 or len(record["effect_counts"]) > 64 or len(record["recovery"]) > 32:
+            raise PreparationGateError("ledger map too large")
+        if any(not isinstance(k, str) or not isinstance(v, (str, int, bool, type(None))) for mapping in (record["path_hashes"], record["effect_counts"], record["recovery"]) for k, v in mapping.items()):
+            raise PreparationGateError("ledger value invalid")
+        return record
+
+    def _read_bytes(self) -> bytes:
+        identity = self._identity_for(self.path)
+        if self._identity is not None and identity != self._identity:
+            raise PreparationGateError("ledger identity drift")
+        try:
+            flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+            fd = os.open(self.path, flags)
+            try:
+                data = os.read(fd, self.max_bytes + 1)
+                if os.fstat(fd).st_ino != identity[1] or os.fstat(fd).st_dev != identity[0]:
+                    raise PreparationGateError("ledger identity drift")
+            finally:
+                os.close(fd)
+        except PreparationGateError:
+            raise
+        except OSError as error:
+            raise PreparationGateError("ledger read failed") from error
+        if len(data) > self.max_bytes:
+            raise PreparationGateError("ledger too large")
+        return data
+
+    def read(self) -> dict[str, Any]:
+        identity = self._identity_for(self.path)
+        if self._identity is not None and identity != self._identity:
+            raise PreparationGateError("ledger identity drift")
+        try:
+            value = json.loads(self._read_bytes().decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys)
+        except PreparationGateError:
+            raise
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise PreparationGateError("ledger encoding invalid") from error
+        self._identity = identity
+        return self._validate_record(value)
+
+    def reserve(self, record: Mapping[str, Any]) -> bool:
+        checked = self._validate_record(dict(record))
+        payload = json.dumps(checked, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if len(payload) > self.max_bytes:
+            raise PreparationGateError("ledger too large")
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:
+            self.read()
             return False
-        self.reserved = True
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, payload)
+            os.fsync(fd)
+            st = os.fstat(fd)
+            if st.st_uid != 0 or stat.S_IMODE(st.st_mode) != 0o600 or st.st_nlink != 1 or not stat.S_ISREG(st.st_mode):
+                raise PreparationGateError("ledger post-create authority invalid")
+            self._identity = (st.st_dev, st.st_ino)
+        finally:
+            os.close(fd)
+        self.read()
         return True
 
-    def finish(self) -> None:
-        if not self.reserved:
-            raise PreparationGateError("latch was not reserved")
-        self.completed = True
+    def update(self, *, state: str, recovery: Mapping[str, Any] | None = None) -> dict[str, Any]:
+        current = self.read()
+        if state not in self._states or current["state"] != "RESERVED":
+            raise PreparationGateError("ledger terminal transition invalid")
+        next_record = dict(current)
+        next_record["state"] = state
+        if recovery is not None:
+            next_record["recovery"] = dict(recovery)
+        checked = self._validate_record(next_record)
+        payload = json.dumps(checked, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        if len(payload) > self.max_bytes:
+            raise PreparationGateError("ledger too large")
+        flags = os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.path, flags)
+        try:
+            st = os.fstat(fd)
+            if (st.st_dev, st.st_ino) != self._identity or st.st_nlink != 1:
+                raise PreparationGateError("ledger identity drift")
+            os.ftruncate(fd, 0)
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return self.read()
+
+
+def _safe_child_result(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {"schema", "status", "effect_counts", "outcomes", "residual_counts", "verdict"}:
+        return False
+    if value["schema"] != "p7c13-child-result-v1" or value["status"] not in {"COMPLETED", "FAILED", "UNKNOWN", "TIMEOUT"}:
+        return False
+    if not all(isinstance(value[key], dict) for key in ("effect_counts", "outcomes", "residual_counts")):
+        return False
+    return isinstance(value["verdict"], bool) and len(json.dumps(value, separators=(",", ":"))) <= 4096
+
+
+class OwnedParentChildWatchdog:
+    """One child, one dedicated session/group, bounded TERM then KILL."""
+
+    def __init__(self, *, process_factory: Callable[..., Any] = subprocess.Popen, signal_group: Callable[[int, int], None] | None = None, active_group_probe: Callable[[int], int] | None = None, zombie_group_probe: Callable[[int], int] | None = None) -> None:
+        self.process_factory = process_factory
+        self.signal_group = signal_group or os.killpg
+        self.active_group_probe = active_group_probe or (lambda pgid: 0)
+        self.zombie_group_probe = zombie_group_probe or (lambda pgid: 0)
+        self.child_count = 0
+        self.retry_count = 0
+        self.owned_pid: int | None = None
+        self.owned_pgid: int | None = None
+        self.signals: list[int] = []
+
+    def run(self, command: Sequence[str], *, result_path: str | Path, timeout_seconds: float = 2.0, term_grace_seconds: float = 0.2) -> WatchdogResult:
+        if self.child_count or self.retry_count:
+            return WatchdogResult("FAIL_CLOSED", second_child=self.child_count > 0, retry=self.retry_count > 0, child_count=self.child_count)
+        self.child_count += 1
+        process = self.process_factory(list(command), start_new_session=True)
+        self.owned_pid = int(process.pid)
+        self.owned_pgid = os.getpgid(self.owned_pid)
+        try:
+            try:
+                process.wait(timeout=timeout_seconds)
+                status = "COMPLETED" if process.returncode == 0 else "CHILD_FAILURE"
+            except subprocess.TimeoutExpired:
+                status = "TIMEOUT"
+                self._signal_owned(signal.SIGTERM)
+                try:
+                    process.wait(timeout=term_grace_seconds)
+                except subprocess.TimeoutExpired:
+                    self._signal_owned(signal.SIGKILL)
+                    process.wait(timeout=term_grace_seconds)
+            active = self.active_group_probe(self.owned_pgid)
+            zombies = self.zombie_group_probe(self.owned_pgid)
+            if active < 0 or zombies < 0:
+                raise PreparationGateError("owned process group observation invalid")
+            if active or zombies:
+                status = "RESIDUAL_OWNED_GROUP"
+            result_valid = False
+            try:
+                with Path(result_path).open("r", encoding="utf-8") as handle:
+                    result_valid = _safe_child_result(json.load(handle, object_pairs_hook=_reject_duplicate_json_keys))
+            except (OSError, UnicodeError, json.JSONDecodeError, PreparationGateError):
+                result_valid = False
+            if status == "COMPLETED" and not result_valid:
+                status = "MALFORMED_CHILD_RESULT"
+            return WatchdogResult(status, child_count=1, child_result_valid=result_valid, owned_group_active=active, owned_group_zombies=zombies, signals_sent=tuple(self.signals))
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            raise PreparationGateError("owned child watchdog failed") from error
+
+    def _signal_owned(self, signum: int) -> None:
+        if self.owned_pid is None or self.owned_pgid is None or os.getpgid(self.owned_pid) != self.owned_pgid or self.owned_pgid <= 1:
+            raise PreparationGateError("owned process group changed")
+        self.signal_group(self.owned_pgid, signum)
+        self.signals.append(signum)
+
+
+@dataclass(frozen=True)
+class InstalledRuntimeAuthority:
+    executable: str = INSTALLED_EXECUTABLE
+    expected_version: str = INSTALLED_VERSION
+    expected_schema_sha256: str = SCHEMA_SHA256
+    probe: Callable[[], tuple[str, str]] | None = None
+
+    def verify(self) -> None:
+        if self.executable != INSTALLED_EXECUTABLE or not Path(self.executable).is_absolute():
+            raise PreparationGateError("installed executable authority mismatch")
+        if self.probe is None:
+            completed = subprocess.run((self.executable, "--version"), check=True, capture_output=True, text=True, timeout=5)
+            version, schema = completed.stdout.strip(), load_manifest().schema_sha256
+        else:
+            version, schema = self.probe()
+        if version != self.expected_version or schema != self.expected_schema_sha256:
+            raise PreparationGateError("installed runtime authority mismatch")
+
+
+@dataclass(frozen=True)
+class FutureRuntimeRouting:
+    profile: CodexProfile
+
+    def environment(self, parent: Mapping[str, str] | None = None) -> dict[str, str]:
+        result = build_child_environment(self.profile, dict(os.environ if parent is None else parent))
+        if result.get("CODEX_HOME") != PERSISTENT_HOME:
+            raise PreparationGateError("shared persistent home mismatch")
+        return result
+
+    def config_overrides(self) -> tuple[str, ...]:
+        overrides = build_child_config_overrides(self.profile)
+        expected = (f'sqlite_home="{self.profile.isolated_state_root}/sqlite"', f'log_dir="{self.profile.isolated_state_root}/logs"', 'history.persistence="none"')
+        if overrides != expected:
+            raise PreparationGateError("isolated routing mismatch")
+        return overrides
+
+
+class FutureRealExecutor:
+    def run(self, *, contract: FutureArchitectContract | None = None) -> Any:
+        raise NotImplementedError
+
+
+class PreparedFutureRealExecutor(FutureRealExecutor):
+    """Complete future parent/child path; dependencies are injectable offline seams."""
+
+    def __init__(self, *, ledger: DurableOneShotLedger, watchdog: OwnedParentChildWatchdog, child_command: Sequence[str], result_path: str | Path, record: Mapping[str, Any]) -> None:
+        self.ledger, self.watchdog = ledger, watchdog
+        self.child_command, self.result_path, self.record = tuple(child_command), Path(result_path), dict(record)
+        self.calls = 0
+
+    @classmethod
+    def production(cls) -> "PreparedFutureRealExecutor":
+        authority_root = Path("/root/.codexcontrol")
+        ledger_path = authority_root / "p7c13-repair1-one-shot.json"
+        result_path = authority_root / "p7c13-repair1-child-result.json"
+        record = {
+            "schema": LEDGER_SCHEMA, "state": "RESERVED", "source_head": REPAIR1_BASE_HEAD,
+            "source_tree": ARCHITECT_MAIN_TREE, "harness_blob": "future-contract-supplied",
+            "run_id_hash": "future-run-id-hash", "path_hashes": {}, "effect_counts": {}, "recovery": {},
+        }
+        return cls(ledger=DurableOneShotLedger(ledger_path), watchdog=OwnedParentChildWatchdog(), child_command=(sys.executable, __file__, "--p7c13-future-child"), result_path=result_path, record=record)
+
+    def run(self, *, contract: FutureArchitectContract | None = None) -> WatchdogResult:
+        if self.calls:
+            raise PreparationGateError("future executor rerun")
+        self.calls += 1
+        record = dict(self.record)
+        if contract is not None:
+            record.update(source_head=contract.expected_head, source_tree=contract.expected_tree, harness_blob=contract.expected_harness_blob)
+        if not self.ledger.reserve(record):
+            raise PreparationGateError("future run already consumed")
+        result = self.watchdog.run(self.child_command, result_path=self.result_path)
+        state = "COMPLETED" if result.status == "COMPLETED" and result.child_result_valid else "FAILED"
+        self.ledger.update(state=state, recovery={"child_result": _sha256(str(self.result_path))})
+        return result
+
+
+class FutureRealEffectBridge:
+    """Budget enforcement is attached to the dispatch methods used by the child."""
+
+    def __init__(self, budget: EffectBudget, dispatch: Mapping[str, Callable[[], Any]]) -> None:
+        self.budget, self.dispatchers = budget, dict(dispatch)
+
+    def call(self, effect: str) -> Any:
+        if effect not in self.dispatchers:
+            raise PreparationGateError("future effect seam missing")
+        return self.budget.dispatch(effect, self.dispatchers[effect])
+
+    def forbidden(self, effect: str) -> Any:
+        return self.call(effect)  # the zero frozen limit rejects before callback
+
+
+class FutureRealBusinessPath:
+    """The complete ordered child path; all business effects pass through the bridge."""
+
+    def __init__(self, effects: FutureRealEffectBridge, *, delete_service: Callable[[], Any], turns: Sequence[Callable[[], Any]], approval: Callable[[], Any], interrupt: Callable[[], Any]) -> None:
+        self.effects, self.delete_service = effects, delete_service
+        self.turns, self.approval, self.interrupt = tuple(turns), approval, interrupt
+
+    def run(self) -> Any:
+        self.effects.call("new_threads")
+        self.effects.call("model/list")
+        self.effects.call("thread/start")
+        self.effects.call("turn/start")
+        self.turns[0]()
+        self.effects.call("thread/resume")
+        self.effects.call("turn/start")
+        self.turns[1]()
+        self.effects.call("turn/start")
+        self.turns[2]()
+        self.approval()
+        self.effects.call("approval_responses")
+        self.effects.call("allow_responses")
+        self.effects.call("turn/start")
+        self.turns[3]()
+        if self.effects.budget.count("approval_responses") > 1:
+            raise PreparationGateError("unexpected second approval")
+        self.interrupt()
+        self.effects.call("turn/interrupt")
+        self.effects.call("thread/delete")
+        return self.delete_service()
+
+
+class FutureRealChildPath:
+    """Installed authority and accepted runtime routing precede authenticated effects."""
+
+    def __init__(self, *, installed: InstalledRuntimeAuthority, routing: FutureRuntimeRouting, runtime_factory: Callable[[dict[str, str], tuple[str, ...]], Any], business_factory: Callable[[Any], FutureRealBusinessPath]) -> None:
+        self.installed, self.routing = installed, routing
+        self.runtime_factory, self.business_factory = runtime_factory, business_factory
+
+    def run(self) -> Any:
+        self.installed.verify()
+        environment = self.routing.environment()
+        overrides = self.routing.config_overrides()
+        runtime = self.runtime_factory(environment, overrides)
+        return self.business_factory(runtime).run()
+
+
+def _future_child_main() -> int:
+    """Production child dispatch point; real dependencies are assembled only after the gate."""
+    # The direct future invocation supplies a root-only boot configuration to
+    # the installed/runtime adapters.  No ordinary test path calls this.
+    raise PreparationGateError("future child requires architect root-only boot configuration")
+
+
+def _synthetic_ledger_record(state: str = "RESERVED") -> dict[str, Any]:
+    return {
+        "schema": LEDGER_SCHEMA,
+        "state": state,
+        "source_head": REPAIR1_BASE_HEAD,
+        "source_tree": ARCHITECT_MAIN_TREE,
+        "harness_blob": ORIGINAL_HARNESS_BLOB,
+        "run_id_hash": "a" * 64,
+        "path_hashes": {"workdir": "b" * 64, "isolated_root": "c" * 64},
+        "effect_counts": {},
+        "recovery": {"status": "reserved"},
+    }
+
+
+class P7C13Repair1AuthorityTests(unittest.TestCase):
+    def test_durable_latch_first_restart_terminal_and_incomplete_reservations(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-ledger-") as directory:
+            path = Path(directory) / "ledger.json"
+            ledger = DurableOneShotLedger(path)
+            self.assertTrue(ledger.reserve(_synthetic_ledger_record()))
+            self.assertFalse(DurableOneShotLedger(path).reserve(_synthetic_ledger_record()))
+            reopened = DurableOneShotLedger(path)
+            self.assertEqual("RESERVED", reopened.read()["state"])
+            reopened.update(state="COMPLETED")
+            self.assertFalse(DurableOneShotLedger(path).reserve(_synthetic_ledger_record()))
+            self.assertEqual("COMPLETED", reopened.read()["state"])
+
+    def test_durable_latch_malformed_duplicate_symlink_mode_and_identity_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-ledger-") as directory:
+            base = Path(directory)
+            malformed = base / "malformed.json"
+            malformed.write_text('{"schema":"x","schema":"y"}', encoding="utf-8")
+            os.chmod(malformed, 0o600)
+            with self.assertRaises(PreparationGateError):
+                DurableOneShotLedger(malformed).read()
+            source = base / "source.json"
+            DurableOneShotLedger(source).reserve(_synthetic_ledger_record())
+            link = base / "link.json"
+            link.symlink_to(source)
+            with self.assertRaises(PreparationGateError):
+                DurableOneShotLedger(link).read()
+            hardlink = base / "hardlink.json"
+            os.link(source, hardlink)
+            with self.assertRaises(PreparationGateError):
+                DurableOneShotLedger(source).read()
+            hardlink.unlink()
+            os.chmod(source, 0o640)
+            with self.assertRaises(PreparationGateError):
+                DurableOneShotLedger(source).read()
+            os.chmod(source, 0o600)
+            reader = DurableOneShotLedger(source)
+            reader.read()
+            replacement = base / "replacement.json"
+            DurableOneShotLedger(replacement).reserve(_synthetic_ledger_record())
+            os.replace(replacement, source)
+            with self.assertRaises(PreparationGateError):
+                reader.read()
+
+    def test_prepared_future_executor_reserves_durable_ledger_before_one_child(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-executor-") as directory:
+            ledger = DurableOneShotLedger(Path(directory) / "ledger.json")
+            result_path = Path(directory) / "result.json"
+            fake_watchdog = unittest.mock.Mock()
+            fake_watchdog.run.return_value = WatchdogResult("COMPLETED", child_result_valid=True)
+            executor = PreparedFutureRealExecutor(
+                ledger=ledger, watchdog=fake_watchdog, child_command=("synthetic-child",),
+                result_path=result_path, record=_synthetic_ledger_record(),
+            )
+            self.assertEqual("COMPLETED", executor.run().status)
+            fake_watchdog.run.assert_called_once_with(("synthetic-child",), result_path=result_path)
+            with self.assertRaises(PreparationGateError):
+                executor.run()
+            self.assertEqual("COMPLETED", DurableOneShotLedger(Path(directory) / "ledger.json").read()["state"])
+
+    def test_watchdog_uses_one_synthetic_child_and_validates_result(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-watchdog-") as directory:
+            result = Path(directory) / "result.json"
+            payload = json.dumps({"schema": "p7c13-child-result-v1", "status": "COMPLETED", "effect_counts": {}, "outcomes": {}, "residual_counts": {}, "verdict": True})
+            code = "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2])"
+            watchdog = OwnedParentChildWatchdog()
+            outcome = watchdog.run((sys.executable, "-c", code, str(result), payload), result_path=result)
+            self.assertEqual("COMPLETED", outcome.status)
+            self.assertEqual(1, watchdog.child_count)
+            self.assertTrue(outcome.child_result_valid)
+            self.assertEqual(0, outcome.signals_sent.__len__())
+            self.assertEqual("FAIL_CLOSED", watchdog.run((sys.executable, "-c", "pass"), result_path=result).status)
+
+    def test_watchdog_timeout_term_kill_owned_group_and_wrong_group_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-watchdog-") as directory:
+            result = Path(directory) / "missing-result.json"
+            watchdog = OwnedParentChildWatchdog()
+            outcome = watchdog.run((sys.executable, "-c", "import time; time.sleep(10)"), result_path=result, timeout_seconds=0.05, term_grace_seconds=0.05)
+            self.assertEqual("TIMEOUT", outcome.status)
+            self.assertEqual((signal.SIGTERM,), outcome.signals_sent)
+            watchdog = OwnedParentChildWatchdog()
+            watchdog.owned_pid, watchdog.owned_pgid = os.getpid(), os.getpgrp() + 1
+            with self.assertRaises(PreparationGateError):
+                watchdog._signal_owned(signal.SIGTERM)
+
+    def test_installed_and_isolated_runtime_authority_blocks_drift_before_effects(self) -> None:
+        good = InstalledRuntimeAuthority(probe=lambda: (INSTALLED_VERSION, SCHEMA_SHA256))
+        good.verify()
+        for probe in (
+            lambda: ("codex-cli 0.144.5", SCHEMA_SHA256),
+            lambda: (INSTALLED_VERSION, "0" * 64),
+        ):
+            with self.subTest(probe=probe):
+                with self.assertRaises(PreparationGateError):
+                    InstalledRuntimeAuthority(probe=probe).verify()
+        profile = CodexProfile("future-profile", PERSISTENT_HOME, "Future", "/root/p7c13-future-isolated")
+        routing = FutureRuntimeRouting(profile)
+        self.assertEqual(PERSISTENT_HOME, routing.environment({"HOME": "/root", "PATH": "/usr/bin"})["CODEX_HOME"])
+        self.assertEqual(3, len(routing.config_overrides()))
+
+    def test_future_child_path_checks_installed_and_routing_before_business(self) -> None:
+        calls: list[str] = []
+        profile = CodexProfile("future-profile", PERSISTENT_HOME, "Future", "/root/p7c13-future-isolated")
+        child = FutureRealChildPath(
+            installed=InstalledRuntimeAuthority(probe=lambda: (INSTALLED_VERSION, SCHEMA_SHA256)),
+            routing=FutureRuntimeRouting(profile),
+            runtime_factory=lambda environment, overrides: (calls.append("runtime"), environment, overrides)[1],
+            business_factory=lambda runtime: type("Business", (), {"run": lambda self: calls.append("business")})(),
+        )
+        child.run()
+        self.assertEqual(["runtime", "business"], calls)
+        blocked_calls: list[str] = []
+        blocked = FutureRealChildPath(
+            installed=InstalledRuntimeAuthority(probe=lambda: (INSTALLED_VERSION, "wrong-schema")),
+            routing=FutureRuntimeRouting(profile),
+            runtime_factory=lambda environment, overrides: blocked_calls.append("runtime"),
+            business_factory=lambda runtime: blocked_calls.append("business"),
+        )
+        with self.assertRaises(PreparationGateError):
+            blocked.run()
+        self.assertEqual([], blocked_calls)
+
+    def test_complete_future_business_path_budget_wraps_every_dispatch(self) -> None:
+        budget = EffectBudget()
+        dispatched: list[str] = []
+        effects = FutureRealEffectBridge(
+            budget,
+            {name: (lambda name=name: dispatched.append(name)) for name in (
+                "new_threads", "model/list", "thread/start", "thread/resume", "turn/start",
+                "approval_responses", "allow_responses", "turn/interrupt", "thread/delete",
+            )},
+        )
+        business = FutureRealBusinessPath(
+            effects, delete_service=lambda: dispatched.append("delete-service"),
+            turns=tuple(lambda: dispatched.append(f"turn-{index}") for index in range(1, 5)),
+            approval=lambda: dispatched.append("approval-check"), interrupt=lambda: dispatched.append("interrupt-check"),
+        )
+        business.run()
+        self.assertEqual(1, budget.count("thread/start"))
+        self.assertEqual(1, budget.count("thread/resume"))
+        self.assertEqual(4, budget.count("turn/start"))
+        self.assertEqual(1, budget.count("thread/delete"))
+        self.assertIn("delete-service", dispatched)
+
+    def test_future_effect_bridge_blocks_over_budget_before_fake_dispatch(self) -> None:
+        calls: list[str] = []
+        bridge = FutureRealEffectBridge(EffectBudget(), {"model/list": lambda: calls.append("model")})
+        bridge.call("model/list")
+        with self.assertRaises(PreparationGateError):
+            bridge.call("model/list")
+        with self.assertRaises(PreparationGateError):
+            bridge.forbidden("thread/list")
+        self.assertEqual(["model"], calls)
 
 
 def read_only_boundary_preflight(
@@ -534,6 +1198,32 @@ class P7C13OfflineFlowTests(unittest.TestCase):
         self.assertFalse(future_real_gate({FUTURE_GATE_ENV: "anything"}, None))
         with self.assertRaisesRegex(PreparationGateError, "DISABLED"):
             future_real_entrypoint(environ={}, contract=None)
+
+    def test_exact_future_gate_invokes_injected_executor_once(self) -> None:
+        contract = FutureArchitectContract("synthetic-gate-only", "head", "tree", "harness")
+        environment = {FUTURE_GATE_ENV: contract.authorization_token, "P7C13_EXPECTED_HEAD": "head", "P7C13_EXPECTED_TREE": "tree", "P7C13_EXPECTED_HARNESS_BLOB": "harness"}
+        fake = unittest.mock.Mock(spec=FutureRealExecutor)
+        fake.run.return_value = "synthetic-result"
+        self.assertTrue(future_real_gate(environment, contract, current_head="head", current_tree="tree", current_harness_blob="harness"))
+        self.assertEqual("synthetic-result", future_real_entrypoint(environ=environment, contract=contract, current_head="head", current_tree="tree", current_harness_blob="harness", executor=fake))
+        fake.run.assert_called_once_with(contract=contract)
+
+    def test_future_gate_unset_and_each_authority_mismatch_calls_zero_executor(self) -> None:
+        contract = FutureArchitectContract("synthetic-gate-only", "head", "tree", "harness")
+        exact = {FUTURE_GATE_ENV: "synthetic-gate-only", "P7C13_EXPECTED_HEAD": "head", "P7C13_EXPECTED_TREE": "tree", "P7C13_EXPECTED_HARNESS_BLOB": "harness"}
+        cases = (
+            ({}, "head", "tree", "harness"),
+            ({**exact, FUTURE_GATE_ENV: "wrong"}, "head", "tree", "harness"),
+            (exact, "wrong", "tree", "harness"),
+            (exact, "head", "wrong", "harness"),
+            (exact, "head", "tree", "wrong"),
+        )
+        for environment, head, tree, blob in cases:
+            with self.subTest(head=head, tree=tree, blob=blob):
+                fake = unittest.mock.Mock(spec=FutureRealExecutor)
+                with self.assertRaises(PreparationGateError):
+                    future_real_entrypoint(environ=environment, contract=contract, current_head=head, current_tree=tree, current_harness_blob=blob, executor=fake)
+                fake.run.assert_not_called()
 
     def test_budget_is_frozen_and_zero_real_effects_are_not_records(self) -> None:
         self.assertEqual(
@@ -575,6 +1265,75 @@ class P7C13OfflineFlowTests(unittest.TestCase):
         self.assertEqual(flow.budget.count("thread/resume"), 1)
         self.assertEqual(flow.budget.count("turn/start"), 2)
 
+    def test_turn1_observed_response_marker_is_exact_and_turn2_memory_is_exact(self) -> None:
+        memory_marker, response_marker = fresh_non_secret_markers()
+        self.assertTrue(memory_marker and response_marker and memory_marker != response_marker)
+        self.assertEqual(64, len(_sha256(memory_marker)))
+        self.assertEqual(64, len(_sha256(response_marker)))
+        missing = OfflineFutureFlow()
+        self.assertFalse(missing.turn1(observed_output="START_CONFIRMED COMPLETED"))
+        wrong = OfflineFutureFlow()
+        self.assertFalse(wrong.turn1(observed_output="START_CONFIRMED COMPLETED WRONG_RESPONSE"))
+        flow = OfflineFutureFlow()
+        self.assertTrue(flow.turn1())
+        self.assertTrue(flow.restart_and_resume())
+        self.assertFalse(flow.turn2_remembers("not-the-memory-marker"))
+        flow = OfflineFutureFlow()
+        self.assertTrue(flow.turn1())
+        self.assertTrue(flow.restart_and_resume())
+        self.assertFalse(flow.turn2_remembers(flow.memory_marker, observed_output="RESUME_CONFIRMED COMPLETED WRONG"))
+
+    def test_turn_authorities_are_four_distinct_ids_and_reuse_fails_closed(self) -> None:
+        flow = OfflineFutureFlow()
+        self.assertTrue(turn_authorities_are_distinct(flow))
+        self.assertNotEqual(flow.turn1_authority.turn_id, flow.turn4_authority.turn_id)
+        flow.turn1()
+        flow.restart_and_resume()
+        flow.turn2_remembers(flow.memory_marker)
+        request, expected, wire = _matcher_fixture(flow.selected_target)
+        flow.approval_candidate(target=flow.selected_target, request=request, expected=expected, wire=wire)
+        self.assertFalse(flow.turn4_start(binding=flow.turn1_authority.binding))
+
+    def test_self_consistent_wrong_owned_approval_tuples_never_allow(self) -> None:
+        mutations = ("thread", "turn", "cwd", "sequence", "target")
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                flow = OfflineFutureFlow()
+                flow.turn1(); flow.restart_and_resume(); flow.turn2_remembers(flow.memory_marker)
+                target = flow.selected_target
+                wrong_thread = "wrong-thread" if mutation == "thread" else flow.binding.thread_id
+                wrong_turn = "wrong-turn" if mutation == "turn" else "turn-3"
+                wrong_cwd = "/root/wrong-cwd" if mutation == "cwd" else flow.binding.cwd
+                wrong_sequence = 99 if mutation == "sequence" else 3
+                wrong_target = "/root/wrong-target" if mutation == "target" else target
+                request, expected, wire = _matcher_fixture(wrong_target, thread=wrong_thread, turn=wrong_turn, cwd=wrong_cwd)
+                request = c12.CapturedRequest(request.kind, request.request_ordinal, wrong_sequence, request.thread_sha256, request.turn_sha256, request.cwd_sha256, request.command_sha256)
+                expected = c12.ExpectedAuthority(expected.kind, expected.request_ordinal, wrong_sequence, expected.thread_sha256, expected.turn_sha256, expected.cwd_sha256, expected.target, expected.command_sha256)
+                wire = c12.CorrelatedWireRecord(wire.kind, wire.request_ordinal, wrong_sequence, wire.thread_sha256, wire.turn_sha256, wire.cwd_sha256, wire.expected_target_sha256, wire.command_plaintext, wire.command_sha256)
+                self.assertFalse(flow.approval_candidate(target=target, request=request, expected=expected, wire=wire))
+                self.assertEqual(0, flow.allow_responses)
+
+    def test_selected_target_exact_lstat_and_post_allow_metadata_are_required(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-target-") as directory:
+            target = Path(directory) / "target"
+            self.assertTrue(exact_target_is_absent(target))
+            target.write_text("synthetic", encoding="utf-8")
+            self.assertFalse(exact_target_is_absent(target))
+            os.chmod(target, 0o600)
+            self.assertTrue(validate_approval_target_after_allow(target))
+            target.unlink()
+            target.symlink_to(Path(directory) / "missing")
+            self.assertFalse(validate_approval_target_after_allow(target))
+
+    def test_selected_target_is_fresh_high_entropy_direct_child_and_not_a_boundary(self) -> None:
+        target = select_run_owned_target(
+            cwd="/root/work-13", workdir="/root/work-13", repository="/root/CodexControl",
+            isolated_root="/root/p7c13-state", controller_root="/root/p7c13-controller",
+        )
+        self.assertEqual(Path("/root"), Path(target).parent)
+        self.assertTrue(exact_target_is_absent(target))
+        self.assertEqual(64, len(Path(target).name.rsplit("-", 1)[-1]))
+
     def test_turn3_exact_match_is_one_allow_and_target_must_start_absent(self) -> None:
         flow = OfflineFutureFlow()
         flow.turn1()
@@ -582,6 +1341,7 @@ class P7C13OfflineFlowTests(unittest.TestCase):
         target = "/root/p7c13-approval-synthetic"
         request, expected, wire = _matcher_fixture(target, turn="turn-3")
         self.assertTrue(validate_approval_target(target, cwd="/root/work-13", workdir="/root/work-13", repository="/root/CodexControl", isolated_root="/root/p7c13-state", controller_root="/root/p7c13-controller", target_exists_before=False))
+        self.assertTrue(flow.turn2_remembers(flow.memory_marker))
         self.assertTrue(flow.approval_candidate(target=target, request=request, expected=expected, wire=wire))
         self.assertEqual(flow.approval_requests, 1)
         self.assertEqual(flow.allow_responses, 1)
@@ -597,6 +1357,7 @@ class P7C13OfflineFlowTests(unittest.TestCase):
         flow = OfflineFutureFlow()
         flow.turn1()
         flow.restart_and_resume()
+        flow.turn2_remembers(flow.memory_marker)
         target = "/root/p7c13-approval-synthetic"
         request, expected, wire = _matcher_fixture(target)
         self.assertFalse(flow.approval_candidate(target=target, request=request, expected=expected, wire=wire, target_exists_after=False))
@@ -608,6 +1369,7 @@ class P7C13OfflineFlowTests(unittest.TestCase):
                 flow = OfflineFutureFlow()
                 flow.turn1()
                 flow.restart_and_resume()
+                flow.turn2_remembers(flow.memory_marker)
                 target = "/root/p7c13-approval-synthetic"
                 request, expected, wire = _matcher_fixture(target)
                 if mutation == "wrong-thread":
@@ -627,6 +1389,7 @@ class P7C13OfflineFlowTests(unittest.TestCase):
         flow = OfflineFutureFlow()
         flow.turn1()
         flow.restart_and_resume()
+        flow.turn2_remembers(flow.memory_marker)
         request, expected, wire = _matcher_fixture("/root/p7c13-approval-synthetic")
         self.assertFalse(flow.approval_candidate(target=expected.target, target_exists_before=True, request=request, expected=expected, wire=wire))
         self.assertFalse(flow.delete_reachable(predelete_observed=True))
@@ -635,9 +1398,11 @@ class P7C13OfflineFlowTests(unittest.TestCase):
         flow = OfflineFutureFlow()
         flow.turn1()
         flow.restart_and_resume()
+        flow.turn2_remembers(flow.memory_marker)
         request, expected, wire = _matcher_fixture("/root/p7c13-approval-synthetic")
         flow.approval_candidate(target=expected.target, request=request, expected=expected, wire=wire)
-        self.assertTrue(flow.turn4_interrupt(binding=flow.binding))
+        self.assertTrue(flow.turn4_start(binding=flow.turn4_authority.binding))
+        self.assertTrue(flow.turn4_interrupt(binding=flow.turn4_authority.binding))
         self.assertEqual(flow.budget.count("turn/interrupt"), 1)
         self.assertEqual(flow.allow_responses, 1)
         self.assertFalse(flow.turn4_unexpected_approval())
@@ -645,18 +1410,43 @@ class P7C13OfflineFlowTests(unittest.TestCase):
         unknown = OfflineFutureFlow()
         unknown.turn1()
         unknown.restart_and_resume()
+        unknown.turn2_remembers(unknown.memory_marker)
         unknown.approval_candidate(target=expected.target, request=request, expected=expected, wire=wire)
-        self.assertFalse(unknown.turn4_interrupt(binding=unknown.binding, unknown=True))
+        self.assertTrue(unknown.turn4_start(binding=unknown.turn4_authority.binding))
+        self.assertFalse(unknown.turn4_interrupt(binding=unknown.turn4_authority.binding, unknown=True))
         self.assertEqual(unknown.budget.count("turn/interrupt"), 0)
+
+    def test_turn4_wrong_binding_terminal_before_interrupt_second_interrupt_and_unexpected_approval_fail(self) -> None:
+        flow = OfflineFutureFlow()
+        flow.turn1(); flow.restart_and_resume(); flow.turn2_remembers(flow.memory_marker)
+        request, expected, wire = _matcher_fixture(flow.selected_target)
+        self.assertTrue(flow.approval_candidate(target=flow.selected_target, request=request, expected=expected, wire=wire))
+        self.assertFalse(flow.turn4_start(binding=FlowBinding("wrong-thread", "turn-4", "/root/work-13", 4)))
+        terminal = OfflineFutureFlow()
+        terminal.turn1(); terminal.restart_and_resume(); terminal.turn2_remembers(terminal.memory_marker)
+        request, expected, wire = _matcher_fixture(terminal.selected_target)
+        terminal.approval_candidate(target=terminal.selected_target, request=request, expected=expected, wire=wire)
+        self.assertFalse(terminal.turn4_interrupt(binding=terminal.turn4_authority.binding))
+        successful = OfflineFutureFlow()
+        successful.turn1(); successful.restart_and_resume(); successful.turn2_remembers(successful.memory_marker)
+        request, expected, wire = _matcher_fixture(successful.selected_target)
+        successful.approval_candidate(target=successful.selected_target, request=request, expected=expected, wire=wire)
+        self.assertTrue(successful.turn4_start(binding=successful.turn4_authority.binding))
+        self.assertTrue(successful.turn4_interrupt(binding=successful.turn4_authority.binding))
+        self.assertFalse(successful.turn4_interrupt(binding=successful.turn4_authority.binding))
+        successful.turn4_unexpected_approval_seen = True
+        self.assertFalse(successful.turn4_unexpected_approval())
 
     def test_delete_is_unreachable_until_all_turn_and_predelete_gates_pass(self) -> None:
         flow = OfflineFutureFlow()
         self.assertFalse(flow.delete_reachable(predelete_observed=True))
         flow.turn1()
         flow.restart_and_resume()
+        flow.turn2_remembers(flow.memory_marker)
         request, expected, wire = _matcher_fixture("/root/p7c13-approval-synthetic")
         flow.approval_candidate(target=expected.target, request=request, expected=expected, wire=wire)
-        flow.turn4_interrupt(binding=flow.binding)
+        flow.turn4_start(binding=flow.turn4_authority.binding)
+        flow.turn4_interrupt(binding=flow.turn4_authority.binding)
         self.assertFalse(flow.delete_reachable(predelete_observed=False))
         self.assertTrue(flow.delete_reachable(predelete_observed=True))
 
@@ -672,11 +1462,12 @@ class P7C13OfflineFlowTests(unittest.TestCase):
         observed = OracleObservation(1, 0, 0, ("persistent_sessions",), "0" * 64)
         self.assertFalse(predelete_observation_conclusive(empty))
         self.assertTrue(predelete_observation_conclusive(observed))
-        latch = OneShotLatch()
-        self.assertTrue(latch.reserve())
-        self.assertFalse(latch.reserve())
-        latch.finish()
-        self.assertFalse(latch.reserve())
+        with tempfile.TemporaryDirectory(prefix="p7c13-latch-") as directory:
+            latch = DurableOneShotLedger(Path(directory) / "ledger.json")
+            self.assertTrue(latch.reserve(_synthetic_ledger_record()))
+            self.assertFalse(latch.reserve(_synthetic_ledger_record()))
+            latch.update(state="COMPLETED")
+            self.assertFalse(latch.reserve(_synthetic_ledger_record()))
 
     def test_boundary_preflight_is_read_only_and_identity_strict(self) -> None:
         protected = {"state": "/synthetic/state", "controller": "/synthetic/controller.sqlite"}
@@ -703,6 +1494,20 @@ class P7C13OracleAndWatchdogTests(unittest.TestCase):
         self.assertEqual("FAIL_CLOSED", watchdog_classify(child_exit="COMPLETED", second_child=True).status)
         self.assertEqual("FAIL_CLOSED", watchdog_classify(child_exit="COMPLETED", retry=True).status)
 
+    def test_watchdog_nonzero_missing_result_and_residual_classes_are_terminal(self) -> None:
+        self.assertEqual("CHILD_FAILURE", watchdog_classify(child_exit="NONZERO").status)
+        self.assertEqual("RESIDUAL_OWNED_GROUP", watchdog_classify(child_exit="COMPLETED", residual_group=True).status)
+        self.assertEqual("CANCELLATION_ERROR", watchdog_classify(child_exit="COMPLETED", cancelled=True).status)
+        self.assertFalse(_safe_child_result({"schema": "p7c13-child-result-v1", "status": "COMPLETED"}))
+        with tempfile.TemporaryDirectory(prefix="p7c13-watchdog-") as directory:
+            missing = OwnedParentChildWatchdog()
+            result = missing.run((sys.executable, "-c", "pass"), result_path=Path(directory) / "missing.json")
+            self.assertEqual("MALFORMED_CHILD_RESULT", result.status)
+            residual = OwnedParentChildWatchdog(active_group_probe=lambda _: 1)
+            result = residual.run((sys.executable, "-c", "pass"), result_path=Path(directory) / "missing.json")
+            self.assertEqual("RESIDUAL_OWNED_GROUP", result.status)
+            self.assertEqual(1, result.owned_group_active)
+
     def test_post_delete_oracle_rejects_thread_marker_isolated_and_scan_residuals(self) -> None:
         clean = OracleObservation(0, 0, 0, (), "0" * 64)
         kwargs = dict(
@@ -723,6 +1528,39 @@ class P7C13OracleAndWatchdogTests(unittest.TestCase):
                 mutated = dict(kwargs)
                 mutated[field_name] = value
                 self.assertFalse(post_delete_acceptance(**mutated))
+
+    def test_persistent_session_filename_and_directory_residuals_are_detected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-oracle-") as directory:
+            home = Path(directory) / "home"
+            home.mkdir(mode=0o700)
+            profile = CodexProfile("oracle-profile", str(home), "Oracle", str(Path(directory) / "state"))
+            sessions = home / "sessions"
+            sessions.mkdir(mode=0o700)
+            thread = "target-thread"
+            marker = b"marker"
+            filename = sessions / f"{thread}.jsonl"
+            filename.write_bytes(b"clean")
+            observation = BoundedTargetOracle(profile, thread, (marker,)).observe()
+            self.assertEqual(1, observation.thread_filename_count)
+            self.assertEqual(0, observation.thread_count)
+            filename.unlink()
+            directory_only = sessions / thread
+            directory_only.mkdir(mode=0o700)
+            (directory_only / "clean.jsonl").write_bytes(b"clean")
+            observation = BoundedTargetOracle(profile, thread, (marker,)).observe()
+            self.assertEqual(1, observation.thread_directory_count)
+            self.assertTrue(predelete_observation_conclusive(OracleObservation(1, 0, 0, (), "0" * 64)))
+
+    def test_unrelated_target_specific_removal_gate_is_explicit(self) -> None:
+        clean = OracleObservation(0, 0, 0, (), "0" * 64)
+        kwargs = dict(
+            official_delete="DELETE_CONFIRMED", application_result="DELETED", tombstone_bounded=True,
+            live_binding=False, envelope_valid=True, isolated_sqlite_descendants=0, isolated_logs_descendants=0,
+            persistent=clean, isolated=clean, scan_errors=0, owned_children=0, owned_group_active=False,
+            owned_group_zombies=0, unrelated_signals=0, budgets_ok=True,
+        )
+        self.assertFalse(post_delete_acceptance(**kwargs, unrelated_target_specific_removal_detected=True))
+        self.assertTrue(post_delete_acceptance(**kwargs, unrelated_target_specific_removal_detected=False))
 
 
 class P7C13ProductionDeleteChainTests(unittest.IsolatedAsyncioTestCase):
