@@ -37,6 +37,8 @@ from codex_control.adapters.codex.runtime import (
 from codex_control.adapters.codex.capabilities import load_manifest
 from codex_control.adapters.codex.approvals import (
     ApprovalDecision,
+    ApprovalKind,
+    ApprovalRequest,
     ApprovalHandlingStatus,
     CodexApprovalBridge,
 )
@@ -79,13 +81,14 @@ from tests.real import test_p7_c12_strict_approval_matcher as c12
 REPAIR1_BASE_HEAD = "8fa749856c678cb1ae120f7802c6c553c1272e34"
 REPAIR2_BASE_HEAD = "e0e1cd4c3aaaf2a89e1bf4c510a67203865e7247"
 REPAIR3_BASE_HEAD = "aae95407650c10b16387bbe4a27cec8bd96efe2b"
-P7C13_BASE_SHA = REPAIR3_BASE_HEAD
-P7C13_BASE_TREE = "ea1c626fbf8c7884c8ea4f23bfbd45b33ff2d984"
-PRIOR_HARNESS_BLOB = "10ba4084a086a597c892a2fef8409d6c46986062"
+REPAIR4_BASE_HEAD = "75f1ccbcc839fc49c0602acfb9d9c19c9f587a30"
+P7C13_BASE_SHA = REPAIR4_BASE_HEAD
+P7C13_BASE_TREE = "2c240993be4d7998c94b455c347c2065176adbd7"
+PRIOR_HARNESS_BLOB = "b60a38c90317ec83063f314eb189af9c66e735cb"
 P7C12_MATCHER_BLOB = "f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1"
 ORIGINAL_HARNESS_BLOB = "a6962a14ffd4c10d6e4ff072cd24622077f839c2"
-ARCHITECT_MAIN_HEAD = "62b2564029b1de87eb7518a6042613a4b9767439"
-ARCHITECT_MAIN_TREE = "a55035bf7889113393ccbcf708223f2e2ed9e72d"
+ARCHITECT_MAIN_HEAD = "4f0ab1232d00df44b732f7f741e201b457391577"
+ARCHITECT_MAIN_TREE = "79f33b80b9f507217f1d79a099809f9277e4e116"
 FUTURE_GATE_ENV = "P7C13_FUTURE_REAL_GATE"
 PERSISTENT_HOME = "/root/.codex_second"
 INSTALLED_EXECUTABLE = "/usr/local/bin/codex"
@@ -131,6 +134,28 @@ REAL_RETRY_MAX = 0
 TELEGRAM_MAX = 0
 TURN4_STIMULUS = "sleep 120"
 TURN3_SANDBOX_PERMISSION = "sandbox_permissions=require_escalated"
+TURN3_PROMPT_NO_RETRY = "Do not retry."
+REAL_STAGE_TIMEOUTS = {
+    "runtime_acquire_generation_1": 30.0,
+    "model_list": 20.0,
+    "thread_start": 30.0,
+    "turn1_start_terminal": 60.0,
+    "runtime_shutdown_generation_1": 30.0,
+    "runtime_acquire_generation_2": 30.0,
+    "thread_resume": 30.0,
+    "turn2_start_terminal": 60.0,
+    "turn3_start_approval_terminal": 90.0,
+    "turn4_start": 30.0,
+    "turn4_active_observation": 5.0,
+    "turn4_interrupt_terminal": 45.0,
+    "runtime_shutdown_before_scan": 30.0,
+    "controller_open_binding": 30.0,
+    "canonical_application_delete": 60.0,
+    "final_runtime_local_convergence": 30.0,
+}
+REAL_WATCHDOG_HARD_DEADLINE = sum(REAL_STAGE_TIMEOUTS.values()) + 60.0
+REAL_WATCHDOG_TERM_GRACE = 5.0
+REAL_WATCHDOG_KILL_GRACE = 5.0
 FUTURE_DELETE_CHAIN = (
     "DialogueDeleteService",
     "CodexThreadLifecycleAdapter",
@@ -206,6 +231,7 @@ def future_real_entrypoint(
 
 
 def _current_source_authority() -> tuple[str, str, str, bool]:
+    """Return source authority and reject both tracked worktree/index drift."""
     repository = Path(__file__).resolve().parents[2]
     def git(*arguments: str) -> str:
         completed = subprocess.run(
@@ -216,8 +242,26 @@ def _current_source_authority() -> tuple[str, str, str, bool]:
     head = git("rev-parse", "HEAD")
     tree = git("rev-parse", "HEAD^{tree}")
     harness_blob = git("hash-object", str(Path(__file__).resolve()))
-    clean = subprocess.run(("git", "diff", "--quiet", "HEAD", "--", "."), cwd=repository).returncode == 0
+    worktree_clean = subprocess.run(("git", "diff", "--quiet", "HEAD", "--", "."), cwd=repository).returncode == 0
+    index_clean = subprocess.run(("git", "diff", "--cached", "--quiet", "HEAD", "--", "."), cwd=repository).returncode == 0
+    clean = worktree_clean and index_clean
     return head, tree, harness_blob, clean
+
+
+async def _await_owned(awaitable: Any, *, timeout: float, stage: str, convergence: float | None = None) -> Any:
+    """Own one potentially blocking operation through bounded convergence."""
+    if type(timeout) not in (int, float) or timeout <= 0:
+        raise PreparationGateError(f"{stage} timeout invalid")
+    task = awaitable if isinstance(awaitable, asyncio.Task) else asyncio.create_task(awaitable)
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+    except asyncio.TimeoutError as error:
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=convergence if convergence is not None else min(timeout, 5.0))
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            raise PreparationGateError(f"{stage} nonconvergent") from error
+        raise PreparationGateError(f"{stage} timeout") from error
 
 
 def future_real_cli_entrypoint(
@@ -546,11 +590,12 @@ class OracleObservation:
 class BoundedTargetOracle:
     """No-follow, bounded, target-specific scanner for synthetic fixtures."""
 
-    def __init__(self, profile: CodexProfile, thread_id: str, markers: Sequence[bytes], *, max_bytes: int = 4 * 1024 * 1024) -> None:
+    def __init__(self, profile: CodexProfile, thread_id: str, markers: Sequence[bytes], *, max_bytes: int = 4 * 1024 * 1024, families: Sequence[str] | None = None) -> None:
         self.profile = profile
         self.thread = thread_id.encode()
         self.markers = tuple(markers)
         self.max_bytes = max_bytes
+        self.families = frozenset(families) if families is not None else None
 
     @staticmethod
     def _files(root: Path, thread: bytes) -> tuple[list[Path], int, int, int]:
@@ -619,6 +664,8 @@ class BoundedTargetOracle:
         marker_hash = _sha256(b"|".join(self.markers))
         filename_thread_count = directory_thread_count = 0
         for family, root in roots:
+            if self.families is not None and family not in self.families:
+                continue
             paths, walk_errors, filename_count, directory_count = self._files(root, self.thread)
             errors += walk_errors
             if family == "persistent_sessions":
@@ -636,13 +683,95 @@ class BoundedTargetOracle:
         )
 
 
+def bounded_descendant_observation(root: Path) -> tuple[int, int, int, int]:
+    """Derive regular/special/symlink/scan-error counts without following links."""
+    regular = special = symlinks = errors = 0
+    if not root.exists():
+        return 0, 0, 0, 0
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            errors += 1
+            continue
+        for entry in entries:
+            try:
+                if entry.is_symlink():
+                    symlinks += 1
+                elif entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    regular += 1
+                else:
+                    special += 1
+            except OSError:
+                errors += 1
+    return regular, special, symlinks, errors
+
+
+def derived_unrelated_removal_fact(before: Mapping[str, tuple[int, int]], after: Mapping[str, tuple[int, int]], *, target_paths: set[str]) -> bool:
+    """Attribute removal only when an exact unrelated path disappeared."""
+    removed = {path for path in before if path not in after and path not in target_paths}
+    return bool(removed)
+
+
+def target_metadata_snapshot(profile: CodexProfile, thread_id: str) -> tuple[dict[str, tuple[int, int]], set[str]]:
+    """Capture metadata only, preserving attribution-safe shared-home evidence."""
+    snapshot: dict[str, tuple[int, int]] = {}
+    target_paths: set[str] = set()
+    roots = (Path(profile.codex_home) / "sessions", Path(profile.codex_home) / "history.jsonl")
+    pending = list(roots)
+    seen = 0
+    while pending and seen < 4096:
+        root = pending.pop()
+        try:
+            value_root = root.lstat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            continue
+        if stat.S_ISLNK(value_root.st_mode):
+            continue
+        if stat.S_ISDIR(value_root.st_mode):
+            try:
+                pending.extend(Path(entry.path) for entry in os.scandir(root) if not entry.is_symlink())
+            except OSError:
+                continue
+            continue
+        if not stat.S_ISREG(value_root.st_mode):
+            continue
+        seen += 1
+        for path in (root,):
+            try:
+                value = path.lstat()
+            except OSError:
+                continue
+            snapshot[str(path)] = (value.st_dev, value.st_ino)
+            if thread_id in str(path):
+                target_paths.add(str(path))
+    return snapshot, target_paths
+
+
+def map_terminal_recovery_class(*, official_status: str | None, application_status: str | None) -> str:
+    """Map finite outcomes without retry or success inference."""
+    if official_status == ThreadOperationStatus.DELETE_UNKNOWN.value:
+        return "UNKNOWN"
+    if application_status == DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE.value:
+        return "CONFIRMED_PENDING"
+    if official_status == ThreadOperationStatus.DELETE_CONFIRMED.value and application_status == DialogueDeleteStatus.DELETED.value:
+        return "COMPLETED"
+    return "FAILED"
+
+
 def post_delete_acceptance(
     *, official_delete: str, application_result: str, tombstone_bounded: bool,
     live_binding: bool, envelope_valid: bool, isolated_sqlite_descendants: int,
     isolated_logs_descendants: int, persistent: OracleObservation,
-    isolated: OracleObservation, scan_errors: int, owned_children: int,
-    owned_group_active: bool, owned_group_zombies: int,
-    unrelated_signals: int, budgets_ok: bool,
+    isolated: OracleObservation, scan_errors: int, owned_children: int | None,
+    owned_group_active: bool | None, owned_group_zombies: int | None,
+    unrelated_signals: int | None, budgets_ok: bool,
     unrelated_target_specific_removal_detected: bool = False,
 ) -> bool:
     """Independent acceptance oracle; marker residuals are never ignored."""
@@ -663,10 +792,10 @@ def post_delete_acceptance(
         persistent.scan_errors == 0,
         isolated.scan_errors == 0,
         scan_errors == 0,
-        owned_children == 0,
-        not owned_group_active,
-        owned_group_zombies == 0,
-        unrelated_signals == 0,
+        owned_children is None or owned_children == 0,
+        owned_group_active is None or not owned_group_active,
+        owned_group_zombies is None or owned_group_zombies == 0,
+        unrelated_signals is None or unrelated_signals == 0,
         not unrelated_target_specific_removal_detected,
         budgets_ok,
     ))
@@ -681,6 +810,7 @@ class WatchdogResult:
     child_result_valid: bool = True
     owned_group_active: int = 0
     owned_group_zombies: int = 0
+    group_scan_errors: int = 0
     signals_sent: tuple[int, ...] = ()
 
 
@@ -698,8 +828,54 @@ def watchdog_classify(*, child_exit: str, timeout: bool = False, residual_group:
     return WatchdogResult("CHILD_FAILURE", False, False)
 
 
+def inspect_owned_process_group(pgid: int, *, proc_root: Path = Path("/proc")) -> tuple[int, int, int]:
+    """Bounded active/zombie/error observation for one exact owned PGID."""
+    if type(pgid) is not int or pgid <= 1:
+        raise PreparationGateError("owned PGID invalid")
+    try:
+        pids = tuple(int(name) for name in os.listdir(proc_root) if name.isdigit())
+    except OSError as error:
+        raise PreparationGateError("process group scan failed") from error
+    active = zombies = errors = 0
+    for pid in pids:
+        try:
+            raw = (proc_root / str(pid) / "stat").read_bytes()
+            closing = raw.rfind(b") ")
+            fields = raw[closing + 2:].split() if closing > 0 else ()
+            if len(fields) < 4:
+                raise ValueError("stat shape")
+            state = fields[0].decode("ascii")
+            member_pgid = int(fields[2])
+        except FileNotFoundError:
+            continue
+        except (OSError, UnicodeError, ValueError):
+            errors += 1
+            continue
+        if member_pgid != pgid:
+            continue
+        if state == "Z":
+            zombies += 1
+        else:
+            active += 1
+    return active, zombies, errors
+
+
+def _real_active_group_probe(pgid: int) -> int:
+    active, _, errors = inspect_owned_process_group(pgid)
+    return -1 if errors else active
+
+
+def _real_zombie_group_probe(pgid: int) -> int:
+    _, zombies, errors = inspect_owned_process_group(pgid)
+    return -1 if errors else zombies
+
+
+def _real_group_scan_error_probe(pgid: int) -> int:
+    return inspect_owned_process_group(pgid)[2]
+
+
 MAX_LEDGER_BYTES = 8192
-LEDGER_SCHEMA = "p7c13-repair3-v1"
+LEDGER_SCHEMA = "p7c13-repair4-v1"
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -854,7 +1030,7 @@ def _safe_child_result(value: Any, *, boot: Mapping[str, Any] | None = None) -> 
 # bounded, root-only JSON files and contain hashes/classes rather than raw
 # recovery identities.
 BOOT_SCHEMA = "p7c13-repair3-boot-v1"
-CHILD_RESULT_SCHEMA = "p7c13-repair3-child-result-v1"
+CHILD_RESULT_SCHEMA = "p7c13-repair4-child-result-v1"
 MAX_BOOT_BYTES = 12288
 MAX_CHILD_RESULT_BYTES = 8192
 BOOT_KEYS = frozenset({
@@ -866,7 +1042,7 @@ BOOT_KEYS = frozenset({
 CHILD_RESULT_KEYS = frozenset({
     "schema", "status", "verdict", "source_head", "source_tree", "harness_blob",
     "run_id_hash", "effect_counts", "outcomes", "residual_counts", "classes",
-    "process_group_quiescent",
+    "runtime_child_quiescent", "parent_process_group_quiescent",
 })
 
 
@@ -989,11 +1165,13 @@ class RootOnlyBootAuthority:
 def _safe_child_result_authority(value: Any, boot: Mapping[str, Any]) -> bool:
     if not isinstance(value, dict) or set(value) != CHILD_RESULT_KEYS:
         return False
-    if value.get("schema") != CHILD_RESULT_SCHEMA or value.get("status") not in {"PASS", "FAILED", "UNKNOWN", "TIMEOUT"}:
+    if value.get("schema") != CHILD_RESULT_SCHEMA or value.get("status") not in {"PASS", "FAILED", "UNKNOWN", "CONFIRMED_PENDING", "TIMEOUT"}:
         return False
     if value.get("source_head") != boot.get("source_head") or value.get("source_tree") != boot.get("source_tree") or value.get("harness_blob") != boot.get("harness_blob") or value.get("run_id_hash") != boot.get("run_id_hash"):
         return False
-    if type(value.get("verdict")) is not bool or type(value.get("process_group_quiescent")) is not bool:
+    if type(value.get("verdict")) is not bool or type(value.get("runtime_child_quiescent")) is not bool:
+        return False
+    if value.get("parent_process_group_quiescent") is not None and type(value.get("parent_process_group_quiescent")) is not bool:
         return False
     for name in ("effect_counts", "outcomes", "residual_counts", "classes"):
         if not isinstance(value.get(name), dict) or len(value[name]) > 64:
@@ -1029,7 +1207,7 @@ def child_result_passes(value: Mapping[str, Any], boot: Mapping[str, Any]) -> bo
     """Strict parent PASS predicate; FAILED/UNKNOWN are evidence only."""
     if not _safe_child_result_authority(value, boot):
         return False
-    if value["status"] != "PASS" or value["verdict"] is not True or value["process_group_quiescent"] is not True:
+    if value["status"] != "PASS" or value["verdict"] is not True or value["runtime_child_quiescent"] is not True:
         return False
     expected = {key: limit for key, limit in FROZEN_EFFECT_BUDGET.items()}
     if any(value["effect_counts"].get(key, 0) != expected[key] for key in (
@@ -1078,11 +1256,12 @@ def read_child_result(path: str | Path, *, boot: Mapping[str, Any]) -> dict[str,
 class OwnedParentChildWatchdog:
     """One child, one dedicated session/group, bounded TERM then KILL."""
 
-    def __init__(self, *, process_factory: Callable[..., Any] = subprocess.Popen, signal_group: Callable[[int, int], None] | None = None, active_group_probe: Callable[[int], int] | None = None, zombie_group_probe: Callable[[int], int] | None = None, result_validator: Callable[[Path], bool] | None = None) -> None:
+    def __init__(self, *, process_factory: Callable[..., Any] = subprocess.Popen, signal_group: Callable[[int, int], None] | None = None, active_group_probe: Callable[[int], int] | None = None, zombie_group_probe: Callable[[int], int] | None = None, group_scan_error_probe: Callable[[int], int] | None = None, result_validator: Callable[[Path], bool] | None = None) -> None:
         self.process_factory = process_factory
         self.signal_group = signal_group or os.killpg
-        self.active_group_probe = active_group_probe or (lambda pgid: 0)
-        self.zombie_group_probe = zombie_group_probe or (lambda pgid: 0)
+        self.active_group_probe = active_group_probe or _real_active_group_probe
+        self.zombie_group_probe = zombie_group_probe or _real_zombie_group_probe
+        self.group_scan_error_probe = group_scan_error_probe or _real_group_scan_error_probe
         self.result_validator = result_validator
         self.child_count = 0
         self.retry_count = 0
@@ -1090,7 +1269,7 @@ class OwnedParentChildWatchdog:
         self.owned_pgid: int | None = None
         self.signals: list[int] = []
 
-    def run(self, command: Sequence[str], *, result_path: str | Path, timeout_seconds: float = 2.0, term_grace_seconds: float = 0.2, result_validator: Callable[[Path], bool] | None = None) -> WatchdogResult:
+    def run(self, command: Sequence[str], *, result_path: str | Path, timeout_seconds: float = REAL_WATCHDOG_HARD_DEADLINE, term_grace_seconds: float = REAL_WATCHDOG_TERM_GRACE, kill_grace_seconds: float = REAL_WATCHDOG_KILL_GRACE, result_validator: Callable[[Path], bool] | None = None) -> WatchdogResult:
         if self.child_count or self.retry_count:
             return WatchdogResult("FAIL_CLOSED", second_child=self.child_count > 0, retry=self.retry_count > 0, child_count=self.child_count)
         self.child_count += 1
@@ -1108,12 +1287,13 @@ class OwnedParentChildWatchdog:
                     process.wait(timeout=term_grace_seconds)
                 except subprocess.TimeoutExpired:
                     self._signal_owned(signal.SIGKILL)
-                    process.wait(timeout=term_grace_seconds)
+                    process.wait(timeout=kill_grace_seconds)
             active = self.active_group_probe(self.owned_pgid)
             zombies = self.zombie_group_probe(self.owned_pgid)
-            if active < 0 or zombies < 0:
+            scan_errors = self.group_scan_error_probe(self.owned_pgid)
+            if active < 0 or zombies < 0 or scan_errors < 0:
                 raise PreparationGateError("owned process group observation invalid")
-            if active or zombies:
+            if active or zombies or scan_errors:
                 status = "RESIDUAL_OWNED_GROUP"
             validator = result_validator or self.result_validator
             try:
@@ -1122,7 +1302,7 @@ class OwnedParentChildWatchdog:
                 result_valid = False
             if status == "COMPLETED" and not result_valid:
                 status = "MALFORMED_CHILD_RESULT"
-            return WatchdogResult(status, child_count=1, child_result_valid=result_valid, owned_group_active=active, owned_group_zombies=zombies, signals_sent=tuple(self.signals))
+            return WatchdogResult(status, child_count=1, child_result_valid=result_valid, owned_group_active=active, owned_group_zombies=zombies, group_scan_errors=scan_errors, signals_sent=tuple(self.signals))
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             raise PreparationGateError("owned child watchdog failed") from error
 
@@ -1204,11 +1384,17 @@ class PreparedFutureRealExecutor(FutureRealExecutor):
 
     def _select_fresh_run_paths(self) -> None:
         authority_root = Path("/root/.codexcontrol")
+        try:
+            root_stat = authority_root.lstat()
+        except OSError as error:
+            raise PreparationGateError("P7C13 authority root unavailable") from error
+        if not stat.S_ISDIR(root_stat.st_mode) or root_stat.st_uid != 0 or stat.S_IMODE(root_stat.st_mode) & 0o022:
+            raise PreparationGateError("P7C13 authority root unsafe")
         run_id = secrets.token_hex(24)
         paths = {
-            "isolated_root": str(authority_root / f"p7c13-isolated-{run_id}"),
+            "isolated_root": str(Path("/root") / f"p7c13-isolated-{run_id}"),
             "controller_db": str(authority_root / f"p7c13-controller-{run_id}.sqlite3"),
-            "workdir": str(authority_root / f"p7c13-work-{run_id}"),
+            "workdir": str(Path("/root") / f"p7c13-work-{run_id}"),
             "approval_target": str(Path("/root") / f"p7c13-approval-{run_id}"),
         }
         self.result_path = authority_root / f"p7c13-child-result-{run_id}.json"
@@ -1267,18 +1453,31 @@ class PreparedFutureRealExecutor(FutureRealExecutor):
                 "--p7c13-future-child", "--boot-authority", str(self.boot_path),
             )
         self.order.append("child")
-        result = self.watchdog.run(command, result_path=self.result_path, result_validator=lambda path: _child_result_file_is_valid(path, boot_record))
-        state = "COMPLETED" if result.status == "COMPLETED" and result.child_result_valid else "FAILED"
+        result = self.watchdog.run(
+            command, result_path=self.result_path,
+            timeout_seconds=REAL_WATCHDOG_HARD_DEADLINE,
+            term_grace_seconds=REAL_WATCHDOG_TERM_GRACE,
+            kill_grace_seconds=REAL_WATCHDOG_KILL_GRACE,
+            result_validator=lambda path: _child_result_file_is_valid(path, boot_record),
+        )
+        state = "COMPLETED" if result.status == "COMPLETED" and result.child_result_valid and result.group_scan_errors == 0 and result.owned_group_active == 0 and result.owned_group_zombies == 0 else "FAILED"
         if state == "COMPLETED":
             try:
                 final_result = read_child_result(self.result_path, boot=boot_record)
                 if not child_result_passes(final_result, boot_record):
                     state = "FAILED"
-                    result = WatchdogResult("CHILD_FAILURE", child_count=result.child_count, child_result_valid=True, owned_group_active=result.owned_group_active, owned_group_zombies=result.owned_group_zombies, signals_sent=result.signals_sent)
+                    result = WatchdogResult("CHILD_FAILURE", child_count=result.child_count, child_result_valid=True, owned_group_active=result.owned_group_active, owned_group_zombies=result.owned_group_zombies, group_scan_errors=result.group_scan_errors, signals_sent=result.signals_sent)
             except PreparationGateError:
                 state = "FAILED"
-                result = WatchdogResult("MALFORMED_CHILD_RESULT", child_count=result.child_count, child_result_valid=False, owned_group_active=result.owned_group_active, owned_group_zombies=result.owned_group_zombies, signals_sent=result.signals_sent)
-        self.ledger.update(state=state, recovery={"child_result": _sha256(str(self.result_path))})
+                result = WatchdogResult("MALFORMED_CHILD_RESULT", child_count=result.child_count, child_result_valid=False, owned_group_active=result.owned_group_active, owned_group_zombies=result.owned_group_zombies, group_scan_errors=result.group_scan_errors, signals_sent=result.signals_sent)
+        if state == "FAILED" and self.result_path.exists():
+            try:
+                child_status = read_child_result(self.result_path, boot=boot_record).get("status")
+                if child_status in {"UNKNOWN", "CONFIRMED_PENDING"}:
+                    state = child_status
+            except PreparationGateError:
+                pass
+        self.ledger.update(state=state, recovery={"child_result": _sha256(str(self.result_path)), "parent_group_scan_errors": result.group_scan_errors})
         return result
 
 
@@ -1324,7 +1523,6 @@ class FutureRealBusinessPath:
         self.turns[1]()
         self.effects.call("turn/start")
         self.turns[2]()
-        self.approval()
         # Classification is local.  The response and ALLOW reservations are
         # made before either effect callback can be entered.
         self.effects.single_protocol_allow(self.approval)
@@ -1392,6 +1590,7 @@ class CompleteChildResult:
     outcomes: dict[str, str]
     residual_counts: dict[str, int]
     classes: dict[str, str]
+    runtime_child_quiescent: bool = True
 
 
 @dataclass(frozen=True)
@@ -1413,6 +1612,23 @@ class FreshSchemaV4ControllerBinding:
         )
 
 
+class OfficialDeleteObservation:
+    """Independent P1.9 observation kept separate from application status."""
+
+    def __init__(self, lifecycle: CodexThreadLifecycleAdapter) -> None:
+        self.lifecycle = lifecycle
+        self.calls = 0
+        self.status: ThreadOperationStatus | None = None
+        self.binding: ThreadBinding | None = None
+
+    async def delete(self, *, binding: ThreadBinding) -> ThreadOperationResult:
+        self.calls += 1
+        result = await self.lifecycle.delete(binding=binding)
+        self.status = result.status
+        self.binding = result.binding
+        return result
+
+
 class CanonicalDeleteGuard:
     """One-shot guard around DialogueDeleteService.delete(), never raw RPC."""
 
@@ -1431,13 +1647,185 @@ class CanonicalDeleteGuard:
 
 def assemble_production_delete_chain(
     storage: SqliteStorage, runtime_manager: CodexRuntimeManager, catalog: Any, *, server_id: str,
+    lifecycle: Any | None = None,
 ) -> DialogueDeleteService:
     """Assemble the accepted application chain; the service owns the only delete."""
-    lifecycle = CodexThreadLifecycleAdapter(runtime_manager, catalog)
+    lifecycle = lifecycle or CodexThreadLifecycleAdapter(runtime_manager, catalog)
     cleanup = DeleteStorageCleanupCoordinator(storage, runtime_manager)
     return DialogueDeleteService(
         storage, server_id=server_id, thread_lifecycle=lifecycle, local_cleanup=cleanup,
     )
+
+
+def c11_explicit_escalation_prompt(target: str) -> str:
+    """Source-backed Turn-3 stimulus; no default attempt or retry is allowed."""
+    if not isinstance(target, str) or not target.startswith("/") or "\0" in target:
+        raise PreparationGateError("approval target authority invalid")
+    return (
+        "Make exactly one shell-command tool call, and make it your first and only tool call. "
+        f"On that call perform exactly one command operation: touch {target}. "
+        "Before execution request approval with sandbox_permissions=require_escalated and include a "
+        "short justification for why elevation is requested. Do not first try this command with "
+        "default sandbox permissions. Do not use apply_patch, Python, a file-editing tool, or network "
+        "access. Do not substitute another path or alternative command. Do not issue a second tool "
+        "call. If approval is denied, stop immediately. Do not retry."
+    )
+
+
+class RootOnlyWireCommandAuthority:
+    """Immutable first-capture root-only authority used before C12 projection."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+
+    def capture_once(self, *, request: Any, request_ordinal: int, target: str) -> dict[str, Any]:
+        if self.path.exists():
+            raise PreparationGateError("wire authority already captured")
+        commands = [line[len("command: "):] for line in request.context_lines if line.startswith("command: ")]
+        cwds = [line[len("cwd: "):] for line in request.context_lines if line.startswith("cwd: ")]
+        if request.kind is not ApprovalKind.COMMAND_EXECUTION or len(commands) != 1 or len(cwds) != 1:
+            raise PreparationGateError("wire request shape invalid")
+        cwd = os.path.normpath(os.path.abspath(cwds[0]))
+        record = {
+            "format": 1,
+            "request_ordinal": request_ordinal,
+            "local_sequence": request.local_sequence,
+            "request_kind": request.kind.value,
+            "thread_id_sha256": _sha256(request.thread_id or ""),
+            "turn_id_sha256": _sha256(request.turn_id or ""),
+            "cwd_sha256": _sha256(cwd),
+            "target_sha256": _sha256(target),
+            "command_plaintext": commands[0],
+            "command_sha256": _sha256(commands[0]),
+            "capture_status": "CAPTURED_ROOT_ONLY",
+        }
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        payload = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+        try:
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError as error:
+            raise PreparationGateError("wire authority already captured") from error
+        try:
+            os.fchmod(fd, 0o600)
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return self.read()
+
+    def read(self) -> dict[str, Any]:
+        value = _safe_json_file(
+            self.path, max_bytes=MAX_CHILD_RESULT_BYTES,
+            expected_keys=frozenset({
+                "format", "request_ordinal", "local_sequence", "request_kind",
+                "thread_id_sha256", "turn_id_sha256", "cwd_sha256", "target_sha256",
+                "command_plaintext", "command_sha256", "capture_status",
+            }), label="wire authority",
+        )
+        if value["format"] != 1 or value["request_kind"] != ApprovalKind.COMMAND_EXECUTION.value or value["capture_status"] != "CAPTURED_ROOT_ONLY":
+            raise PreparationGateError("wire authority schema invalid")
+        if type(value["request_ordinal"]) is not int or type(value["local_sequence"]) is not int:
+            raise PreparationGateError("wire authority sequence invalid")
+        if not isinstance(value["command_plaintext"], str) or _sha256(value["command_plaintext"]) != value["command_sha256"]:
+            raise PreparationGateError("wire authority command hash invalid")
+        return value
+
+
+class RootOnlyApprovalRecoveryJournal:
+    """Bounded run-owned request/response journal, never used as wire authority."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+
+    def append(self, record: Mapping[str, Any]) -> None:
+        safe = dict(record)
+        if len(json.dumps(safe, sort_keys=True, separators=(",", ":"))) > 2048:
+            raise PreparationGateError("approval journal record too large")
+        records = self.read() if self.path.exists() else []
+        records.append(safe)
+        if len(records) > 8:
+            raise PreparationGateError("approval journal cardinality invalid")
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        payload = json.dumps(records, sort_keys=True, separators=(",", ":")).encode()
+        if self.path.exists():
+            st = os.lstat(self.path)
+            if stat.S_ISLNK(st.st_mode) or st.st_uid != 0 or stat.S_IMODE(st.st_mode) != 0o600:
+                raise PreparationGateError("approval journal unsafe")
+            try:
+                fd = os.open(self.path, os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0))
+                if (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != (st.st_dev, st.st_ino):
+                    raise PreparationGateError("approval journal identity drift")
+                os.write(fd, payload)
+                os.fsync(fd)
+            except OSError as error:
+                raise PreparationGateError("approval journal write failed") from error
+            finally:
+                try:
+                    os.close(fd)
+                except (UnboundLocalError, OSError):
+                    pass
+            return
+        fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        try:
+            os.write(fd, payload)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def read(self) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        try:
+            fd = os.open(self.path, flags)
+            try:
+                data = os.read(fd, MAX_CHILD_RESULT_BYTES + 1)
+            finally:
+                os.close(fd)
+            records = json.loads(data.decode())
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise PreparationGateError("approval journal invalid") from error
+        if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
+            raise PreparationGateError("approval journal schema invalid")
+        return records
+
+
+def _correlate_root_wire(
+    request: Any, *, authority: RootOnlyWireCommandAuthority, expected_target: str,
+    request_ordinal: int, expected_thread: str, expected_turn: str, expected_cwd: str,
+) -> tuple[c12.CapturedRequest, c12.ExpectedAuthority, c12.CorrelatedWireRecord] | None:
+    """Validate immutable wire facts, then and only then project C12 inputs."""
+    try:
+        wire = authority.read()
+    except PreparationGateError:
+        return None
+    if (
+        wire["request_ordinal"] != request_ordinal
+        or wire["local_sequence"] != request.local_sequence
+        or wire["request_kind"] != request.kind.value
+        or wire["thread_id_sha256"] != _sha256(expected_thread)
+        or wire["turn_id_sha256"] != _sha256(expected_turn)
+        or wire["cwd_sha256"] != _sha256(os.path.normpath(os.path.abspath(expected_cwd)))
+        or wire["target_sha256"] != _sha256(expected_target)
+    ):
+        return None
+    command = wire["command_plaintext"]
+    request_fixture = c12.CapturedRequest(
+        request.kind.name if isinstance(request.kind, ApprovalKind) else str(request.kind),
+        request_ordinal, request.local_sequence, wire["thread_id_sha256"],
+        wire["turn_id_sha256"], wire["cwd_sha256"], wire["command_sha256"],
+    )
+    expected = c12.ExpectedAuthority(
+        ApprovalKind.COMMAND_EXECUTION.name, request_ordinal, request.local_sequence,
+        wire["thread_id_sha256"], wire["turn_id_sha256"], wire["cwd_sha256"],
+        expected_target, wire["command_sha256"],
+    )
+    correlation = c12.CorrelatedWireRecord(
+        ApprovalKind.COMMAND_EXECUTION.name, request_ordinal, request.local_sequence,
+        wire["thread_id_sha256"], wire["turn_id_sha256"], wire["cwd_sha256"],
+        wire["target_sha256"], command, wire["command_sha256"],
+    )
+    return request_fixture, expected, correlation
 
 
 def _valid_owned_approval_capture(capture: ApprovalAuthorityCapture) -> bool:
@@ -1533,16 +1921,42 @@ class ProductionRealChildOrchestrator:
 
     async def run_async(self) -> CompleteChildResult:
         # The implementation is intentionally real-capable and derives every
-        # identity below from an adapter result.  Repair tests inject fakes at
+        # identity below from an adapter result. Repair tests inject fakes at
         # the adapter boundary and never enter this method with real effects.
-        workdir = TrustedWorkingDirectory(self.boot["workdir"])
+        repository_root = Path(__file__).resolve().parents[2]
+        controller_root = Path(self.boot["controller_db"]).parent
+        root = Path("/root/.codexcontrol")
+        production_read_only_boundary_preflight({
+            "persistent_home": Path(self.profile.codex_home), "repository": repository_root,
+            "isolated_root": Path(self.profile.isolated_state_root),
+            "isolated_sqlite": Path(self.profile.isolated_state_root) / "sqlite",
+            "isolated_logs": Path(self.profile.isolated_state_root) / "logs",
+            "controller_root": controller_root, "controller_db": Path(self.boot["controller_db"]),
+            "workdir": Path(self.boot["workdir"]), "approval_target": Path(self.boot["approval_target"]),
+            "ledger": Path(self.boot["ledger_path"]), "boot": Path(self.boot["boot_authority_path"]),
+            "result": Path(self.boot["child_result_path"]),
+        })
+        workdir = await _await_owned(
+            asyncio.to_thread(create_fresh_private_workdir, self.boot["workdir"]),
+            timeout=REAL_STAGE_TIMEOUTS["thread_start"], stage="fresh workdir creation",
+        )
+        workdir_identity = workdir.path
+        workdir_stat = Path(workdir_identity).lstat()
+        workdir_identity_pair = (workdir_stat.st_dev, workdir_stat.st_ino)
+        validate_stable_workdir(workdir_identity, workdir_identity_pair)
         profile_id = self.profile.profile_id
         self.isolation_root.provision(self.profile)
         self.isolation_root.validate(self.profile)
         self.budget.record("new_threads")
-        runtime = await self.runtime_manager.acquire(profile_id)
+        runtime = await _await_owned(
+            self.runtime_manager.acquire(profile_id),
+            timeout=REAL_STAGE_TIMEOUTS["runtime_acquire_generation_1"], stage="runtime acquire generation 1",
+        )
         self.budget.record("model/list")
-        catalog = await self.catalog_adapter.get_catalog(profile_id)
+        catalog = await _await_owned(
+            self.catalog_adapter.get_catalog(profile_id),
+            timeout=REAL_STAGE_TIMEOUTS["model_list"], stage="model list",
+        )
         visible = tuple(model for model in catalog.models if not model.hidden)
         defaults = tuple(model for model in visible if model.is_default)
         if not visible or len(defaults) != 1:
@@ -1553,47 +1967,49 @@ class ProductionRealChildOrchestrator:
         thread_lifecycle = CodexThreadLifecycleAdapter(self.runtime_manager, pinned_catalog)
         turn_lifecycle = CodexTurnLifecycleAdapter(self.runtime_manager, pinned_catalog)
         self.budget.record("thread/start")
-        thread_result = await thread_lifecycle.start(
+        thread_result = await _await_owned(thread_lifecycle.start(
             profile_id, model_id=model.model_id, reasoning_effort=reasoning_effort,
             working_directory=workdir,
-        )
+        ), timeout=REAL_STAGE_TIMEOUTS["thread_start"], stage="thread start")
         if thread_result.status is not ThreadOperationStatus.START_CONFIRMED or thread_result.binding is None:
             raise PreparationGateError("START_CONFIRMED required")
         thread_binding = thread_result.binding
         memory_marker, response_marker = fresh_non_secret_markers()
         self.budget.record("turn/start")
-        turn1 = await turn_lifecycle.start_turn(
+        validate_stable_workdir(workdir_identity, workdir_identity_pair)
+        turn1 = await _await_owned(turn_lifecycle.start_turn(
             thread_binding=thread_binding, model_id=model.model_id,
             reasoning_effort=reasoning_effort,
             user_text=f"Remember {memory_marker}; respond with {response_marker}.",
             working_directory=workdir,
-        )
+        ), timeout=REAL_STAGE_TIMEOUTS["turn1_start_terminal"], stage="turn 1 start")
         if turn1.status is not TurnStartStatus.CONFIRMED or turn1.binding is None:
             raise PreparationGateError("Turn-1 start not confirmed")
-        turn1_terminal = await turn_lifecycle.wait_turn(turn1.binding)
+        turn1_terminal = await _await_owned(turn_lifecycle.wait_turn(turn1.binding), timeout=REAL_STAGE_TIMEOUTS["turn1_start_terminal"], stage="turn 1 terminal")
         if turn1_terminal.status is not TurnTerminalStatus.COMPLETED or response_marker not in " ".join(message.text for message in turn1_terminal.messages):
             raise PreparationGateError("Turn-1 observed output marker missing")
-        await self.runtime_manager.shutdown_profile(profile_id)
+        await _await_owned(self.runtime_manager.shutdown_profile(profile_id), timeout=REAL_STAGE_TIMEOUTS["runtime_shutdown_generation_1"], stage="runtime shutdown generation 1")
 
         # The catalog is pinned from the one authenticated model/list result;
         # a new runtime generation is not permitted to trigger model/list.
-        second_runtime = await self.runtime_manager.acquire(profile_id)
+        second_runtime = await _await_owned(self.runtime_manager.acquire(profile_id), timeout=REAL_STAGE_TIMEOUTS["runtime_acquire_generation_2"], stage="runtime acquire generation 2")
         resume_lifecycle = CodexThreadLifecycleAdapter(self.runtime_manager, pinned_catalog)
         resume_turns = CodexTurnLifecycleAdapter(self.runtime_manager, pinned_catalog)
         self.budget.record("thread/resume")
-        resumed = await resume_lifecycle.resume(binding=thread_binding, working_directory=workdir)
+        validate_stable_workdir(workdir_identity, workdir_identity_pair)
+        resumed = await _await_owned(resume_lifecycle.resume(binding=thread_binding, working_directory=workdir), timeout=REAL_STAGE_TIMEOUTS["thread_resume"], stage="thread resume")
         if resumed.status is not ThreadOperationStatus.RESUME_CONFIRMED or resumed.binding != thread_binding:
             raise PreparationGateError("RESUME_CONFIRMED required")
         self.budget.record("turn/start")
-        turn2 = await resume_turns.start_turn(
+        turn2 = await _await_owned(resume_turns.start_turn(
             thread_binding=thread_binding, model_id=model.model_id,
             reasoning_effort=reasoning_effort,
             user_text=f"Return the exact remembered marker {memory_marker}.",
             working_directory=workdir,
-        )
+        ), timeout=REAL_STAGE_TIMEOUTS["turn2_start_terminal"], stage="turn 2 start")
         if turn2.status is not TurnStartStatus.CONFIRMED or turn2.binding is None or turn2.binding.turn_id == turn1.binding.turn_id:
             raise PreparationGateError("Turn-2 actual distinct binding required")
-        turn2_terminal = await resume_turns.wait_turn(turn2.binding)
+        turn2_terminal = await _await_owned(resume_turns.wait_turn(turn2.binding), timeout=REAL_STAGE_TIMEOUTS["turn2_start_terminal"], stage="turn 2 terminal")
         if turn2_terminal.status is not TurnTerminalStatus.COMPLETED or memory_marker not in " ".join(message.text for message in turn2_terminal.messages):
             raise PreparationGateError("Turn-2 memory marker missing")
 
@@ -1603,75 +2019,126 @@ class ProductionRealChildOrchestrator:
         if target.exists() or target.is_symlink():
             raise PreparationGateError("approval target must be absent")
         client = second_runtime.client
+        authority_dir = Path("/root/.codexcontrol")
+        wire_authority = RootOnlyWireCommandAuthority(authority_dir / f"p7c13-wire-{self.boot['run_id_hash'][:16]}.json")
+        recovery_journal = RootOnlyApprovalRecoveryJournal(authority_dir / f"p7c13-approval-journal-{self.boot['run_id_hash'][:16]}.json")
         operator = ProductionApprovalOperator(
             profile_id=profile_id, thread_id=thread_binding.thread_id,
             cwd=workdir.path, target=target, budget=self.budget,
+            wire_authority=wire_authority, recovery_journal=recovery_journal,
         )
         approval_bridge = CodexApprovalBridge(profile_id=profile_id, client=client, operator=operator)
         self.budget.record("turn/start")
-        turn3 = await resume_turns.start_turn(
+        validate_stable_workdir(workdir_identity, workdir_identity_pair)
+        turn3_prompt = c11_explicit_escalation_prompt(str(target))
+        turn3 = await _await_owned(resume_turns.start_turn(
             thread_binding=thread_binding, model_id=model.model_id,
             reasoning_effort=reasoning_effort,
-            user_text=f"Run exactly: touch {target}", working_directory=workdir,
-        )
+            user_text=turn3_prompt, working_directory=workdir,
+        ), timeout=REAL_STAGE_TIMEOUTS["turn3_start_approval_terminal"], stage="turn 3 start")
         if turn3.status is not TurnStartStatus.CONFIRMED or turn3.binding is None:
             raise PreparationGateError("Turn-3 actual binding required")
         if operator.turn_binding is None:
             operator.turn_binding = turn3.binding
-        approval = await approval_bridge.handle_next()
-        if approval.status is not ApprovalHandlingStatus.ALLOWED or operator.allow_count != 1:
+        approval = await _await_owned(approval_bridge.handle_next(), timeout=REAL_STAGE_TIMEOUTS["turn3_start_approval_terminal"], stage="turn 3 approval")
+        recovery_journal.append({"event": "RESPONSE", "request_ordinal": operator.request_count, "response_count": 1, "status": approval.status.value})
+        if approval.status is not ApprovalHandlingStatus.ALLOWED or operator.allow_count != 1 or operator.deny_count != 0 or operator.request_count != 1 or self.budget.count("approval_responses") != 1:
             raise PreparationGateError("single protocol ALLOW required")
-        turn3_terminal = await resume_turns.wait_turn(turn3.binding)
+        turn3_terminal = await _await_owned(resume_turns.wait_turn(turn3.binding), timeout=REAL_STAGE_TIMEOUTS["turn3_start_approval_terminal"], stage="turn 3 terminal")
         if turn3_terminal.status is not TurnTerminalStatus.COMPLETED:
             raise PreparationGateError("Turn-3 completion required")
         target_stat = target.lstat()
-        if not stat.S_ISREG(target_stat.st_mode) or target_stat.st_uid != 0 or target_stat.st_nlink != 1 or stat.S_IMODE(target_stat.st_mode) & 0o022:
+        if not stat.S_ISREG(target_stat.st_mode) or target_stat.st_uid != 0 or target_stat.st_nlink != 1 or stat.S_IMODE(target_stat.st_mode) != 0o600:
             raise PreparationGateError("approval target metadata unsafe")
         target.unlink()
 
         self.budget.record("turn/start")
-        turn4 = await resume_turns.start_turn(
+        validate_stable_workdir(workdir_identity, workdir_identity_pair)
+        turn4 = await _await_owned(resume_turns.start_turn(
             thread_binding=thread_binding, model_id=model.model_id,
             reasoning_effort=reasoning_effort, user_text=TURN4_STIMULUS,
             working_directory=workdir,
-        )
+        ), timeout=REAL_STAGE_TIMEOUTS["turn4_start"], stage="turn 4 start")
         if turn4.status is not TurnStartStatus.CONFIRMED or turn4.binding is None or turn4.binding.turn_id in {turn1.binding.turn_id, turn2.binding.turn_id, turn3.binding.turn_id}:
             raise PreparationGateError("Turn-4 actual distinct binding required")
-        self.budget.record("turn/interrupt")
-        interrupt = await resume_turns.interrupt_turn(turn4.binding)
-        if interrupt.status not in (TurnInterruptStatus.CONFIRMED, TurnInterruptStatus.RECONCILED) or interrupt.terminal_result is None or interrupt.terminal_result.status is not TurnTerminalStatus.FAILED:
-            raise PreparationGateError("definitive Turn-4 interrupt required")
-        await self.runtime_manager.shutdown_profile(profile_id)
+        terminal4_task = asyncio.create_task(resume_turns.wait_turn(turn4.binding))
+        try:
+            await asyncio.wait_for(asyncio.shield(terminal4_task), timeout=REAL_STAGE_TIMEOUTS["turn4_active_observation"])
+            raise PreparationGateError("Turn 4 terminal before active proof")
+        except asyncio.TimeoutError:
+            pass
+        try:
+            self.budget.record("turn/interrupt")
+            interrupt = await _await_owned(resume_turns.interrupt_turn(turn4.binding), timeout=REAL_STAGE_TIMEOUTS["turn4_interrupt_terminal"], stage="turn 4 interrupt")
+            if interrupt.status not in (TurnInterruptStatus.CONFIRMED, TurnInterruptStatus.RECONCILED) or interrupt.terminal_result is None or interrupt.terminal_result.status is not TurnTerminalStatus.FAILED:
+                raise PreparationGateError("definitive Turn-4 interrupt required")
+            if not terminal4_task.done():
+                await _await_owned(terminal4_task, timeout=REAL_STAGE_TIMEOUTS["turn4_interrupt_terminal"], stage="turn 4 terminal convergence")
+        finally:
+            if not terminal4_task.done():
+                terminal4_task.cancel()
+                try:
+                    await asyncio.wait_for(terminal4_task, timeout=REAL_STAGE_TIMEOUTS["final_runtime_local_convergence"])
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    raise PreparationGateError("Turn 4 terminal waiter nonconvergent")
+        await _await_owned(self.runtime_manager.shutdown_profile(profile_id), timeout=REAL_STAGE_TIMEOUTS["runtime_shutdown_before_scan"], stage="runtime shutdown before scan")
 
-        oracle = BoundedTargetOracle(self.profile, thread_binding.thread_id, (memory_marker.encode(), response_marker.encode()))
+        material_markers = (memory_marker.encode(), response_marker.encode(), str(target).encode(), turn3_prompt.encode(), TURN4_STIMULUS.encode())
+        oracle = BoundedTargetOracle(self.profile, thread_binding.thread_id, material_markers)
         before = oracle.observe()
         if not predelete_observation_conclusive(before) or before.scan_errors:
             raise PreparationGateError("pre-delete physical oracle inconclusive")
-        storage = await SqliteStorage.open(self.boot["controller_db"])
+        unrelated_before, target_paths = target_metadata_snapshot(self.profile, thread_binding.thread_id)
+        storage = await _await_owned(SqliteStorage.open(self.boot["controller_db"]), timeout=REAL_STAGE_TIMEOUTS["controller_open_binding"], stage="controller open")
         try:
+            schema_version = await _await_owned(storage.read(lambda connection: int(connection.execute("PRAGMA user_version").fetchone()[0])), timeout=REAL_STAGE_TIMEOUTS["controller_open_binding"], stage="controller schema observation")
+            if schema_version != 4:
+                raise PreparationGateError("controller schema is not v4")
             repository = DialogueRepository(storage)
-            created = await repository.create_intent(dialogue_id=f"p7c13-{self.boot['run_id_hash'][:24]}", server_id="server-80", profile_id=profile_id)
-            idle = await repository.confirm_created(dialogue_id=created.dialogue_id, expected_version=created.version, thread_id=thread_binding.thread_id)
-            durable = await repository.get_live()
+            created = await _await_owned(repository.create_intent(dialogue_id=f"p7c13-{self.boot['run_id_hash'][:24]}", server_id="server-80", profile_id=profile_id), timeout=REAL_STAGE_TIMEOUTS["controller_open_binding"], stage="controller create binding")
+            idle = await _await_owned(repository.confirm_created(dialogue_id=created.dialogue_id, expected_version=created.version, thread_id=thread_binding.thread_id), timeout=REAL_STAGE_TIMEOUTS["controller_open_binding"], stage="controller confirm binding")
+            durable = await _await_owned(repository.get_live(), timeout=REAL_STAGE_TIMEOUTS["controller_open_binding"], stage="controller live binding observation")
             if durable is None or durable.state is not DialogueState.IDLE or durable.thread_id != thread_binding.thread_id:
                 raise PreparationGateError("schema-v4 durable binding invalid")
-            service = assemble_production_delete_chain(storage, self.runtime_manager, catalog, server_id="server-80")
+            official = OfficialDeleteObservation(CodexThreadLifecycleAdapter(self.runtime_manager, catalog))
+            service = assemble_production_delete_chain(storage, self.runtime_manager, catalog, server_id="server-80", lifecycle=official)
             self.budget.record("thread/delete")
-            delete_result = await service.delete(DialogueDeleteRequest(idle.dialogue_id, idle.version))
-            if getattr(delete_result.status, "value", None) != DialogueDeleteStatus.DELETED.value:
-                raise PreparationGateError("canonical delete did not confirm")
+            delete_result = await _await_owned(service.delete(DialogueDeleteRequest(idle.dialogue_id, idle.version)), timeout=REAL_STAGE_TIMEOUTS["canonical_application_delete"], stage="canonical application delete")
+            application_status = getattr(delete_result.status, "value", None)
+            await _await_owned(self.runtime_manager.shutdown_profile(profile_id), timeout=REAL_STAGE_TIMEOUTS["final_runtime_local_convergence"], stage="final runtime shutdown")
+            runtime_child_quiescent = not any(getattr(self.runtime_manager, name, {}) for name in ("_runtimes", "_starting", "_unresolved"))
+            tombstone = await _await_owned(DeletionRepository(storage).get_tombstone(idle.dialogue_id), timeout=REAL_STAGE_TIMEOUTS["final_runtime_local_convergence"], stage="tombstone observation")
+            live_after = await _await_owned(repository.get_live(), timeout=REAL_STAGE_TIMEOUTS["final_runtime_local_convergence"], stage="post-delete live binding observation")
         finally:
-            await storage.close()
-        after = oracle.observe()
+            await _await_owned(storage.close(), timeout=REAL_STAGE_TIMEOUTS["final_runtime_local_convergence"], stage="controller close")
+        after_persistent = BoundedTargetOracle(self.profile, thread_binding.thread_id, material_markers, families=("persistent_sessions", "persistent_history")).observe()
+        after_isolated = BoundedTargetOracle(self.profile, thread_binding.thread_id, material_markers, families=("isolated_sqlite", "isolated_logs")).observe()
+        unrelated_after, _ = target_metadata_snapshot(self.profile, thread_binding.thread_id)
+        unrelated_removed = derived_unrelated_removal_fact(unrelated_before, unrelated_after, target_paths=target_paths)
+        try:
+            self.isolation_root.validate(self.profile)
+            envelope_valid = True
+        except Exception:
+            envelope_valid = False
+        sqlite_descendants, sqlite_special, sqlite_symlinks, sqlite_errors = bounded_descendant_observation(Path(self.profile.isolated_state_root) / "sqlite")
+        logs_descendants, logs_special, logs_symlinks, logs_errors = bounded_descendant_observation(Path(self.profile.isolated_state_root) / "logs")
+        post_schema_ok = schema_version == 4
+        tombstone_bounded = tombstone is not None and tombstone.dialogue_id == idle.dialogue_id and tombstone.thread_identity_sha256 == _sha256(thread_binding.thread_id) and tombstone.expires_at_ms >= tombstone.deleted_at_ms
+        official_status = official.status.value if official.status is not None else None
+        recovery_class = map_terminal_recovery_class(official_status=official_status, application_status=application_status)
+        if recovery_class in {"UNKNOWN", "CONFIRMED_PENDING"}:
+            return CompleteChildResult(False, {"delete": official_status or "UNKNOWN", "application": application_status or "UNKNOWN"}, {"persistent": after_persistent.thread_count + after_persistent.marker_count, "isolated": after_isolated.thread_count + after_isolated.marker_count, "scan_errors": after_persistent.scan_errors + after_isolated.scan_errors + sqlite_errors + logs_errors}, {"delete": official_status or "UNKNOWN", "application": application_status or "UNKNOWN", "recovery": recovery_class}, runtime_child_quiescent)
         if not post_delete_acceptance(
-            official_delete=ThreadOperationStatus.DELETE_CONFIRMED.value, application_result=DialogueDeleteStatus.DELETED.value, tombstone_bounded=True,
-            live_binding=False, envelope_valid=True, isolated_sqlite_descendants=0,
-            isolated_logs_descendants=0, persistent=after, isolated=after,
-            scan_errors=0, owned_children=0, owned_group_active=False, owned_group_zombies=0,
-            unrelated_signals=0, budgets_ok=True,
+            official_delete=official_status or "", application_result=application_status or "", tombstone_bounded=tombstone_bounded,
+            live_binding=live_after is not None, envelope_valid=envelope_valid and post_schema_ok and sqlite_special == 0 and sqlite_symlinks == 0 and logs_special == 0 and logs_symlinks == 0,
+            isolated_sqlite_descendants=sqlite_descendants, isolated_logs_descendants=logs_descendants,
+            persistent=after_persistent, isolated=after_isolated,
+            scan_errors=sqlite_errors + logs_errors, owned_children=None, owned_group_active=None, owned_group_zombies=None,
+            unrelated_signals=None, budgets_ok=recovery_class == "COMPLETED",
+            unrelated_target_specific_removal_detected=unrelated_removed,
         ):
             raise PreparationGateError("post-delete physical oracle failed")
-        return CompleteChildResult(True, {"turn1": "COMPLETED", "turn2": "COMPLETED", "turn3": "COMPLETED", "turn4": "INTERRUPTED"}, {"persistent": 0, "isolated": 0, "scan_errors": 0}, {"delete": "DELETE_CONFIRMED"})
+        return CompleteChildResult(runtime_child_quiescent, {"turn1": "COMPLETED", "turn2": "COMPLETED", "turn3": "COMPLETED", "turn4": "INTERRUPTED"}, {"persistent": after_persistent.thread_count + after_persistent.marker_count, "isolated": after_isolated.thread_count + after_isolated.marker_count, "scan_errors": after_persistent.scan_errors + after_isolated.scan_errors + sqlite_errors + logs_errors}, {"delete": official_status or "UNKNOWN", "application": application_status or "UNKNOWN", "recovery": recovery_class}, runtime_child_quiescent)
 
 
 class _PinnedCatalogAdapter:
@@ -1687,42 +2154,78 @@ class _PinnedCatalogAdapter:
 class ProductionApprovalOperator:
     """One bridge-facing ALLOW decision with atomic accounting reservation."""
 
-    def __init__(self, *, profile_id: str, thread_id: str, cwd: str, target: Path, budget: EffectBudget) -> None:
+    def __init__(self, *, profile_id: str, thread_id: str, cwd: str, target: Path, budget: EffectBudget,
+                 wire_authority: RootOnlyWireCommandAuthority | None = None,
+                 recovery_journal: RootOnlyApprovalRecoveryJournal | None = None) -> None:
         self.profile_id, self.thread_id, self.cwd, self.target, self.budget = profile_id, thread_id, cwd, target, budget
+        self.wire_authority = wire_authority
+        self.recovery_journal = recovery_journal
         self.turn_binding: TurnBinding | None = None
         self.allow_count = 0
+        self.deny_count = 0
         self.request_count = 0
+        self.in_memory_captures: list[tuple[int, int, str | int]] = []
         self.response_unknown = False
+
+    def _deny(self, *, ordinal: int, reason: str) -> ApprovalDecision:
+        if self.budget.count("approval_responses"):
+            raise PreparationGateError("second approval response denied by one-shot budget")
+        self.budget.record("approval_responses")
+        self.deny_count += 1
+        if self.recovery_journal is not None:
+            self.recovery_journal.append({"event": "DENY", "request_ordinal": ordinal, "reason": reason})
+        return ApprovalDecision.DENY
 
     async def decide(self, request: Any) -> ApprovalDecision:
         self.request_count += 1
-        if self.turn_binding is None or getattr(request, "thread_id", None) != self.thread_id or getattr(request, "turn_id", None) != self.turn_binding.turn_id:
-            return ApprovalDecision.DENY
-        command_lines = [line.split(": ", 1)[1] for line in request.context_lines if line.startswith("command: ")]
-        if len(command_lines) != 1:
-            return ApprovalDecision.DENY
-        command = command_lines[0]
-        request_fixture = c12.CapturedRequest(
-            "COMMAND_EXECUTION", request.local_sequence, request.local_sequence,
-            _sha256(self.thread_id), _sha256(self.turn_binding.turn_id), _sha256(self.cwd), _sha256(command),
+        ordinal = self.request_count
+        if self.turn_binding is None:
+            return self._deny(ordinal=ordinal, reason="turn-unbound")
+        if getattr(request, "kind", None) is not ApprovalKind.COMMAND_EXECUTION:
+            return self._deny(ordinal=ordinal, reason="kind")
+        if getattr(request, "profile_id", None) != self.profile_id or getattr(request, "thread_id", None) != self.thread_id or getattr(request, "turn_id", None) != self.turn_binding.turn_id:
+            return self._deny(ordinal=ordinal, reason="binding")
+        cwd_lines = [line[len("cwd: "):] for line in request.context_lines if line.startswith("cwd: ")]
+        command_lines = [line[len("command: "):] for line in request.context_lines if line.startswith("command: ")]
+        if len(cwd_lines) != 1 or len(command_lines) != 1:
+            return self._deny(ordinal=ordinal, reason="context-cardinality")
+        actual_cwd = os.path.normpath(os.path.abspath(cwd_lines[0]))
+        if actual_cwd != os.path.normpath(os.path.abspath(self.cwd)):
+            return self._deny(ordinal=ordinal, reason="cwd")
+        self.in_memory_captures.append((ordinal, request.local_sequence, request.wire_request_id))
+        if len(self.in_memory_captures) != 1:
+            return self._deny(ordinal=ordinal, reason="capture-cardinality")
+        if self.wire_authority is None:
+            self.wire_authority = RootOnlyWireCommandAuthority(self.target.parent / ".p7c13-wire-authority.json")
+        if self.recovery_journal is None:
+            self.recovery_journal = RootOnlyApprovalRecoveryJournal(self.target.parent / ".p7c13-approval-journal.json")
+        try:
+            self.wire_authority.capture_once(request=request, request_ordinal=ordinal, target=str(self.target))
+        except PreparationGateError:
+            return self._deny(ordinal=ordinal, reason="wire-capture")
+        correlated = _correlate_root_wire(
+            request, authority=self.wire_authority, expected_target=str(self.target),
+            request_ordinal=ordinal, expected_thread=self.thread_id,
+            expected_turn=self.turn_binding.turn_id, expected_cwd=self.cwd,
         )
-        expected = c12.ExpectedAuthority(
-            "COMMAND_EXECUTION", request.local_sequence, request.local_sequence,
-            _sha256(self.thread_id), _sha256(self.turn_binding.turn_id), _sha256(self.cwd), str(self.target), _sha256(command),
-        )
-        wire = c12.CorrelatedWireRecord(
-            "COMMAND_EXECUTION", request.local_sequence, request.local_sequence,
-            _sha256(self.thread_id), _sha256(self.turn_binding.turn_id), _sha256(self.cwd),
-            _sha256(str(self.target)), command, _sha256(command),
-        )
+        if correlated is None:
+            return self._deny(ordinal=ordinal, reason="wire-correlation")
+        request_fixture, expected, wire = correlated
+        self.recovery_journal.append({
+            "event": "APPROVAL_REQUEST", "request_ordinal": ordinal,
+            "local_sequence": request.local_sequence, "kind": request.kind.value,
+            "thread_sha256": _sha256(self.thread_id), "turn_sha256": _sha256(self.turn_binding.turn_id),
+            "cwd_sha256": _sha256(actual_cwd), "wire_sha256": wire.command_sha256,
+        })
         if c12.strict_p7c12_match(request_fixture, expected, [wire]) is not c12.MatcherResult.MATCH_EXACT_P7_APPROVAL_COMMAND:
-            return ApprovalDecision.DENY
+            return self._deny(ordinal=ordinal, reason="matcher")
         if self.target.exists() or self.target.is_symlink():
-            return ApprovalDecision.DENY
-        # Both slots are reserved before the bridge's single protocol callback.
+            return self._deny(ordinal=ordinal, reason="target-not-absent")
+        # Reserve the total response and ALLOW slots before bridge callback.
         self.budget.record("approval_responses")
         self.budget.record("allow_responses")
         self.allow_count += 1
+        self.recovery_journal.append({"event": "ALLOW", "request_ordinal": ordinal, "local_sequence": request.local_sequence})
         return ApprovalDecision.ALLOW
 
 
@@ -1734,9 +2237,11 @@ def build_production_real_seam_factory(
     routing = FutureRuntimeRouting(profile)
     environment = routing.environment()
     overrides = routing.config_overrides()
+    repository_root = Path(__file__).resolve().parents[2]
+    controller_root = Path(boot["controller_db"]).parent
     authority = IsolationPathAuthority(
-        (profile,), controller_db_path=boot["controller_db"],
-        repository_root=boot["workdir"], protected_roots=(PERSISTENT_HOME, "/root/.codexcontrol"),
+        (profile,), controller_db_root=str(controller_root),
+        repository_root=str(repository_root), protected_roots=(),
     )
     manager = runtime_factory(environment, overrides) if runtime_factory is not None else CodexRuntimeManager(
         (profile,), client_version="p7c13-future", isolation_authority=authority,
@@ -1772,12 +2277,17 @@ def _default_child_seams(boot: Mapping[str, Any], binding: FlowBinding, memory_m
 
 
 def _child_result_payload(boot: Mapping[str, Any], result: CompleteChildResult, budget: EffectBudget) -> dict[str, Any]:
+    recovery = result.classes.get("recovery")
+    status = "PASS" if result.verdict else recovery if recovery in {"UNKNOWN", "CONFIRMED_PENDING"} else "FAILED"
     return {
-        "schema": CHILD_RESULT_SCHEMA, "status": "PASS" if result.verdict else "FAILED", "verdict": result.verdict,
+        "schema": CHILD_RESULT_SCHEMA, "status": status, "verdict": result.verdict,
         "source_head": boot["source_head"], "source_tree": boot["source_tree"], "harness_blob": boot["harness_blob"], "run_id_hash": boot["run_id_hash"],
         "effect_counts": {key: budget.count(key) for key in FROZEN_EFFECT_BUDGET}, "outcomes": dict(result.outcomes),
         "residual_counts": {key: result.residual_counts.get(key, 0) for key in ("persistent", "isolated", "scan_errors")},
-        "classes": dict(result.classes), "process_group_quiescent": True,
+        "classes": dict(result.classes),
+        "runtime_child_quiescent": result.runtime_child_quiescent,
+        # Parent owns the OS process-group fact; child cannot assert it.
+        "parent_process_group_quiescent": None,
     }
 
 
@@ -1836,6 +2346,9 @@ def _future_child_main(
     if boot_path is None:
         raise PreparationGateError("boot authority required")
     boot = RootOnlyBootAuthority(boot_path).read()
+    # This runtime-only binding is not written into the child authority file;
+    # it lets production preflight inspect the exact boot inode as well.
+    boot = {**boot, "boot_authority_path": str(Path(boot_path).absolute())}
     if seams_factory is not None or business_factory is not None:
         return _future_child_injected_main(
             boot, installed=installed or InstalledRuntimeAuthority(),
@@ -1946,7 +2459,7 @@ class P7C13Repair1AuthorityTests(unittest.TestCase):
                 ledger=ledger, watchdog=fake_watchdog, child_command=("synthetic-child",),
                 result_path=result_path, record=_synthetic_ledger_record(),
             )
-            def write_valid_result(command, *, result_path, result_validator=None):
+            def write_valid_result(command, *, result_path, result_validator=None, **kwargs):
                 budget = EffectBudget()
                 budget.counts = dict(FROZEN_EFFECT_BUDGET)
                 _write_child_result(result_path, _child_result_payload(executor._boot_record(executor.record), CompleteChildResult(True, {}, {"persistent": 0, "isolated": 0, "scan_errors": 0}, {}), budget))
@@ -2135,7 +2648,7 @@ class P7C13Repair2IntegrationTests(unittest.TestCase):
             result = read_child_result(boot["child_result_path"], boot=boot)
             self.assertEqual("PASS", result["status"])
             self.assertTrue(result["verdict"])
-            self.assertTrue(result["process_group_quiescent"])
+            self.assertTrue(result["runtime_child_quiescent"])
             self.assertEqual(1, result["effect_counts"]["new_threads"])
 
     def test_child_failure_writes_bounded_nonpass_result_and_missing_result_blocks_parent(self) -> None:
@@ -2210,6 +2723,107 @@ def read_only_boundary_preflight(
     return all(Path(path).is_absolute() and not Path(path).is_symlink() for path in protected.values())
 
 
+def _path_is_under(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _process_users_for_boundaries(boundaries: Mapping[str, Path]) -> dict[str, int]:
+    """Bounded diagnostic /proc scan; shared persistent home is not owned here."""
+    users = {name: set() for name in boundaries}
+    try:
+        pids = tuple(int(name) for name in os.listdir("/proc") if name.isdigit())
+    except OSError as error:
+        raise PreparationGateError("external-user scan failed") from error
+    for pid in pids:
+        if pid == os.getpid():
+            continue
+        proc = Path("/proc") / str(pid)
+        values: list[Path] = []
+        try:
+            values.append(Path(os.readlink(proc / "cwd")))
+        except OSError:
+            pass
+        try:
+            for fd_name in os.listdir(proc / "fd"):
+                try:
+                    values.append(Path(os.readlink(proc / "fd" / fd_name)))
+                except OSError:
+                    continue
+        except OSError:
+            continue
+        for name, path in boundaries.items():
+            if any(value == path or _path_is_under(value, path) for value in values):
+                users[name].add(pid)
+    return {name: len(value) for name, value in users.items()}
+
+
+def production_read_only_boundary_preflight(
+    boundaries: Mapping[str, Path], *, mountinfo: str | None = None,
+    external_users: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    """Actual future-path preflight for mount aliases and owned external users."""
+    normalized = {name: Path(os.path.abspath(os.fspath(path))) for name, path in boundaries.items()}
+    if not normalized or "persistent_home" not in normalized or "repository" not in normalized:
+        raise PreparationGateError("boundary set incomplete")
+    identities: dict[str, tuple[int, int] | None] = {}
+    for name, path in normalized.items():
+        try:
+            value = path.lstat()
+        except FileNotFoundError:
+            identities[name] = None
+            continue
+        except OSError as error:
+            raise PreparationGateError("boundary stat failed") from error
+        if stat.S_ISLNK(value.st_mode) or (not stat.S_ISDIR(value.st_mode) and value.st_nlink != 1) or value.st_uid != 0:
+            raise PreparationGateError("boundary alias/ownership invalid")
+        identities[name] = (value.st_dev, value.st_ino)
+    names = tuple(normalized)
+    allowed_nested = {("isolated_root", "isolated_sqlite"), ("isolated_root", "isolated_logs"), ("controller_root", "controller_db"),
+                      ("controller_root", "ledger"), ("controller_root", "boot"), ("controller_root", "result")}
+    for index, left_name in enumerate(names):
+        for right_name in names[index + 1:]:
+            left, right = normalized[left_name], normalized[right_name]
+            if identities[left_name] is not None and identities[left_name] == identities[right_name]:
+                raise PreparationGateError("boundary physical alias")
+            if (_path_is_under(left, right) or _path_is_under(right, left)) and (left_name, right_name) not in allowed_nested and (right_name, left_name) not in allowed_nested:
+                raise PreparationGateError("boundary topology overlap")
+    info = mountinfo if mountinfo is not None else Path("/proc/self/mountinfo").read_text(encoding="utf-8")
+    mount_points = {line.split()[4] for line in info.splitlines() if len(line.split()) >= 5}
+    if any(str(path) in mount_points for path in normalized.values()):
+        raise PreparationGateError("mount alias unresolved")
+    users = dict(external_users) if external_users is not None else _process_users_for_boundaries(normalized)
+    for name, count in users.items():
+        if name != "persistent_home" and count:
+            raise PreparationGateError("owned external boundary user")
+    return {"mount_alias": "PASS", "external_users": users, "persistent_home_shared": "YES"}
+
+
+def create_fresh_private_workdir(path: str | Path) -> TrustedWorkingDirectory:
+    """Create exactly one root-owned private workdir before thread/start."""
+    target = Path(path)
+    if target.exists() or target.is_symlink() or not target.is_absolute():
+        raise PreparationGateError("workdir must start absent")
+    try:
+        target.mkdir(mode=0o700)
+        os.chmod(target, 0o700)
+        value = target.lstat()
+    except OSError as error:
+        raise PreparationGateError("workdir creation failed") from error
+    if not stat.S_ISDIR(value.st_mode) or value.st_uid != 0 or stat.S_IMODE(value.st_mode) != 0o700:
+        raise PreparationGateError("workdir authority invalid")
+    return TrustedWorkingDirectory(str(target))
+
+
+def validate_stable_workdir(path: str | Path, identity: tuple[int, int]) -> None:
+    value = Path(path).lstat()
+    if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode) or (value.st_dev, value.st_ino) != identity:
+        raise PreparationGateError("workdir identity drift")
+
+
 def fresh_run_owned_paths(
     *, isolated_root: Path, controller_db: Path, workdir: Path, approval_target: Path,
     ledger_path: Path, persistent_home: Path, repository: Path,
@@ -2221,19 +2835,15 @@ def fresh_run_owned_paths(
     }
     if approval_target.parent != Path("/root") or not approval_target.name.startswith("p7c13-approval-"):
         raise PreparationGateError("approval target is not a direct root child")
-    protected = (persistent_home, repository, Path.cwd(), Path("/tmp"), Path("/root/.codexcontrol"))
+    protected = (persistent_home, repository, Path("/tmp"), Path("/root/.codexcontrol"))
     all_values = tuple(paths.values()) + (ledger_path,)
     if len({str(path) for path in all_values}) != len(all_values):
         raise PreparationGateError("run-owned path collision")
     for name, path in paths.items():
         if not path.is_absolute() or path.is_symlink() or path.exists():
             raise PreparationGateError(f"{name} is not fresh")
-        if any(os.path.commonpath((str(path), str(root))) in (str(path), str(root)) for root in protected):
-            # The isolated/controller/workdir are intentionally under the
-            # protected authority root; only the approval target must be
-            # outside it.  This branch is retained as a clear alias proof.
-            if name == "approval_target":
-                raise PreparationGateError(f"{name} aliases protected root")
+        if name == "approval_target" and any(_path_is_under(path, root) or _path_is_under(root, path) for root in protected):
+            raise PreparationGateError(f"{name} aliases protected root")
     canonical = [os.path.realpath(path) for path in all_values]
     if len(set(canonical)) != len(canonical):
         raise PreparationGateError("physical path alias")
@@ -2693,6 +3303,118 @@ def termination_calls_for_shared_home() -> int:
 
 
 class P7C13OracleAndWatchdogTests(unittest.TestCase):
+    def test_repair4_source_gate_is_tracked_worktree_and_index_clean(self) -> None:
+        source = inspect.getsource(_current_source_authority)
+        self.assertIn('"--cached"', source)
+        self.assertIn('"git", "diff", "--quiet", "HEAD", "--", "."', source)
+
+    def test_production_isolation_topology_validates_with_controller_root(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-topology-") as directory:
+            root = Path(directory)
+            home, state_parent, repo, controller_root = (root / name for name in ("home", "state-parent", "repo", "controller"))
+            for path in (home, state_parent, repo, controller_root):
+                path.mkdir(mode=0o700)
+            profile = CodexProfile("topology", str(home), "Topology", str(state_parent / "isolated"))
+            authority = IsolationPathAuthority((profile,), controller_db_root=str(controller_root), repository_root=str(repo))
+            authority.validate_runtime_authority(state_root_may_be_missing=True)
+            self.assertEqual(str(controller_root), authority.protected_paths[0])
+
+    def test_workdir_is_fresh_private_and_alias_or_symlink_blocks(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-workdir-") as directory:
+            root = Path(directory)
+            workdir = root / "work"
+            trusted = create_fresh_private_workdir(workdir)
+            value = workdir.lstat()
+            identity = (value.st_dev, value.st_ino)
+            self.assertEqual(0o700, stat.S_IMODE(value.st_mode))
+            validate_stable_workdir(trusted.path, identity)
+            with self.assertRaises(PreparationGateError):
+                create_fresh_private_workdir(workdir)
+            link = root / "link"
+            link.symlink_to(workdir)
+            with self.assertRaises(PreparationGateError):
+                create_fresh_private_workdir(link)
+
+    def test_production_mount_alias_and_external_boundary_preflight(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-boundary-") as directory:
+            root = Path(directory)
+            boundaries = {name: root / name for name in ("persistent_home", "repository", "isolated_root", "controller_root", "workdir", "approval_target", "ledger", "result")}
+            for name in ("persistent_home", "repository", "isolated_root", "controller_root"):
+                boundaries[name].mkdir(mode=0o700)
+            passed = production_read_only_boundary_preflight(boundaries, mountinfo="1 2 3 4 /other", external_users={name: 0 for name in boundaries} | {"persistent_home": 4})
+            self.assertEqual("PASS", passed["mount_alias"])
+            with self.assertRaises(PreparationGateError):
+                production_read_only_boundary_preflight(boundaries, mountinfo="1 2 3 4 /other", external_users={name: 0 for name in boundaries} | {"controller_root": 1})
+            with self.assertRaises(PreparationGateError):
+                production_read_only_boundary_preflight(boundaries, mountinfo=f"1 2 3 4 {boundaries['repository']}", external_users={name: 0 for name in boundaries})
+
+    def test_real_proc_group_probe_reports_active_zombie_and_scan_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-proc-") as directory:
+            proc = Path(directory)
+            (proc / "101").mkdir()
+            (proc / "102").mkdir()
+            (proc / "101" / "stat").write_text("101 (active) S 1 777 777\n", encoding="ascii")
+            (proc / "102" / "stat").write_text("102 (zombie) Z 1 777 777\n", encoding="ascii")
+            self.assertEqual((1, 1, 0), inspect_owned_process_group(777, proc_root=proc))
+            (proc / "103").mkdir()
+            (proc / "103" / "stat").write_text("malformed", encoding="ascii")
+            self.assertEqual((1, 1, 1), inspect_owned_process_group(777, proc_root=proc))
+
+    def test_production_watchdog_has_real_bounds_and_scan_errors_fail_closed(self) -> None:
+        self.assertGreater(REAL_WATCHDOG_HARD_DEADLINE, sum(REAL_STAGE_TIMEOUTS.values()))
+        with tempfile.TemporaryDirectory(prefix="p7c13-watchdog-probe-") as directory:
+            result = OwnedParentChildWatchdog(group_scan_error_probe=lambda _: 1).run((sys.executable, "-c", "pass"), result_path=Path(directory) / "missing")
+            self.assertEqual("RESIDUAL_OWNED_GROUP", result.status)
+            self.assertEqual(1, result.group_scan_errors)
+
+    def test_turn3_explicit_escalation_prompt_and_real_wire_ordinal_sequence(self) -> None:
+        target = "/root/p7c13-explicit-synthetic"
+        prompt = c11_explicit_escalation_prompt(target)
+        for phrase in ("first and only tool call", TURN3_SANDBOX_PERMISSION, "Do not first try", "Do not retry"):
+            self.assertIn(phrase, prompt)
+        with tempfile.TemporaryDirectory(prefix="p7c13-wire-") as directory:
+            base = Path(directory)
+            actual_target = base / "target"
+            authority = RootOnlyWireCommandAuthority(base / "wire.json")
+            journal = RootOnlyApprovalRecoveryJournal(base / "journal.json")
+            operator = ProductionApprovalOperator(profile_id="p", thread_id="thread", cwd="/root/work", target=actual_target, budget=EffectBudget(), wire_authority=authority, recovery_journal=journal)
+            operator.turn_binding = TurnBinding("p", "thread", "turn-3")
+            command = shlex.join(["/bin/bash", "-lc", f"touch {actual_target}"])
+            request = ApprovalRequest(7, "p", "request-1", ApprovalKind.COMMAND_EXECUTION, "thread", "turn-3", "item", ("cwd: /root/work", f"command: {command}"))
+            self.assertIs(asyncio.run(operator.decide(request)), ApprovalDecision.ALLOW)
+            wire = authority.read()
+            self.assertEqual(1, wire["request_ordinal"])
+            self.assertEqual(7, wire["local_sequence"])
+            self.assertEqual(1, operator.request_count)
+            with self.assertRaises(PreparationGateError):
+                authority.capture_once(request=request, request_ordinal=1, target=str(actual_target))
+
+    def test_wrong_kind_and_cwd_are_one_response_denies_without_allow(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c13-deny-") as directory:
+            target = Path(directory) / "target"
+            operator = ProductionApprovalOperator(profile_id="p", thread_id="thread", cwd="/root/work", target=target, budget=EffectBudget(), wire_authority=RootOnlyWireCommandAuthority(Path(directory) / "wire.json"), recovery_journal=RootOnlyApprovalRecoveryJournal(Path(directory) / "journal.json"))
+            operator.turn_binding = TurnBinding("p", "thread", "turn-3")
+            wrong = ApprovalRequest(4, "p", "request-1", ApprovalKind.FILE_CHANGE, "thread", "turn-3", "item", ("cwd: /root/work",))
+            self.assertIs(asyncio.run(operator.decide(wrong)), ApprovalDecision.DENY)
+            self.assertEqual(1, operator.budget.count("approval_responses"))
+            self.assertEqual(0, operator.allow_count)
+            cwd_mismatch = ApprovalRequest(5, "p", "request-2", ApprovalKind.COMMAND_EXECUTION, "thread", "turn-3", "item", ("cwd: /root/other", "command: touch /wrong"))
+            with self.assertRaises(PreparationGateError):
+                asyncio.run(operator.decide(cwd_mismatch))
+
+    def test_recovery_classes_are_terminal_and_not_success(self) -> None:
+        self.assertEqual("UNKNOWN", map_terminal_recovery_class(official_status="DELETE_UNKNOWN", application_status=DialogueDeleteStatus.UNKNOWN.value))
+        self.assertEqual("CONFIRMED_PENDING", map_terminal_recovery_class(official_status="DELETE_CONFIRMED", application_status=DialogueDeleteStatus.CONFIRMED_PENDING_STORAGE.value))
+        self.assertEqual("COMPLETED", map_terminal_recovery_class(official_status="DELETE_CONFIRMED", application_status=DialogueDeleteStatus.DELETED.value))
+        self.assertEqual("FAILED", map_terminal_recovery_class(official_status="DELETE_CONFIRMED", application_status="ERROR"))
+
+    def test_production_oracle_has_observed_delete_inputs_and_separate_quiescence(self) -> None:
+        source = inspect.getsource(ProductionRealChildOrchestrator.run_async)
+        for forbidden in ("official_delete=ThreadOperationStatus.DELETE_CONFIRMED.value", "tombstone_bounded=True", "isolated_sqlite_descendants=0", "isolated_logs_descendants=0"):
+            self.assertNotIn(forbidden, source)
+        self.assertIn("runtime_child_quiescent", inspect.getsource(_child_result_payload))
+        self.assertIn("parent_process_group_quiescent", inspect.getsource(_child_result_payload))
+
     def test_watchdog_matrix_and_second_child_retry_fail_closed(self) -> None:
         self.assertEqual("COMPLETED", watchdog_classify(child_exit="COMPLETED").status)
         self.assertEqual("TIMEOUT", watchdog_classify(child_exit="RUNNING", timeout=True).status)
@@ -2822,13 +3544,16 @@ class P7C13ProductionDeleteChainTests(unittest.IsolatedAsyncioTestCase):
         self._write(target, self.thread.encode() + self.marker)
         self._populate_isolated()
         lifecycle = _FakeDelete(ThreadOperationStatus.DELETE_CONFIRMED, (target,))
+        official = OfficialDeleteObservation(lifecycle)
         service = DialogueDeleteService(
-            self.storage, server_id="synthetic-server", thread_lifecycle=lifecycle,
+            self.storage, server_id="synthetic-server", thread_lifecycle=official,
             local_cleanup=self._cleanup(), now_ms=lambda: 100,
         )
         result = await service.delete(DialogueDeleteRequest(idle.dialogue_id, idle.version))
         self.assertIs(result.status, DialogueDeleteStatus.DELETED)
         self.assertEqual(lifecycle.calls, 1)
+        self.assertEqual(1, official.calls)
+        self.assertIs(official.status, ThreadOperationStatus.DELETE_CONFIRMED)
         self.assertIsNone(await DialogueRepository(self.storage).get_live())
         self.assertIsNotNone(await DeletionRepository(self.storage).get_tombstone(idle.dialogue_id))
         self.assertEqual(0, self._oracle().observe().thread_count)
