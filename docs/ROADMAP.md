@@ -76,14 +76,12 @@ Binding source/stimulus contract:
 
 #### Initial preparation
 
-- [REWORK_REQUIRED / ZERO REAL EFFECT] candidate `52d5a4d3a3e716dce32069afbb6b6bdf0fa4a07e`, harness blob `dcc6fa05e551f5514ced8993976caa8a6fa1f606`, evidence blob `960e59ad468868c8290d12312bff266ab520ba66`.
+- [REWORK_REQUIRED / HISTORICAL / ZERO EFFECT] candidate `52d5a4d3a3e716dce32069afbb6b6bdf0fa4a07e`, harness blob `dcc6fa05e551f5514ced8993976caa8a6fa1f606`, evidence blob `960e59ad468868c8290d12312bff266ab520ba66`.
 - [PASS] exact upstream 0.144.6 `OnRequest + workspace-write + RequireEscalated -> ExecApproval` authority frozen.
 - [PASS] future target is a fresh direct child of `/root`, outside `/tmp`, `$TMPDIR`, cwd, run root, repository, persistent Codex home, state/controller roots and `/root/.codexcontrol`.
 - [PASS] prompt requires first-and-only shell call, exact touch target, explicit `sandbox_permissions=require_escalated`, no default first attempt, alternate tool/path/network/retry.
 - [PASS] DENY-only/no-ALLOW, root-only wire capture and all prior state/runtime/process/journal gates carried forward.
-- [BLOCKER] `COMMAND_APPROVAL_OBSERVED_AND_DENIED` is currently over-broad: any command-kind request + any DENY attempt can be called success even if exact identity/wire authority is absent or the DENY result is `RESPONSE_UNKNOWN`.
-- [BLOCKER] parent/child success validation does not bind preferred success to the authoritative exact request, its exact target reference and its own confirmed DENY.
-- [BLOCKER] parent final authority does not independently bind child target SHA-256 to the parent-selected exact target.
+- [HISTORICAL BLOCKER] initial success classification was not sufficiently correlated to exact wire/request/DENY/target authority.
 
 Architect review:
 
@@ -91,22 +89,37 @@ Architect review:
 
 #### Repair-1
 
+- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] Repair-1 `be98542b9bcbf99508784f229057698d85784367`, tree `ec6433f02f9293273979fd5dfc3f3eff70f16fa4`, harness blob `fc67299d80c3d617280975182c097a92cb863b92`.
+- [PASS] root-only wire capture is correlated to exactly one observed command request using local request sequence and wire SHA-256.
+- [PASS] authoritative command capture requires exact COMMAND_EXECUTION thread/Turn/cwd identity.
+- [PASS] durable DENY intent/result carries the authoritative request ordinal; only `DENIED_CONFIRMED` for that request can satisfy preferred success.
+- [PASS] `RESPONSE_UNKNOWN`, wrong identity/kind, missing wire authority and non-exact target reference cannot become preferred success.
+- [PASS] preferred success requires exact target token, established vector reconstruction, zero ALLOW, terminalized owners and absent external target.
+- [PASS] parent independently binds child target SHA-256 to its own selected target and rejects target presence/hash mismatch.
+- [PASS] zero-request and other finite non-success outcomes remain valid observations rather than false success.
+- [TEST AUTHORITY] P7.C11 focused 150 passed / 1 skipped; non-real regression 1065 passed. Repository-wide historical failures are only immutable consumed-latch assertions from P7.C7–P7.C10 and are not repaired by deleting historical authority.
+
+Acceptance:
+
+`docs/evidence/p7c11/P7C11_SOURCE_BACKED_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_ARCHITECT_ACCEPTANCE_2026-09-12.md`
+
+#### One-shot real P7.C11 approval probe
+
 Binding contract:
 
-`docs/evidence/p7c11/P7C11_SOURCE_BACKED_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_PREP_REPAIR1_CONTRACT_2026-09-12.md`
+`docs/evidence/p7c11/P7C11_ONE_SHOT_REAL_EXPLICIT_ESCALATION_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-12.md`
 
-- [NEXT / ZERO REAL EFFECT] Preserve source-backed target/prompt and repair only evidence correlation/success classification.
-- [FIX] correlate validated root-only wire capture to one exact command request.
-- [FIX] correlate `DENIED_CONFIRMED` to that same authoritative request; `RESPONSE_UNKNOWN` is never preferred success.
-- [FIX] wrong identity/kind/unrelated target reference cannot satisfy command-approval success.
-- [FIX] preferred success requires exact target reference authority and valid wire SHA/vector authority.
-- [FIX] parent independently binds child target SHA-256 to its own generated target and re-observes target absence.
-- [BOUND] zero-request/non-success outcomes remain finite valid observations; PARENT_FINAL_RESULT_CONFIRMED is not synonymous with command-approval success.
-- [BLOCKED] no real P7.C11 until Repair-1 is independently architect accepted and exact executable SHA/tree are frozen.
+- [AUTHORIZED / ONE SHOT / EXACT SNAPSHOT] execute only from HEAD `be98542b9bcbf99508784f229057698d85784367`, tree `ec6433f02f9293273979fd5dfc3f3eff70f16fa4`, harness blob `fc67299d80c3d617280975182c097a92cb863b92`.
+- [STIMULUS] exactly one shell `touch <fresh /root target>` with first-and-only `sandbox_permissions=require_escalated` request.
+- [DENY ONLY] every owned approval DENY; ALLOW=0; target expected absent.
+- [PREFERRED SUCCESS] authoritative exact command capture + exact target token + `DENIED_CONFIRMED` for same request + zero ALLOW + target absent + owner/process/boundary/source gates pass.
+- [FINITE NON-SUCCESS] zero request, response unknown, non-command/wrong-identity/nonexact target remain valid empirical outcomes and never authorize matcher/hard delete.
+- [ONE SHOT] once execution starts P7.C11 is consumed under every outcome; no retry.
+- [BLOCKED] matcher and hard-delete execution remain separately unauthorized pending architect review of real P7.C11 evidence.
 
-`P7C11_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+`P7C11_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
 
-`P7C11_REAL_EXECUTION_AUTHORIZED=NO`
+`P7C11_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
 
 `P7C11_MATCHER_AUTHORIZED=NO`
 
