@@ -121,7 +121,7 @@ repository import roots. It does not invoke the P7.C13 parent entrypoint.
 - Unittest discovery with gates unset: `1869 tests`, `7 skipped`, `5 historical
   consumed-latch failures`, `1 historical consumed-latch error`.
 - `compileall -q src tests`: PASS.
-- `git diff --check`: PASS before this evidence file; rerun required after it.
+- `git diff --check`: PASS after the final evidence edit.
 - leakage/security scan: PASS; no future P7.C14 token or raw P7.C13 token was
   created or published.
 - changed-path scope: the two package markers, P7.C14 launcher and this P7.C14
