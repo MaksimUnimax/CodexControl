@@ -88,20 +88,35 @@ Architect root-cause review:
 
 ### P7.C10 schema-aware journal successor
 
-Binding preparation contract:
+#### Preparation
 
-`docs/evidence/p7c10/P7C10_DENY_ONLY_APPROVAL_PROBE_PREP_CONTRACT_2026-09-12.md`
+- [DONE / ARCHITECT ACCEPTED / ZERO EFFECT] prep `3732134246464df899837a3c499c86c52270b038`, tree `68be37c8a5d0aa132199f8b2782618638a07b87e`, harness blob `0a8611e72e8a7f0d368a3b391f2025e05790d3f5`.
+- [PASS] RecoveryJournal writer/reader use field-aware schema validation with a finite exact structural event allowlist.
+- [PASS] `TURN_ID_AUTHORITY=ESTABLISHED` is accepted and read back durably while raw thread/Turn IDs, sentinel paths, wire plaintext and prompt/response routes remain closed.
+- [PASS] exact future real ordering is confirmed Turn -> in-memory Turn authority -> durable Turn authority -> durable observer armed -> observer use.
+- [PASS] normal child and parent success independently require durable Turn chronology.
+- [PASS] all accepted P7.C9 state-root, P7.C8 acquire containment, DENY-only, journal identity, exact `1/1/1`, zero forbidden lifecycle, one-child/no-retry, process-group and boundary gates are carried forward.
 
-- [NEXT / ZERO REAL EFFECT] Create a new P7.C10 probe harness with new token/profile/run/global-authority namespace.
-- [FIX] RecoveryJournal validation must be schema-aware: exact structural event `TURN_ID_AUTHORITY` must be accepted while raw thread/Turn IDs and other protected payloads remain impossible to persist.
-- [FIX] Prove exact ordering: confirmed Turn -> in-memory Turn authority -> durable `TURN_ID_AUTHORITY` -> durable `APPROVAL_OBSERVER_ARMED` -> observer creation/use.
-- [BOUND] Preserve P7.C9 production state-root provisioning/validation, explicit state-root worker ownership, P7.C8 runtime-acquire containment, DENY-only handling, immutable journal identity, exact normal `1/1/1`, zero resume/interrupt/delete/read/list, one child/no retry and exact process-group/boundary/result gates.
-- [BLOCKED] Any real P7.C10 probe until zero-effect prep is independently architect accepted and exact executable SHA/tree are frozen.
-- [BLOCKED] Matcher and hard-delete execution pending accepted real evidence.
+Acceptance:
 
-`P7C10_REAL_APPROVAL_PROBE_AUTHORIZED=NO`
+`docs/evidence/p7c10/P7C10_DENY_ONLY_APPROVAL_PROBE_PREP_ARCHITECT_ACCEPTANCE_2026-09-12.md`
 
-`P7C10_REAL_EXECUTION_AUTHORIZED=NO`
+#### One-shot real probe
+
+Binding contract:
+
+`docs/evidence/p7c10/P7C10_ONE_SHOT_REAL_DENY_ONLY_APPROVAL_PROBE_EXECUTION_CONTRACT_2026-09-12.md`
+
+- [AUTHORIZED / ONE SHOT / EXACT SNAPSHOT] execute only from HEAD `3732134246464df899837a3c499c86c52270b038`, tree `68be37c8a5d0aa132199f8b2782618638a07b87e`, harness blob `0a8611e72e8a7f0d368a3b391f2025e05790d3f5`.
+- [BOUND] New P7.C10 latch/result/outcome namespace; P7.C7/P7.C8/P7.C9 remain untouched and permanently consumed.
+- [BOUND] Production provision+validate precedes runtime acquisition; exact durable Turn authority precedes approval observation.
+- [BOUND] At most one runtime generation, one model/list, one fresh thread/start, one primary turn/start; DENY 0..3; ALLOW/resume/interrupt/delete/read/list 0.
+- [BOUND] Parent watchdog 207.001s; one child, zero retries; at most one exact-group TERM and KILL.
+- [BLOCKED] Matcher authority and hard-delete execution until the real P7.C10 evidence is architect accepted.
+
+`P7C10_REAL_APPROVAL_PROBE_AUTHORIZED=YES_ONE_SHOT_EXACT_GATE_ONLY`
+
+`P7C10_REAL_EXECUTION_AUTHORIZED=PROBE_ONLY`
 
 `P7C10_HARD_DELETE_EXECUTION_AUTHORIZED=NO`
 
