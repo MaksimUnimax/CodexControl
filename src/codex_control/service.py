@@ -24,7 +24,7 @@ from .adapters.telegram.group_updates import TelegramGroupUpdateAdapter
 from .adapters.telegram.private_control_render import TelegramPrivateControlRenderer
 from .adapters.telegram.private_updates import PrivateInboundKind, TelegramPrivateUpdateAdapter
 from .application import (
-    ActiveTurnRegistry, ApprovalAwareTurnLifecycle, ApprovalDecisionSignal,
+    ActiveTurnRegistry, ApprovalAwareTurnLifecycle,
     DialogueDeleteService, DialogueInterruptService, DialogueRecoveryService,
     DialogueTurnService, FleetControlService, FleetGroupRoutingService,
     FleetStatusService, LocalControllerOrchestrator, PrivateCallbackRequest,
@@ -48,12 +48,12 @@ class ServiceError(RuntimeError):
         return f"ServiceError({self.category!r})"
 
 
-def _safe_dir(path: str, category: str) -> None:
+def _safe_dir(path: str, category: str, *, require_root: bool = True) -> None:
     try:
         info = os.stat(path, follow_symlinks=False)
     except OSError:
         raise ServiceError(category) from None
-    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o022 or info.st_uid != 0:
+    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o022 or (require_root and info.st_uid != 0):
         raise ServiceError(category)
 
 
@@ -79,12 +79,12 @@ def validate_production_authority(config_path: str | Path, secrets_path: str | P
         load_secrets(secrets_path, test_only=test_only)
     except (ConfigurationError, SecretsError):
         raise ServiceError("configuration_or_secrets_invalid") from None
-    _safe_dir(config.state_root, "state_root_invalid")
-    _safe_dir(config.working_directory, "working_directory_invalid")
-    _safe_dir(config.repository_root, "repository_root_invalid")
+    _safe_dir(config.state_root, "state_root_invalid", require_root=not test_only)
+    _safe_dir(config.working_directory, "working_directory_invalid", require_root=not test_only)
+    _safe_dir(config.repository_root, "repository_root_invalid", require_root=not test_only)
     for profile in config.profiles:
-        _safe_dir(profile.codex_home, "codex_home_invalid")
-        _safe_dir(profile.isolated_state_root, "isolated_state_root_invalid")
+        _safe_dir(profile.codex_home, "codex_home_invalid", require_root=not test_only)
+        _safe_dir(profile.isolated_state_root, "isolated_state_root_invalid", require_root=not test_only)
     executable = Path(config.codex_executable)
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise ServiceError("codex_executable_invalid")
@@ -142,9 +142,26 @@ async def build_production_assembly(config_path: str | Path, secrets_path: str |
         secrets = load_secrets(secrets_path, test_only=test_only)
     except (ConfigurationError, SecretsError):
         raise ServiceError("configuration_or_secrets_invalid") from None
-    _safe_dir(config.state_root, "state_root_invalid")
-    _safe_dir(config.working_directory, "working_directory_invalid")
-    _safe_dir(config.repository_root, "repository_root_invalid")
+    # This is the same fail-closed authority check as `validate`, except that
+    # a first boot may create a missing controller DB under the configured
+    # state root. Existing databases must already be v4; otherwise opening
+    # them would silently invoke the legacy migration path.
+    _safe_dir(config.state_root, "state_root_invalid", require_root=not test_only)
+    _safe_dir(config.working_directory, "working_directory_invalid", require_root=not test_only)
+    _safe_dir(config.repository_root, "repository_root_invalid", require_root=not test_only)
+    executable = Path(config.codex_executable)
+    if not executable.is_file() or not os.access(executable, os.X_OK):
+        raise ServiceError("codex_executable_invalid")
+    try:
+        manifest = load_manifest(SUPPORTED_CODEX_VERSION)
+        if manifest.check_required(REQUIRED_V1_CAPABILITIES).missing:
+            raise ServiceError("capability_mismatch")
+    except ServiceError:
+        raise
+    except Exception:
+        raise ServiceError("capability_mismatch") from None
+    if os.path.lexists(config.controller_db_path):
+        _read_schema(config.controller_db_path)
     # The controller DB is created only in its explicitly configured parent.
     Path(config.controller_db_path).parent.mkdir(mode=0o700, exist_ok=True)
     try:
@@ -245,6 +262,14 @@ class ProductionService:
         self._poll_task: asyncio.Task[Any] | None = None
         self._closed = False
 
+    def request_stop(self) -> None:
+        """Synchronously stop ingress and interrupt an in-flight long poll."""
+        self._accepting = False
+        self._stop.set()
+        task = self._poll_task
+        if task is not None and not task.done():
+            task.cancel()
+
     async def startup(self) -> None:
         if self._closed:
             raise ServiceError("service_closed")
@@ -284,7 +309,10 @@ class ProductionService:
         group = self.assembly.group_adapter.normalize(update)
         raw_chat = update.get("message", {}).get("chat", {}) if isinstance(update, dict) else {}
         is_group_candidate = isinstance(raw_chat, dict) and raw_chat.get("type") == "supergroup"
-        if group.kind is not GroupInboundKind.MALFORMED or is_group_candidate:
+        # Route by Telegram envelope before normalizing content. A private
+        # message is intentionally not a group update and must reach the
+        # accepted private adapter.
+        if is_group_candidate:
             result = await self.assembly.orchestrator.handle_group(group)
             if result.routing.snapshot is not None:
                 self.assembly._mode_box[0] = result.routing.snapshot.effective_mode
@@ -307,8 +335,7 @@ class ProductionService:
     async def shutdown(self) -> None:
         if self._closed:
             return
-        self._accepting = False
-        self._stop.set()
+        self.request_stop()
         if self._poll_task is not None and not self._poll_task.done():
             self._poll_task.cancel()
             try:
@@ -317,16 +344,27 @@ class ProductionService:
                 pass
             except Exception:
                 pass
-        await self.assembly.runtime_manager.shutdown_all()
-        await self.assembly.storage.close()
-        self._closed = True
+        runtime_failure: Exception | None = None
+        try:
+            await self.assembly.runtime_manager.shutdown_all()
+        except Exception as error:
+            # Runtime ownership failure must remain observable, but it must
+            # not prevent SQLite from closing or turn shutdown into an
+            # unbounded partial lifecycle.
+            runtime_failure = error
+        try:
+            await self.assembly.storage.close()
+        finally:
+            self._closed = True
+        if runtime_failure is not None:
+            raise ServiceError("runtime_shutdown_failed") from None
 
 
 def install_signal_handlers(service: ProductionService, loop: asyncio.AbstractEventLoop) -> tuple[signal.Signals, ...]:
     installed: list[signal.Signals] = []
     for value in (signal.SIGTERM, signal.SIGINT):
         try:
-            loop.add_signal_handler(value, service._stop.set)
+            loop.add_signal_handler(value, service.request_stop)
             installed.append(value)
         except (NotImplementedError, RuntimeError):
             pass

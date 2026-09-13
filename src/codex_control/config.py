@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import stat
 import tomllib
+import unicodedata
 
 from .domain import CodexProfile, ServerIdentity
 from .application.fleet_control import FleetManifest, FleetMember
@@ -50,7 +51,7 @@ class ServerConfiguration:
 
 
 def _path(value: object, category: str) -> str:
-    if not isinstance(value, str) or not value or "\x00" in value:
+    if not isinstance(value, str) or not value or any(unicodedata.category(char) == "Cc" for char in value):
         raise ConfigurationError(category)
     if not os.path.isabs(value):
         raise ConfigurationError("relative_path")
@@ -189,7 +190,7 @@ def _valid_identifier(value: object, maximum: int = 128) -> bool:
 def _valid_display(value: object, maximum: int = 64) -> bool:
     return (
         type(value) is str and 1 <= len(value) <= maximum and
-        "\x00" not in value and "\n" not in value and "\r" not in value and
+        "\x00" not in value and not any(unicodedata.category(char) == "Cc" for char in value) and
         value == " ".join(value.split())
     )
 
@@ -255,6 +256,8 @@ def parse_production_server_configuration(data: object) -> ServerConfiguration:
         raise ConfigurationError("fleet_invalid") from None
     if sum(member.server_id == server["server_id"] for member in members) != 1:
         raise ConfigurationError("own_server_missing")
+    if next(member.display_name for member in members if member.server_id == server["server_id"]) != server["display_name"]:
+        raise ConfigurationError("own_server_display_mismatch")
 
     runtime = data.get("runtime")
     if not isinstance(runtime, dict):

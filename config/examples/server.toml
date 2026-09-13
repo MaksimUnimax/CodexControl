@@ -1,0 +1,30 @@
+# Non-secret production schema example. Replace paths and numeric authorities
+# for the target host; keep TELEGRAM_BOT_TOKEN in the separate root-only
+# secrets.env authority.
+[server]
+server_id = "server-80"
+display_name = "SERVER-80"
+operator_user_id = 123456789
+control_chat_id = -1001234567890
+fleet_version = "v1"
+
+[fleet]
+[[fleet.servers]]
+server_id = "server-80"
+display_name = "SERVER-80"
+
+[runtime]
+state_root = "/var/lib/codex-control"
+working_directory = "/root"
+repository_root = "/opt/codex-control/releases/REPLACE_WITH_FULL_GIT_SHA"
+controller_db_path = "/var/lib/codex-control/controller.sqlite3"
+controller_db_root = "/var/lib/codex-control"
+telegram_text_limit = 3800
+codex_executable = "/usr/local/bin/codex"
+expected_codex_version = "0.144.6"
+
+[[profiles]]
+profile_id = "codex1"
+display_name = "Codex account 1"
+codex_home = "/root/.codex"
+isolated_state_root = "/var/lib/codex-control-profile-codex1"

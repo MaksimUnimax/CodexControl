@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping, Protocol
 from urllib import parse, request
+from urllib.error import HTTPError
 
 from codex_control.application.response_delivery import (
     TelegramDeliveryEffectResult,
@@ -43,6 +45,11 @@ class UrlLibHttpClient:
     """The sole real-network implementation; URL/token never enters diagnostics."""
 
     def __init__(self, token: str, *, base_url: str = "https://api.telegram.org", timeout: float = 30.0) -> None:
+        parsed_base = parse.urlparse(base_url)
+        if parsed_base.scheme != "https" or not parsed_base.netloc or parsed_base.username or parsed_base.password:
+            raise ValueError("https_endpoint_required")
+        if timeout <= 0 or timeout > 180:
+            raise ValueError("timeout_invalid")
         self._token = token
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
@@ -58,7 +65,13 @@ class UrlLibHttpClient:
         try:
             with request.urlopen(req, timeout=timeout) as response:
                 return HttpResponse(int(response.status), response.read(2 * 1024 * 1024 + 1))
-        except Exception as error:
+        except HTTPError as error:
+            # Preserve only the status class; response bodies are untrusted
+            # and never become controller diagnostics.
+            return HttpResponse(int(error.code), b"")
+        except (socket.timeout, TimeoutError):
+            raise TelegramTransportError("POLL_TIMEOUT" if method == "getUpdates" else "NETWORK_AMBIGUOUS") from None
+        except Exception:
             raise TelegramTransportError("NETWORK_AMBIGUOUS") from None
 
 
@@ -97,7 +110,7 @@ class TelegramBotApiTransport:
         except TelegramTransportError:
             raise
         except (asyncio.TimeoutError, TimeoutError):
-            raise TelegramTransportError("NETWORK_AMBIGUOUS") from None
+            raise TelegramTransportError("POLL_TIMEOUT" if method == "getUpdates" else "NETWORK_AMBIGUOUS") from None
         except Exception:
             raise TelegramTransportError("NETWORK_AMBIGUOUS") from None
         if not isinstance(response, HttpResponse) or type(response.status) is not int:
@@ -137,6 +150,10 @@ class TelegramBotApiTransport:
         return tuple(updates)
 
     async def send_message(self, *, chat_id: int, text: str, reply_markup: object | None = None) -> int:
+        if type(chat_id) is not int or chat_id == 0 or not -9_223_372_036_854_775_808 <= chat_id <= 9_223_372_036_854_775_807:
+            raise TelegramTransportError("REQUEST_INVALID")
+        if type(text) is not str or not text or len(text) > 4096 or "\x00" in text:
+            raise TelegramTransportError("REQUEST_INVALID")
         payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
         if reply_markup is not None:
             payload["reply_markup"] = json.dumps(reply_markup, separators=(",", ":"))
@@ -146,6 +163,8 @@ class TelegramBotApiTransport:
         return result["message_id"]
 
     async def edit_message(self, *, chat_id: int, message_id: int, text: str) -> TelegramDeliveryEffectResult:
+        if type(message_id) is not int or not 1 <= message_id <= 9_223_372_036_854_775_807:
+            return TelegramDeliveryEffectResult(TelegramDeliveryEffectStatus.FAILED, None, TelegramDeliveryErrorClass.TELEGRAM_REQUEST_REJECTED)
         try:
             result = await self._call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text}, timeout=self._request_timeout)
         except TelegramTransportError as error:
@@ -168,7 +187,11 @@ class TelegramBotApiTransport:
         return TelegramDeliveryEffectResult(TelegramDeliveryEffectStatus.CONFIRMED, message_id, None)
 
     async def answer_callback_query(self, *, callback_query_id: str) -> None:
-        await self._call("answerCallbackQuery", {"callback_query_id": callback_query_id}, timeout=self._request_timeout)
+        if type(callback_query_id) is not str or not 1 <= len(callback_query_id) <= 256 or any(char.isspace() for char in callback_query_id):
+            raise TelegramTransportError("REQUEST_INVALID")
+        result = await self._call("answerCallbackQuery", {"callback_query_id": callback_query_id}, timeout=self._request_timeout)
+        if result is not True:
+            raise TelegramTransportError("RESPONSE_INVALID")
 
     async def send_projection(self, *, chat_id: int, projection: Mapping[str, Any]) -> int:
         if not isinstance(projection, Mapping) or type(projection.get("text")) is not str:

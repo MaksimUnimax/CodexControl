@@ -32,7 +32,7 @@ class SecretAuthority:
 
 
 _ASSIGNMENT = re.compile(r"\A([A-Z][A-Z0-9_]*)=([^\x00\r\n]*)\Z")
-_UNSAFE = re.compile(r"[;&|<>`]|\$\(")
+_UNSAFE = re.compile(r"[;&|<>`$'\\{}\"\x00\r\n]")
 _MAX_FILE_BYTES = 16 * 1024
 _MAX_LINE_BYTES = 4096
 
@@ -70,12 +70,15 @@ def parse_secrets(data: bytes | str) -> SecretAuthority:
     if text and not text.endswith("\n") and "\r" in text:
         raise SecretsError("secrets_invalid")
     for line in lines:
-        if len(line.encode("utf-8")) > _MAX_LINE_BYTES or not line or line.lstrip().startswith("#"):
-            if line.lstrip().startswith("#"):
-                continue
+        if len(line.encode("utf-8")) > _MAX_LINE_BYTES:
             raise SecretsError("secrets_assignment_invalid")
+        if not line or line.lstrip().startswith("#"):
+            continue
         match = _ASSIGNMENT.fullmatch(line)
-        if match is None or match.group(1) in values or _UNSAFE.search(match.group(2)):
+        if (
+            match is None or match.group(1) != "TELEGRAM_BOT_TOKEN"
+            or match.group(1) in values or _UNSAFE.search(match.group(2))
+        ):
             raise SecretsError("secrets_assignment_invalid")
         values[match.group(1)] = match.group(2)
     token = values.get("TELEGRAM_BOT_TOKEN")

@@ -52,30 +52,54 @@ class ReleaseManifest:
             raise DeploymentError("manifest_invalid")
         try:
             raw = json.loads(value.decode("utf-8"))
+            required = {
+                "product_name", "package_version", "git_sha", "python_requirement",
+                "expected_codex_version", "codex_capability_schema_sha256",
+                "supported_controller_db_schema", "artifact_digests",
+                "service_unit_sha256", "manifest_format",
+            }
+            if not isinstance(raw, dict) or set(raw) != required:
+                raise ValueError
             result = cls(**raw)
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError, KeyError):
             raise DeploymentError("manifest_invalid") from None
-        if result.manifest_format != 1 or result.product_name != "codex-control":
+        if (
+            type(result.manifest_format) is not int or result.manifest_format != 1
+            or type(result.product_name) is not str or result.product_name != "codex-control"
+            or type(result.package_version) is not str or not 1 <= len(result.package_version) <= 128
+            or type(result.python_requirement) is not str or not 1 <= len(result.python_requirement) <= 128
+            or type(result.expected_codex_version) is not str
+            or type(result.codex_capability_schema_sha256) is not str
+            or type(result.supported_controller_db_schema) is not int
+        ):
             raise DeploymentError("manifest_invalid")
-        if not _SHA.fullmatch(result.git_sha) or result.expected_codex_version != SUPPORTED_CODEX_VERSION:
+        if not isinstance(result.git_sha, str) or not _SHA.fullmatch(result.git_sha) or result.expected_codex_version != SUPPORTED_CODEX_VERSION:
             raise DeploymentError("manifest_invalid")
         if result.codex_capability_schema_sha256 != SCHEMA_SHA256 or result.supported_controller_db_schema != 4:
             raise DeploymentError("manifest_invalid")
         if not isinstance(result.artifact_digests, dict) or any(
-            not isinstance(path, str) or path.startswith("/") or ".." in Path(path).parts or
+            not isinstance(path, str) or not path or path.startswith("/") or ".." in Path(path).parts or
             not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
             for path, digest in result.artifact_digests.items()
         ):
             raise DeploymentError("manifest_invalid")
-        if result.service_unit_sha256 is not None and re.fullmatch(r"[0-9a-f]{64}", result.service_unit_sha256) is None:
+        if result.service_unit_sha256 is not None and (
+            not isinstance(result.service_unit_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", result.service_unit_sha256) is None
+        ):
             raise DeploymentError("manifest_invalid")
         return result
 
 
 def _layout_root(root: str | os.PathLike[str]) -> Path:
     value = Path(root)
-    if not value.is_absolute() or value == Path("/") or value.is_symlink():
+    if not value.is_absolute() or value == Path("/") or value.is_symlink() or ".." in value.parts:
         raise DeploymentError("alternate_root_required")
+    current = Path(value.anchor or os.sep)
+    for part in value.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise DeploymentError("layout_symlink")
     return value
 
 
@@ -148,6 +172,8 @@ def stage_release(source: str | os.PathLike[str], *, root: str | os.PathLike[str
         existing = validate_release(target)
         if existing.git_sha != git_sha:
             raise DeploymentError("release_already_present_invalid")
+        if service_unit is not None and existing.service_unit_sha256 != _digest(Path(service_unit)):
+            raise DeploymentError("release_already_present_invalid")
         return target, hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     try:
         shutil.copytree(source_path, target, symlinks=False, ignore=shutil.ignore_patterns(".git", "__pycache__"))
@@ -175,6 +201,8 @@ def validate_release(path: str | os.PathLike[str], *, current_db_schema: int = 4
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise DeploymentError("manifest_missing")
     manifest = ReleaseManifest.from_bytes(manifest_path.read_bytes())
+    if release.name != manifest.git_sha:
+        raise DeploymentError("manifest_sha_mismatch")
     if current_db_schema not in {manifest.supported_controller_db_schema}:
         raise DeploymentError("schema_incompatible")
     actual = {str(item.relative_to(release)): _digest(item) for item in _regular_files(release) if item.name != "release-manifest.json"}
@@ -193,7 +221,7 @@ def current_target(root: str | os.PathLike[str]) -> Path | None:
         return None
     target = (current.parent / os.readlink(current)).resolve()
     releases = (current.parent / "releases").resolve()
-    if releases not in target.parents or target == releases or not target.is_dir():
+    if releases not in target.parents or target == releases or target.is_symlink() or not target.is_dir():
         raise DeploymentError("current_target_invalid")
     return target
 
@@ -210,7 +238,14 @@ def switch_current(root: str | os.PathLike[str], git_sha: str, *, current_db_sch
     current.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     prior = current_target(root_path)
     if prior is not None:
-        (current.parent / "previous").write_text(prior.name + "\n", encoding="ascii")
+        previous = current.parent / "previous"
+        if previous.is_symlink() or (previous.exists() and not previous.is_file()):
+            raise DeploymentError("previous_release_invalid")
+        temporary_previous = current.parent / ".previous.next"
+        if temporary_previous.exists() or temporary_previous.is_symlink():
+            temporary_previous.unlink()
+        temporary_previous.write_text(prior.name + "\n", encoding="ascii")
+        os.replace(temporary_previous, previous)
     temp = current.parent / ".current.next"
     if temp.exists() or temp.is_symlink():
         temp.unlink()
@@ -238,15 +273,45 @@ def rollback(root: str | os.PathLike[str], *, current_db_schema: int = 4) -> Pat
 
 
 def install_upgrade(root: str | os.PathLike[str], source: str | os.PathLike[str], *, git_sha: str,
-                    current_db_schema: int = 4, health_check: Callable[[], bool] | None = None) -> dict[str, Any]:
+                    current_db_schema: int = 4, health_check: Callable[[], bool] | None = None,
+                    config_path: str | os.PathLike[str] | None = None,
+                    secrets_path: str | os.PathLike[str] | None = None,
+                    database_path: str | os.PathLike[str] | None = None,
+                    service_unit: str | os.PathLike[str] | None = None,
+                    test_only: bool = False) -> dict[str, Any]:
     """Stage, atomically switch, and optionally rehearse a health-gated upgrade."""
     root_path = _layout_root(root)
     old = current_target(root_path)
-    stage_release(source, root=root_path, git_sha=git_sha)
+    if old is not None:
+        validate_release(old, current_db_schema=current_db_schema)
+    if (config_path is None) != (secrets_path is None):
+        raise DeploymentError("config_secrets_pair_required")
+    if config_path is not None:
+        try:
+            from .service import validate_production_authority
+            config = validate_production_authority(config_path, secrets_path, test_only=test_only)
+            if database_path is None:
+                database_path = config.controller_db_path
+        except Exception:
+            raise DeploymentError("precheck_failed") from None
+    if database_path is not None:
+        try:
+            with sqlite3.connect(f"file:{Path(database_path)}?mode=ro", uri=True) as connection:
+                schema = connection.execute("PRAGMA user_version").fetchone()[0]
+        except (OSError, sqlite3.Error):
+            raise DeploymentError("database_unavailable") from None
+        if schema != current_db_schema:
+            raise DeploymentError("schema_incompatible")
+    stage_release(source, root=root_path, git_sha=git_sha, service_unit=service_unit)
     switch_current(root_path, git_sha, current_db_schema=current_db_schema)
-    healthy = True if health_check is None else bool(health_check())
+    try:
+        healthy = True if health_check is None else bool(health_check())
+    except Exception:
+        healthy = False
     rolled_back = False
     if not healthy:
+        if old is None:
+            raise DeploymentError("health_gate_failed")
         rollback(root_path, current_db_schema=current_db_schema)
         rolled_back = True
     return {"previous_sha": None if old is None else old.name, "requested_sha": git_sha, "healthy": healthy, "rolled_back": rolled_back, "current_sha": None if current_target(root_path) is None else current_target(root_path).name}
@@ -277,14 +342,21 @@ def verify_installation(root: str | os.PathLike[str], *, expected_sha: str | Non
         "codex_version_authority": manifest.expected_codex_version,
         "service_unit_sha256": None,
     }
+    if (config_path is None) != (secrets_path is None):
+        raise DeploymentError("config_secrets_pair_required")
     if config_path is not None:
         try:
-            from .config import load_production_configuration
-            config = load_production_configuration(config_path, test_only=test_only)
+            # Reuse the executable's complete zero-external-effect authority
+            # check so verification cannot report a merely parseable config as
+            # production-ready.
+            from .service import validate_production_authority
+            config = validate_production_authority(config_path, secrets_path, test_only=test_only)
             info = Path(config_path).stat(follow_symlinks=False)
             result["config_authority"] = "ROOT_REGULAR_PRIVATE" if stat.S_ISREG(info.st_mode) and info.st_uid == 0 and stat.S_IMODE(info.st_mode) & 0o022 == 0 else "INVALID"
             result["configured_profiles"] = tuple(profile.profile_id for profile in config.profiles)
             result["codex_home_authority"] = tuple(profile.codex_home for profile in config.profiles)
+            if database_path is None:
+                database_path = config.controller_db_path
         except Exception:
             raise DeploymentError("config_invalid") from None
     if secrets_path is not None:

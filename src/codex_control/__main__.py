@@ -33,6 +33,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     except KeyboardInterrupt:
         return 0
+    except Exception:
+        # The process boundary is deliberately content-free. Application,
+        # Telegram, and runtime failures are categorized here rather than
+        # allowing third-party exception text onto stderr.
+        print("CODEX_CONTROL_FAILURE:SAFE_SHUTDOWN", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

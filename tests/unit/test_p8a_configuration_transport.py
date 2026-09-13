@@ -5,10 +5,14 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from codex_control.adapters.telegram.bot_api import HttpResponse, TelegramBotApiTransport
 from codex_control.config import ConfigurationError, parse_production_server_configuration
 from codex_control.secrets import SecretsError, parse_secrets
+from codex_control.application.fleet_control import GroupInboundKind
+from codex_control.adapters.telegram.private_updates import TelegramPrivateUpdateAdapter
+from codex_control.service import ProductionService
 
 
 class P8AConfigTransportTests(unittest.TestCase):
@@ -54,9 +58,23 @@ class P8AConfigTransportTests(unittest.TestCase):
     def test_secrets_are_bounded_and_redacted(self):
         secret = parse_secrets("# comment\nTELEGRAM_BOT_TOKEN=offline-token\n")
         self.assertNotIn("offline-token", repr(secret))
-        for value in ("TELEGRAM_BOT_TOKEN=\n", "TELEGRAM_BOT_TOKEN=x\nTELEGRAM_BOT_TOKEN=y\n", "TELEGRAM_BOT_TOKEN=$(id)\n", "BAD LINE\n"):
+        for value in (
+            "TELEGRAM_BOT_TOKEN=\n", "TELEGRAM_BOT_TOKEN=x\nTELEGRAM_BOT_TOKEN=y\n",
+            "TELEGRAM_BOT_TOKEN=$(id)\n", "TELEGRAM_BOT_TOKEN=$HOME\n",
+            "TELEGRAM_BOT_TOKEN=`id`\n", "TELEGRAM_BOT_TOKEN=x\nOTHER=y\n", "BAD LINE\n",
+        ):
             with self.assertRaises(SecretsError):
                 parse_secrets(value)
+
+    def test_display_and_control_characters_are_authoritative(self):
+        data = self._data()
+        data["fleet"]["servers"][0]["display_name"] = "OTHER"
+        with self.assertRaises(ConfigurationError):
+            parse_production_server_configuration(data)
+        data = self._data()
+        data["runtime"]["working_directory"] = "/tmp/unsafe\npath"
+        with self.assertRaises(ConfigurationError):
+            parse_production_server_configuration(data)
 
 
 class _FakeHttp:
@@ -85,7 +103,7 @@ class P8ATransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(9, fake.calls[-1][1]["offset"])
 
     async def test_send_edit_callback_projection_and_no_retry(self):
-        fake = _FakeHttp([self.response({"message_id": 12}), self.response(True), self.response({})])
+        fake = _FakeHttp([self.response({"message_id": 12}), self.response(True), self.response(True)])
         transport = TelegramBotApiTransport("123:offline", http=fake)
         created = await transport.create_message(chat_id=-100, text="safe")
         edited = await transport.edit_message(chat_id=-100, message_id=12, text="safe-2")
@@ -106,3 +124,74 @@ class P8ATransportTests(unittest.IsolatedAsyncioTestCase):
         result = await transport.create_message(chat_id=1, text="safe")
         self.assertEqual("UNKNOWN", result.status.value)
         self.assertEqual(1, len(fake.calls))
+
+    async def test_poll_timeout_and_callback_result_shape_are_bounded(self):
+        fake = _FakeHttp([asyncio.TimeoutError()])
+        transport = TelegramBotApiTransport("123:offline", http=fake)
+        with self.assertRaisesRegex(Exception, "POLL_TIMEOUT"):
+            await transport.get_updates()
+        fake = _FakeHttp([self.response({})])
+        transport = TelegramBotApiTransport("123:offline", http=fake)
+        with self.assertRaisesRegex(Exception, "RESPONSE_INVALID"):
+            await transport.answer_callback_query(callback_query_id="q1")
+
+
+class P8AServiceRoutingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_private_update_does_not_enter_group_orchestrator(self):
+        calls = []
+
+        class GroupAdapter:
+            def normalize(self, update):
+                return SimpleNamespace(kind=GroupInboundKind.MALFORMED)
+
+        class Orchestrator:
+            async def handle_group(self, update):
+                calls.append("group")
+
+            async def handle_private_command(self, request):
+                calls.append(("private", request.command))
+                return SimpleNamespace(panel=None)
+
+            async def handle_private_callback(self, request):
+                calls.append("callback")
+                return SimpleNamespace(panel=None)
+
+        class Telegram:
+            async def answer_callback_query(self, **kwargs):
+                raise AssertionError("not a callback")
+
+            async def send_projection(self, **kwargs):
+                raise AssertionError("no private panel")
+
+        assembly = SimpleNamespace(
+            group_adapter=GroupAdapter(), private_adapter=TelegramPrivateUpdateAdapter(7),
+            orchestrator=Orchestrator(), telegram=Telegram(), config=SimpleNamespace(),
+            keyboard_renderer=SimpleNamespace(), _mode_box=[None],
+        )
+        service = ProductionService(assembly)
+        service._accepting = True
+        await service.dispatch({
+            "update_id": 1,
+            "message": {
+                "message_id": 2, "from": {"id": 7, "is_bot": False},
+                "chat": {"id": 7, "type": "private"}, "text": "/start",
+            },
+        })
+        self.assertEqual([("private", "MENU")], [(item[0], item[1].value) for item in calls])
+
+    async def test_shutdown_order_stops_ingress_then_closes_runtime_and_storage(self):
+        events = []
+
+        class Runtime:
+            async def shutdown_all(self):
+                events.append("runtime")
+
+        class Storage:
+            async def close(self):
+                events.append("storage")
+
+        service = ProductionService(SimpleNamespace(runtime_manager=Runtime(), storage=Storage()))
+        service._accepting = True
+        await service.shutdown()
+        self.assertEqual(["runtime", "storage"], events)
+        self.assertFalse(service._accepting)
