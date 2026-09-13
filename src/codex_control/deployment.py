@@ -725,7 +725,7 @@ def verify_installation(
     test_only: bool = False,
 ) -> dict[str, Any]:
     root = _production_authority(root_authority)
-    config, _, installed_manifest = _preflight_for_deployment(Path(config_path), Path(secrets_path), test_only=test_only, installed_authority_probe=installed_authority_probe)
+    config, _, _, installed_manifest = _preflight_for_deployment(Path(config_path), Path(secrets_path), test_only=test_only, installed_authority_probe=installed_authority_probe)
     current = current_target(root_authority)
     if current is None:
         raise DeploymentError("current_missing")
