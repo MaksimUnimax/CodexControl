@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from unittest.mock import patch
@@ -51,6 +51,14 @@ P7C17_ORACLE_FACTS_SCHEMA = "p7c17-oracle-facts-v1"
 P7C17_ATTRIBUTION_SCHEMA = "p7c17-unrelated-removal-v1"
 P7C17_MARKER_POLICY_VERSION = "p7c17-current-run-markers-v1"
 P7C17_STATES = frozenset(("RESERVED", "COMPLETED", "FAILED", "UNKNOWN", "CONFIRMED_PENDING", "TIMEOUT"))
+# P7.C17 has an explicit evidence-processing allowance above the inherited
+# P7.C16 deadline.  Test fixtures may inject shorter bounds, but production
+# selection always uses this frozen deadline.
+P7C17_EVIDENCE_PROCESSING_MARGIN = 60.0
+P7C17_REAL_WATCHDOG_HARD_DEADLINE = (
+    p7c16.P7C16_REAL_WATCHDOG_HARD_DEADLINE + P7C17_EVIDENCE_PROCESSING_MARGIN
+)
+P7C17_REQUIRED_SCHEMA_VERSION = 4
 _FROZEN_POST_DELETE_ACCEPTANCE = p7c13.post_delete_acceptance
 
 
@@ -72,6 +80,18 @@ def _git(*args: str) -> str:
 
 def _blob(path: Path) -> str:
     return _git("hash-object", str(path))
+
+
+def _is_sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(
+        char in "0123456789abcdef" for char in value
+    )
+
+
+def _schema_class(version: Any) -> str:
+    if type(version) is not int:
+        return "INVALID"
+    return "V4" if version == P7C17_REQUIRED_SCHEMA_VERSION else "NON_V4"
 
 
 @dataclass(frozen=True)
@@ -326,6 +346,11 @@ def _hex_hashes(values: Any, *, bound: int = 4096) -> bool:
 
 class P7C17UnrelatedRemovalAttributionAuthority(_RootOnlyJsonAuthority):
     schema = P7C17_ATTRIBUTION_SCHEMA
+    # The frozen metadata authority permits 4096 regular-file identities.
+    # This dedicated bound is deliberately below 2 MiB and is independent of
+    # the generic 32 KiB root-only authority.
+    MAX_BYTES = 2 * 1024 * 1024
+    MAX_LIST_COUNT = 4096
 
     def _validate(self, value: Any) -> dict[str, Any]:
         value = super()._validate(value)
@@ -334,11 +359,44 @@ class P7C17UnrelatedRemovalAttributionAuthority(_RootOnlyJsonAuthority):
                     "before_count", "after_count", "target_count", "removed_unrelated_count", "unrelated_removed"}
         if set(value) != required or any(not isinstance(value.get(key), str) or not value[key] for key in ("source_head", "source_tree", "launcher_blob", "run_id_hash", "boot_authority_sha256")):
             raise P7C17PreparationError("P7.C17 attribution shape invalid")
-        if len(value["run_id_hash"]) != 64 or any(not _hex_hashes(value[key]) for key in ("before_path_hashes", "after_path_hashes", "target_path_hashes", "removed_unrelated_path_hashes")):
+        if not _is_sha256(value["run_id_hash"]) or not _is_sha256(value["boot_authority_sha256"]):
+            raise P7C17PreparationError("P7.C17 attribution digest invalid")
+        if any(not _hex_hashes(value[key], bound=self.MAX_LIST_COUNT) for key in ("before_path_hashes", "after_path_hashes", "target_path_hashes", "removed_unrelated_path_hashes")):
             raise P7C17PreparationError("P7.C17 attribution hashes invalid")
         if any(type(value[key]) is not int or value[key] < 0 for key in ("before_count", "after_count", "target_count", "removed_unrelated_count")) or type(value["unrelated_removed"]) is not bool:
             raise P7C17PreparationError("P7.C17 attribution counts invalid")
+        for hashes, count_key in (("before_path_hashes", "before_count"), ("after_path_hashes", "after_count"),
+                                  ("target_path_hashes", "target_count"), ("removed_unrelated_path_hashes", "removed_unrelated_count")):
+            if value[count_key] != len(value[hashes]):
+                raise P7C17PreparationError("P7.C17 attribution count drift")
+        if value["unrelated_removed"] is not bool(value["removed_unrelated_path_hashes"]):
+            raise P7C17PreparationError("P7.C17 attribution boolean drift")
         return value
+
+
+def _p7c17_snapshot_regular_file_count(profile: Any) -> int:
+    """Count the frozen snapshot domain without retaining raw path evidence."""
+    pending = [Path(profile.codex_home) / "sessions", Path(profile.codex_home) / "history.jsonl"]
+    count = 0
+    while pending:
+        root = pending.pop()
+        try:
+            value_root = root.lstat()
+        except OSError:
+            continue
+        if stat.S_ISLNK(value_root.st_mode):
+            continue
+        if stat.S_ISDIR(value_root.st_mode):
+            try:
+                pending.extend(Path(entry.path) for entry in os.scandir(root) if not entry.is_symlink())
+            except OSError:
+                continue
+            continue
+        if stat.S_ISREG(value_root.st_mode):
+            count += 1
+            if count > P7C17UnrelatedRemovalAttributionAuthority.MAX_LIST_COUNT:
+                return count
+    return count
 
 
 ORACLE_FACT_KEYS = frozenset({
@@ -365,7 +423,7 @@ class P7C17RootOnlyOracleFactsAuthority(_RootOnlyJsonAuthority):
         strings = ("source_head", "source_tree", "launcher_blob", "run_id_hash", "boot_authority_sha256", "boot_identity_class",
                    "official_delete_class", "application_delete_class", "post_delete_schema_class", "isolation_envelope_class",
                    "recovery_class", "marker_policy_class", "marker_policy_version", "unrelated_removal_authority_sha256")
-        if any(not isinstance(value[key], str) or not value[key] for key in strings) or len(value["run_id_hash"]) != 64:
+        if any(not isinstance(value[key], str) or not value[key] for key in strings) or not _is_sha256(value["run_id_hash"]):
             raise P7C17PreparationError("P7.C17 oracle-facts scalar invalid")
         bools = ("tombstone_bounded", "live_binding_present", "unrelated_target_specific_removal_detected", "budgets_ok", "runtime_child_quiescent")
         if any(type(value[key]) is not bool for key in bools) or type(value["post_delete_schema_version"]) is not int:
@@ -374,10 +432,18 @@ class P7C17RootOnlyOracleFactsAuthority(_RootOnlyJsonAuthority):
                        or key.endswith("count"))
         if any(type(value[key]) is not int or value[key] < 0 for key in counts):
             raise P7C17PreparationError("P7.C17 oracle-facts count invalid")
+        if value["post_delete_schema_class"] not in {"V4", "NON_V4", "INVALID"}:
+            raise P7C17PreparationError("P7.C17 schema observation class invalid")
+        if value["isolation_envelope_class"] not in {"VALID", "INVALID"}:
+            raise P7C17PreparationError("P7.C17 isolation observation class invalid")
         if not isinstance(value["enabled_marker_classes"], list) or not all(isinstance(item, str) for item in value["enabled_marker_classes"]):
             raise P7C17PreparationError("P7.C17 marker classes invalid")
         if not _hex_hashes(value["enabled_marker_identity_sha256"], bound=8):
             raise P7C17PreparationError("P7.C17 marker identities invalid")
+        if len(value["enabled_marker_classes"]) != len(value["enabled_marker_identity_sha256"]):
+            raise P7C17PreparationError("P7.C17 marker identity count invalid")
+        if not _is_sha256(value["unrelated_removal_authority_sha256"]):
+            raise P7C17PreparationError("P7.C17 attribution digest invalid")
         return value
 
 
@@ -446,6 +512,20 @@ def _p7c17_safe_attribution(before: Mapping[str, tuple[int, int]], after: Mappin
     return P7C17UnrelatedRemovalAttributionAuthority(path).write(record)
 
 
+def replay_p7c17_unrelated_removal_fact(record: Mapping[str, Any]) -> bool:
+    """Replay the frozen set subtraction from sanitized path identities only."""
+    before = set(record["before_path_hashes"])
+    after = set(record["after_path_hashes"])
+    target = set(record["target_path_hashes"])
+    removed = sorted(before - after - target)
+    if removed != record["removed_unrelated_path_hashes"]:
+        raise P7C17PreparationError("P7.C17 attribution replay mismatch")
+    result = bool(removed)
+    if result != record["unrelated_removed"]:
+        raise P7C17PreparationError("P7.C17 attribution replay boolean mismatch")
+    return result
+
+
 class P7C17RootOnlyBootAuthority(p7c16.P7C16RootOnlyBootAuthority):
     """P7.C17 boot identity, retaining the accepted path validation rules."""
 
@@ -507,6 +587,12 @@ class P7C17ProductionChildOrchestrator(p7c16.P7C16ProductionChildOrchestrator):
         self._p7c17_before: Mapping[str, tuple[int, int]] = {}
         self._p7c17_target_paths: set[str] = set()
         self._p7c17_after: Mapping[str, tuple[int, int]] = {}
+        self._p7c17_snapshot_captured = False
+        self._p7c17_after_captured = False
+        self._p7c17_post_delete_schema_version: Any = None
+        self._p7c17_isolation_envelope_class = "INVALID"
+        self._p7c17_facts: dict[str, Any] | None = None
+        self._p7c17_evaluation: P7C17OracleEvaluation | None = None
 
         def factory() -> P7C17RuntimeManagerView:
             raw = runtime_factory() if runtime_factory is not None else p7c15._build_p7c15_runtime_manager(boot)
@@ -528,15 +614,44 @@ class P7C17ProductionChildOrchestrator(p7c16.P7C16ProductionChildOrchestrator):
         def oracle_factory(profile: Any, thread: str, markers: Sequence[bytes], **kwargs: Any) -> P7C17BoundedTargetOracle:
             return P7C17BoundedTargetOracle(profile, thread, markers, policy=self._p7c17_policy, **kwargs)
 
+        original_await_owned = p7c13._await_owned
+
+        async def await_owned_with_schema_capture(awaitable: Any, *, timeout: float, stage: str,
+                                                  convergence: float | None = None) -> Any:
+            # Delegate exactly once.  The inherited P7.C15 operation remains
+            # the sole post-delete schema read; this wrapper records only its
+            # returned integer and leaves timeout/exception behavior intact.
+            result = await original_await_owned(awaitable, timeout=timeout, stage=stage, convergence=convergence)
+            if stage == "post-delete schema read":
+                if self._p7c17_post_delete_schema_version is not None:
+                    raise P7C17PreparationError("duplicate post-delete schema observation")
+                self._p7c17_post_delete_schema_version = result
+            return result
+
+        original_isolation_validate = p7c13.IsolatedStateRoot.validate
+
+        def validate_isolation(instance: Any, profile: Any) -> Any:
+            try:
+                result = original_isolation_validate(instance, profile)
+            except BaseException:
+                self._p7c17_isolation_envelope_class = "INVALID"
+                raise
+            self._p7c17_isolation_envelope_class = "VALID"
+            return result
+
         original_snapshot = p7c13.target_metadata_snapshot
         original_derived = p7c13.derived_unrelated_removal_fact
 
         def snapshot(profile: Any, thread: str) -> tuple[dict[str, tuple[int, int]], set[str]]:
+            if _p7c17_snapshot_regular_file_count(profile) > P7C17UnrelatedRemovalAttributionAuthority.MAX_LIST_COUNT:
+                raise P7C17PreparationError("P7.C17 attribution snapshot bound exceeded")
             value = original_snapshot(profile, thread)
-            if not self._p7c17_before:
+            if not self._p7c17_snapshot_captured:
                 self._p7c17_before, self._p7c17_target_paths = value
+                self._p7c17_snapshot_captured = True
             else:
                 self._p7c17_after, _ = value
+                self._p7c17_after_captured = True
             return value
 
         def derived(before: Mapping[str, tuple[int, int]], after: Mapping[str, tuple[int, int]], *, target_paths: set[str]) -> bool:
@@ -550,16 +665,26 @@ class P7C17ProductionChildOrchestrator(p7c16.P7C16ProductionChildOrchestrator):
             source = {"source_head": self.boot["source_head"], "source_tree": self.boot["source_tree"],
                       "launcher_blob": self.boot["launcher_blob"], "run_id_hash": self.boot["run_id_hash"],
                       "boot_authority_sha256": _sha256(Path(self.boot["boot_authority_path"]).read_bytes())}
+            if (self._p7c17_post_delete_schema_version is None or not self._p7c17_snapshot_captured
+                    or not self._p7c17_after_captured):
+                raise P7C17PreparationError("P7.C17 observed authority incomplete")
+            attribution_path = Path(self.boot["unrelated_removal"])
             attribution = _p7c17_safe_attribution(self._p7c17_before, self._p7c17_after, self._p7c17_target_paths,
-                                                   source=source, path=Path(self.boot["unrelated_removal"]))
+                                                   source=source, path=attribution_path)
+            attribution = P7C17UnrelatedRemovalAttributionAuthority(attribution_path).read(expected=source)
+            attribution_replay = replay_p7c17_unrelated_removal_fact(attribution)
+            if (attribution_replay != attribution["unrelated_removed"]
+                    or attribution_replay != bool(kwargs["unrelated_target_specific_removal_detected"])):
+                raise P7C17PreparationError("P7.C17 attribution replay disagreement")
             manager = self.p7c16_manager
             runtime_quiescent = self._runtime_quiescent(manager) if manager is not None else False
+            schema_version = self._p7c17_post_delete_schema_version
             facts = {
                 "schema": P7C17_ORACLE_FACTS_SCHEMA, **source, "boot_identity_class": "ROOT_0600_REGULAR_NLINK1",
                 "official_delete_class": kwargs["official_delete"], "application_delete_class": kwargs["application_result"],
                 "tombstone_bounded": bool(kwargs["tombstone_bounded"]), "live_binding_present": bool(kwargs["live_binding"]),
-                "post_delete_schema_class": "V4", "post_delete_schema_version": 4,
-                "isolation_envelope_class": "VALID" if kwargs["envelope_valid"] else "INVALID",
+                "post_delete_schema_class": _schema_class(schema_version), "post_delete_schema_version": schema_version,
+                "isolation_envelope_class": self._p7c17_isolation_envelope_class,
                 "isolated_sqlite_regular_descendants": sqlite[0], "isolated_sqlite_special_descendants": sqlite[1],
                 "isolated_sqlite_symlinks": sqlite[2], "isolated_sqlite_scan_errors": sqlite[3],
                 "isolated_logs_regular_descendants": logs[0], "isolated_logs_special_descendants": logs[1],
@@ -569,39 +694,63 @@ class P7C17ProductionChildOrchestrator(p7c16.P7C16ProductionChildOrchestrator):
                 "persistent_scan_errors": persistent.scan_errors, "isolated_thread_count": isolated.thread_count,
                 "isolated_marker_count": isolated.marker_count, "isolated_scan_errors": isolated.scan_errors,
                 "combined_scan_errors": persistent.scan_errors + isolated.scan_errors + sqlite[3] + logs[3],
-                "unrelated_target_specific_removal_detected": bool(kwargs["unrelated_target_specific_removal_detected"]),
+                "unrelated_target_specific_removal_detected": attribution_replay,
                 "recovery_class": p7c13.map_terminal_recovery_class(
                     official_status=kwargs["official_delete"], application_status=kwargs["application_result"]),
                 "budgets_ok": bool(kwargs["budgets_ok"]),
                 "runtime_child_quiescent": runtime_quiescent, "marker_policy_class": type(self._p7c17_policy).__name__,
                 "marker_policy_version": self._p7c17_policy.version, "enabled_marker_classes": list(self._p7c17_policy.enabled_marker_classes),
                 "enabled_marker_identity_sha256": list(self._p7c17_policy.safe_identity_hashes),
-                "unrelated_removal_authority_sha256": _sha256(json.dumps(attribution, sort_keys=True).encode()),
+                "unrelated_removal_authority_sha256": _sha256(attribution_path.read_bytes()),
             }
             facts_authority = P7C17RootOnlyOracleFactsAuthority(self.boot["oracle_facts"])
             facts_authority.write(facts)
-            self._p7c17_facts = facts
-            self._p7c17_evaluation = evaluate_p7c17_oracle_facts(facts)
-            return _FROZEN_POST_DELETE_ACCEPTANCE(**kwargs)
+            readback = facts_authority.read(expected=source)
+            evaluation = evaluate_p7c17_oracle_facts(readback)
+            frozen_result = _FROZEN_POST_DELETE_ACCEPTANCE(**kwargs)
+            self._p7c17_facts = readback
+            self._p7c17_evaluation = evaluation
+            if evaluation.unavailable or bool(frozen_result) != (not evaluation.failed and not evaluation.unavailable):
+                raise P7C17PreparationError("P7.C17 oracle facts disagreement")
+            if frozen_result and evaluation.failed:
+                raise P7C17PreparationError("P7.C17 accepted oracle has failed facts")
+            return bool(frozen_result)
 
         with patch.object(p7c13, "BoundedTargetOracle", oracle_factory), \
              patch.object(p7c13, "target_metadata_snapshot", snapshot), \
              patch.object(p7c13, "derived_unrelated_removal_fact", derived), \
+             patch.object(p7c13, "_await_owned", await_owned_with_schema_capture), \
+             patch.object(p7c13.IsolatedStateRoot, "validate", validate_isolation), \
              patch.object(p7c13, "post_delete_acceptance", acceptance), \
              patch.object(p7c16, "P7C16RuntimeManagerView", P7C17RuntimeManagerView):
             return await super().run_async()
 
 
 class P7C17ChildResultAuthority(_RootOnlyJsonAuthority):
+    MAX_BYTES = p7c16.P7C16ChildResultAuthority.MAX_BYTES
     schema = P7C17_CHILD_RESULT_SCHEMA
 
     def _validate(self, value: Any) -> dict[str, Any]:
         value = super()._validate(value)
-        required = set(p7c16.P7C16ChildResultAuthority.KEYS) | {"oracle_facts_sha256", "failed_predicate_count"}
-        if set(value) != required or value.get("status") not in {"PASS", "FAILED", "UNKNOWN", "CONFIRMED_PENDING", "TIMEOUT"} or type(value.get("verdict")) is not bool:
+        required = set(p7c16.P7C16ChildResultAuthority.KEYS) | {
+            "oracle_facts_sha256", "failed_predicate_count", "unavailable_predicate_count",
+        }
+        if set(value) != required:
             raise P7C17PreparationError("P7.C17 child result schema invalid")
-        if type(value["failed_predicate_count"]) is not int or value["failed_predicate_count"] < 0:
-            raise P7C17PreparationError("P7.C17 child result oracle class invalid")
+        # Project the inherited fields through the accepted P7.C16 authority;
+        # this intentionally keeps effect ceilings, bounded maps, safe strings
+        # and quiescence typing in one validator.
+        inherited = {key: value[key] for key in p7c16.P7C16ChildResultAuthority.KEYS}
+        inherited["schema"] = p7c16.P7C16_CHILD_RESULT_SCHEMA
+        try:
+            p7c16.P7C16ChildResultAuthority._validate(inherited)
+        except p7c16.P7C16PreparationError as error:
+            raise P7C17PreparationError("P7.C17 inherited child authority invalid") from error
+        if not _is_sha256(value["oracle_facts_sha256"]):
+            raise P7C17PreparationError("P7.C17 child result facts digest invalid")
+        for key in ("failed_predicate_count", "unavailable_predicate_count"):
+            if type(value[key]) is not int or value[key] < 0:
+                raise P7C17PreparationError("P7.C17 child result oracle count invalid")
         return value
 
     @classmethod
@@ -611,8 +760,10 @@ class P7C17ChildResultAuthority(_RootOnlyJsonAuthority):
 
 def _p7c17_child_result_file_is_valid(path: Path, boot: Mapping[str, Any]) -> bool:
     try:
-        value = P7C17ChildResultAuthority(path).read()
-        return all(value.get(key) == boot.get(key) for key in ("source_head", "source_tree", "launcher_blob", "run_id_hash", "boot_authority_path"))
+        value = P7C17ChildResultAuthority(path).read(expected={
+            key: boot[key] for key in ("source_head", "source_tree", "launcher_blob", "run_id_hash", "boot_authority_path")
+        })
+        return True
     except (OSError, UnicodeError, json.JSONDecodeError, P7C17PreparationError):
         return False
 
@@ -658,6 +809,120 @@ def p7c17_exact_effect_pass_gate(counts: Mapping[str, int]) -> bool:
     return p7c16.p7c16_exact_effect_pass_gate(counts)
 
 
+@dataclass(frozen=True)
+class P7C17ParentResult:
+    """Durable parent outcome returned to the CLI projection."""
+
+    status: str
+    watchdog_status: str
+    recovery: Mapping[str, Any]
+
+
+def _p7c17_marker_policy_authority(facts: Mapping[str, Any]) -> bool:
+    expected = list(P7C17CurrentRunMarkerPolicy.marker_classes)
+    classes = facts.get("enabled_marker_classes")
+    hashes = facts.get("enabled_marker_identity_sha256")
+    return (
+        facts.get("marker_policy_class") == P7C17CurrentRunMarkerPolicy.__name__
+        and facts.get("marker_policy_version") == P7C17_MARKER_POLICY_VERSION
+        and classes == expected
+        and isinstance(hashes, list)
+        and len(hashes) == len(classes)
+        and all(_is_sha256(item) for item in hashes)
+        and "turn4_stimulus" not in classes
+    )
+
+
+def _p7c17_parent_terminal_state(
+    observed: Any, result: Mapping[str, Any] | None, facts: Mapping[str, Any] | None,
+    attribution: Mapping[str, Any] | None, *, facts_digest_agrees: bool,
+    attribution_digest_agrees: bool, contract: P7C17ArchitectContract,
+    parent_retry_count: Any = None,
+) -> tuple[str, dict[str, Any]]:
+    """Apply every inherited gate and every P7.C17 proof gate exactly once."""
+    watchdog_status = getattr(observed, "status", None)
+    watchdog_child_valid = getattr(observed, "child_result_valid", False) is True
+    child_valid = result is not None
+    child_status = result.get("status") if result else None
+    child_verdict = result.get("verdict") if result else None
+    exact_effect = bool(result and p7c17_exact_effect_pass_gate(result.get("effect_counts", {})))
+    runtime_quiescent = result.get("runtime_child_quiescent") if result else None
+    child_count = getattr(observed, "child_count", None)
+    retry_count = parent_retry_count if parent_retry_count is not None else getattr(observed, "retry_count", None)
+    retry_flag = getattr(observed, "retry", False)
+    owned_group_active = getattr(observed, "owned_group_active", None)
+    owned_group_zombies = getattr(observed, "owned_group_zombies", None)
+    group_scan_errors = getattr(observed, "group_scan_errors", None)
+    signals_sent_count = len(getattr(observed, "signals_sent", ()))
+
+    group_facts_valid = all(type(value) is int and value >= 0 for value in (
+        child_count, owned_group_active, owned_group_zombies, group_scan_errors,
+    ))
+    retry_facts_valid = type(retry_count) is int and retry_count >= 0
+
+    evaluation = evaluate_p7c17_oracle_facts(facts) if facts is not None else None
+    oracle_facts_valid = facts is not None and evaluation is not None
+    facts_failed_count = len(evaluation.failed) if evaluation is not None else None
+    facts_unavailable_count = len(evaluation.unavailable) if evaluation is not None else None
+    marker_policy_valid = bool(facts is not None and _p7c17_marker_policy_authority(facts))
+    attribution_valid = attribution is not None
+    attribution_boolean_agrees = bool(
+        attribution_valid and facts is not None
+        and attribution["unrelated_removed"] == facts["unrelated_target_specific_removal_detected"]
+        and replay_p7c17_unrelated_removal_fact(attribution) == attribution["unrelated_removed"]
+    )
+    attribution_valid = attribution_valid and attribution_boolean_agrees
+
+    recovery = {
+        "watchdog_status": watchdog_status,
+        "child_result_valid": watchdog_child_valid and child_valid,
+        "child_status": child_status,
+        "child_verdict": child_verdict,
+        "runtime_child_quiescent": runtime_quiescent,
+        "exact_effect_gate": exact_effect,
+        "owned_group_active": owned_group_active,
+        "owned_group_zombies": owned_group_zombies,
+        "group_scan_errors": group_scan_errors,
+        "signals_sent_count": signals_sent_count,
+        "child_count": child_count,
+        "retry_count": retry_count,
+        "last_confirmed_stage": result.get("last_confirmed_stage") if result else "PARENT_VALIDATION",
+        "child_result_authority_hash": None,
+        "oracle_facts_valid": oracle_facts_valid,
+        "oracle_facts_sha256": result.get("oracle_facts_sha256") if result else None,
+        "facts_failed_predicate_count": facts_failed_count,
+        "facts_unavailable_predicate_count": facts_unavailable_count,
+        "unrelated_removal_authority_valid": attribution_valid,
+        "unrelated_removal_sha256_agreement": attribution_digest_agrees,
+        "marker_policy_authority_valid": marker_policy_valid,
+    }
+    # The parent deliberately uses only safe digest material in recovery.
+    if child_valid:
+        recovery["child_result_authority_hash"] = result.get("_authority_sha256")
+
+    if watchdog_status == "TIMEOUT":
+        state = "TIMEOUT"
+    elif child_status in {"UNKNOWN", "CONFIRMED_PENDING"}:
+        state = child_status
+    else:
+        full_gate = all((
+            watchdog_status == "COMPLETED", watchdog_child_valid, child_valid,
+            child_status == "PASS", child_verdict is True, runtime_quiescent is True,
+            exact_effect, group_facts_valid, retry_facts_valid, child_count == 1,
+            retry_count == 0, retry_flag is False,
+            owned_group_active == 0, owned_group_zombies == 0, group_scan_errors == 0,
+            oracle_facts_valid, attribution_valid, facts_digest_agrees,
+            attribution_digest_agrees, evaluation is not None,
+            not evaluation.failed if evaluation is not None else False,
+            not evaluation.unavailable if evaluation is not None else False,
+            result.get("failed_predicate_count") == facts_failed_count if result else False,
+            result.get("unavailable_predicate_count") == facts_unavailable_count if result else False,
+            marker_policy_valid,
+        ))
+        state = "COMPLETED" if full_gate else "FAILED"
+    return state, recovery
+
+
 def _p7c17_boot(root: Path, contract: P7C17ArchitectContract) -> dict[str, Any]:
     authority = root / "authority"; authority.mkdir(mode=0o700); run_root = root / "run"; run_root.mkdir(mode=0o700)
     paths = p7c17_fresh_run_paths("a" * 24, root=run_root, authority=authority)
@@ -678,6 +943,7 @@ def _p7c17_child_payload(boot: Mapping[str, Any], result: Mapping[str, Any], chi
                          journal: Any) -> dict[str, Any]:
     budget = child.budget if child is not None else None
     facts = getattr(child, "_p7c17_evaluation", None)
+    facts_path = Path(boot["oracle_facts"])
     return {"schema": P7C17_CHILD_RESULT_SCHEMA, "status": result.get("status", "FAILED"), "verdict": bool(result.get("verdict", False)),
             "source_head": boot["source_head"], "source_tree": boot["source_tree"], "launcher_blob": boot["launcher_blob"],
             "run_id_hash": boot["run_id_hash"], "boot_authority_path": boot["boot_authority_path"],
@@ -686,8 +952,9 @@ def _p7c17_child_payload(boot: Mapping[str, Any], result: Mapping[str, Any], chi
             "terminal_exception_class": result.get("terminal_exception_class"), "terminal_error_category": result.get("terminal_error_category"),
             "last_confirmed_stage": result.get("last_confirmed_stage", "PRE_CHILD"), "stage_journal_sha256": result.get("stage_journal_sha256") or journal.digest(),
             "runtime_child_quiescent": bool(result.get("runtime_child_quiescent", False)), "parent_process_group_quiescent": None,
-            "oracle_facts_sha256": _sha256(Path(boot["oracle_facts"]).read_bytes()) if Path(boot["oracle_facts"]).exists() else "",
-            "failed_predicate_count": len(facts.failed) if facts is not None else 0}
+            "oracle_facts_sha256": _sha256(facts_path.read_bytes()) if facts_path.exists() else _sha256(b""),
+            "failed_predicate_count": len(facts.failed) if facts is not None else 0,
+            "unavailable_predicate_count": len(facts.unavailable) if facts is not None else 0}
 
 
 def p7c17_future_child_main(boot_path: str | Path, *, runtime_factory: Callable[[], Any] | None = None) -> int:
@@ -702,7 +969,8 @@ def p7c17_future_child_main(boot_path: str | Path, *, runtime_factory: Callable[
         return 0 if payload["status"] == "PASS" and payload["verdict"] else 1
     except BaseException as error:
         payload = _p7c17_child_payload(boot, {"status": "FAILED", "verdict": False, "last_confirmed_stage": child.last_confirmed_stage if child else "PRE_CHILD",
-                                             "terminal_exception_class": type(error).__name__}, child, journal)
+                                             "terminal_exception_class": type(error).__name__,
+                                             "terminal_error_category": p7c16._p7c16_error_category(error)}, child, journal)
         try:
             journal.append("TERMINAL_EXCEPTION", "FAILED", effect_class="terminal", error=error)
             payload["stage_journal_sha256"] = journal.digest(); P7C17ChildResultAuthority.write_payload(Path(boot["child_result_path"]), payload)
@@ -780,28 +1048,82 @@ class P7C17PreparedFutureExecutor:
                        "tests.real.test_p7_c17_final_hard_delete_successor", "--p7c17-future-child",
                        "--boot-authority", boot["boot_authority_path"])
         self.mutation_events.append("CHILD_DISPATCHED")
-        bounds = self.test_only_watchdog_bounds or (p7c16.P7C16_REAL_WATCHDOG_HARD_DEADLINE, p7c13.REAL_WATCHDOG_TERM_GRACE, p7c13.REAL_WATCHDOG_KILL_GRACE)
+        bounds = self.test_only_watchdog_bounds or (P7C17_REAL_WATCHDOG_HARD_DEADLINE, p7c13.REAL_WATCHDOG_TERM_GRACE, p7c13.REAL_WATCHDOG_KILL_GRACE)
         observed = self.watchdog.run(command, result_path=boot["child_result_path"],
                                      timeout_seconds=bounds[0], term_grace_seconds=bounds[1], kill_grace_seconds=bounds[2],
                                      result_validator=lambda path: _p7c17_child_result_file_is_valid(Path(path), boot))
-        try: result = P7C17ChildResultAuthority(boot["child_result_path"]).read()
-        except (OSError, P7C17PreparationError, json.JSONDecodeError): result = None
-        if result and Path(boot["oracle_facts"]).exists():
-            try:
-                P7C17RootOnlyOracleFactsAuthority(boot["oracle_facts"]).read(expected={
-                    "source_head": contract.expected_head, "source_tree": contract.expected_tree,
-                    "launcher_blob": contract.expected_launcher_blob, "run_id_hash": record["run_id_hash"],
-                    "boot_authority_sha256": _sha256(Path(boot["boot_authority_path"]).read_bytes()),
-                })
-                facts_valid = True
-            except (OSError, P7C17PreparationError, json.JSONDecodeError):
-                facts_valid = False
-        else:
-            facts_valid = False
-        state = "COMPLETED" if result and facts_valid and observed.status == "COMPLETED" and result["status"] == "PASS" and result["verdict"] and p7c17_exact_effect_pass_gate(result["effect_counts"]) and result["runtime_child_quiescent"] else (result["status"] if result and result["status"] in {"UNKNOWN", "CONFIRMED_PENDING"} else "FAILED")
-        self.ledger.update(state=state, recovery={"watchdog_status": observed.status, "child_count": observed.child_count,
-                                                   "retry_count": getattr(self.watchdog, "retry_count", 0), "oracle_facts": result.get("oracle_facts_sha256") if result else None})
-        return observed
+        result: dict[str, Any] | None = None
+        result_authority_hash: str | None = None
+        try:
+            result = P7C17ChildResultAuthority(boot["child_result_path"]).read(expected={
+                "source_head": contract.expected_head, "source_tree": contract.expected_tree,
+                "launcher_blob": contract.expected_launcher_blob, "run_id_hash": record["run_id_hash"],
+                "boot_authority_path": boot["boot_authority_path"],
+            })
+            result_authority_hash = _sha256(Path(boot["child_result_path"]).read_bytes())
+            # Internal-only recovery projection; it is never written into the
+            # child result authority itself.
+            result = dict(result); result["_authority_sha256"] = result_authority_hash
+        except (OSError, P7C17PreparationError, json.JSONDecodeError, UnicodeError):
+            result = None
+
+        expected_correlation = {
+            "source_head": contract.expected_head, "source_tree": contract.expected_tree,
+            "launcher_blob": contract.expected_launcher_blob, "run_id_hash": record["run_id_hash"],
+            "boot_authority_sha256": _sha256(Path(boot["boot_authority_path"]).read_bytes()),
+        }
+        facts: dict[str, Any] | None = None
+        try:
+            facts = P7C17RootOnlyOracleFactsAuthority(boot["oracle_facts"]).read(expected=expected_correlation)
+        except (OSError, P7C17PreparationError, json.JSONDecodeError, UnicodeError):
+            facts = None
+
+        attribution: dict[str, Any] | None = None
+        try:
+            attribution = P7C17UnrelatedRemovalAttributionAuthority(boot["unrelated_removal"]).read(expected={
+                key: expected_correlation[key] for key in ("source_head", "source_tree", "launcher_blob", "run_id_hash", "boot_authority_sha256")
+            })
+        except (OSError, P7C17PreparationError, json.JSONDecodeError, UnicodeError):
+            attribution = None
+
+        facts_digest_agrees = bool(
+            result is not None and facts is not None
+            and _is_sha256(result["oracle_facts_sha256"])
+            and result["oracle_facts_sha256"] == _sha256(Path(boot["oracle_facts"]).read_bytes())
+        )
+        attribution_digest_agrees = bool(
+            facts is not None and attribution is not None
+            and facts["unrelated_removal_authority_sha256"] == _sha256(Path(boot["unrelated_removal"]).read_bytes())
+        )
+        try:
+            state, recovery = _p7c17_parent_terminal_state(
+                observed, result, facts, attribution,
+                facts_digest_agrees=facts_digest_agrees,
+                attribution_digest_agrees=attribution_digest_agrees,
+                contract=contract,
+                parent_retry_count=getattr(self.watchdog, "retry_count", None),
+            )
+        except (KeyError, TypeError, ValueError, P7C17PreparationError):
+            state = "TIMEOUT" if observed.status == "TIMEOUT" else "FAILED"
+            recovery = {
+                "watchdog_status": observed.status, "child_result_valid": False,
+                "child_status": result.get("status") if result else None,
+                "child_verdict": result.get("verdict") if result else None,
+                "runtime_child_quiescent": result.get("runtime_child_quiescent") if result else None,
+                "exact_effect_gate": False, "owned_group_active": getattr(observed, "owned_group_active", None),
+                "owned_group_zombies": getattr(observed, "owned_group_zombies", None),
+                "group_scan_errors": getattr(observed, "group_scan_errors", None),
+                "signals_sent_count": len(getattr(observed, "signals_sent", ())),
+                "child_count": getattr(observed, "child_count", None),
+                "retry_count": getattr(self.watchdog, "retry_count", 0),
+                "last_confirmed_stage": "PARENT_VALIDATION", "child_result_authority_hash": result_authority_hash,
+                "oracle_facts_valid": False, "oracle_facts_sha256": result.get("oracle_facts_sha256") if result else None,
+                "facts_failed_predicate_count": None, "facts_unavailable_predicate_count": None,
+                "unrelated_removal_authority_valid": False, "unrelated_removal_sha256_agreement": False,
+                "marker_policy_authority_valid": False,
+            }
+        durable = self.ledger.update(state=state, recovery=recovery)
+        return P7C17ParentResult(durable["state"], observed.status, durable["recovery"])
 
 
 def _p7c17_boot_from_paths(paths: Mapping[str, str], ledger: Path, boot_path: Path, contract: P7C17ArchitectContract,
@@ -843,7 +1165,7 @@ def reproduce_p7c17_old_static_marker_false_positive() -> dict[str, Any]:
 def _synthetic_facts(**changes: Any) -> dict[str, Any]:
     facts: dict[str, Any] = {
         "schema": P7C17_ORACLE_FACTS_SCHEMA, "source_head": "h" * 40, "source_tree": "t" * 40,
-        "launcher_blob": "l" * 40, "run_id_hash": "r" * 64, "boot_authority_sha256": "b" * 64,
+        "launcher_blob": "l" * 40, "run_id_hash": "a" * 64, "boot_authority_sha256": "b" * 64,
         "boot_identity_class": "ROOT_0600_REGULAR_NLINK1", "official_delete_class": "DELETE_CONFIRMED",
         "application_delete_class": "DELETED", "tombstone_bounded": True, "live_binding_present": False,
         "post_delete_schema_class": "V4", "post_delete_schema_version": 4, "isolation_envelope_class": "VALID",
@@ -854,8 +1176,10 @@ def _synthetic_facts(**changes: Any) -> dict[str, Any]:
         "persistent_scan_errors": 0, "isolated_thread_count": 0, "isolated_marker_count": 0, "isolated_scan_errors": 0,
         "combined_scan_errors": 0, "unrelated_target_specific_removal_detected": False, "recovery_class": "COMPLETED",
         "budgets_ok": True, "runtime_child_quiescent": True, "marker_policy_class": "P7C17CurrentRunMarkerPolicy",
-        "marker_policy_version": P7C17_MARKER_POLICY_VERSION, "enabled_marker_classes": ["memory_marker", "response_marker"],
-        "enabled_marker_identity_sha256": ["a" * 64, "c" * 64], "unrelated_removal_authority_sha256": "u" * 64,
+        "marker_policy_version": P7C17_MARKER_POLICY_VERSION,
+        "enabled_marker_classes": list(P7C17CurrentRunMarkerPolicy.marker_classes),
+        "enabled_marker_identity_sha256": ["a" * 64, "c" * 64, "d" * 64, "e" * 64],
+        "unrelated_removal_authority_sha256": "a" * 64,
     }
     facts.update(changes)
     return facts
@@ -864,6 +1188,27 @@ def _synthetic_facts(**changes: Any) -> dict[str, Any]:
 def _valid_marker_tuple(target: str = "/tmp/p7c17-target") -> tuple[bytes, ...]:
     return (b"memory-current-run-0123456789", b"response-current-run-0123456789", target.encode(),
             p7c13.c11_explicit_escalation_prompt(target).encode(), p7c13.TURN4_STIMULUS.encode())
+
+
+def _synthetic_child_result() -> dict[str, Any]:
+    return {
+        "schema": P7C17_CHILD_RESULT_SCHEMA, "status": "PASS", "verdict": True,
+        "source_head": "h" * 40, "source_tree": "t" * 40, "launcher_blob": "l" * 40,
+        "run_id_hash": "a" * 64, "boot_authority_path": "/tmp/p7c17-boot.json",
+        "effect_counts": dict(p7c13.FROZEN_EFFECT_BUDGET), "outcomes": {"flow": "PASS"},
+        "classes": {"flow": "P7C17"}, "terminal_exception_class": None,
+        "terminal_error_category": None, "last_confirmed_stage": "POST_DELETE_ORACLE",
+        "stage_journal_sha256": "b" * 64, "runtime_child_quiescent": True,
+        "parent_process_group_quiescent": None, "oracle_facts_sha256": "c" * 64,
+        "failed_predicate_count": 0, "unavailable_predicate_count": 0,
+    }
+
+
+def _synthetic_attribution() -> dict[str, Any]:
+    return {
+        "before_path_hashes": [], "after_path_hashes": [], "target_path_hashes": [],
+        "removed_unrelated_path_hashes": [], "unrelated_removed": False,
+    }
 
 
 class P7C17MarkerPolicyTests(unittest.TestCase):
@@ -920,7 +1265,7 @@ class P7C17OracleFactsTests(unittest.TestCase):
     def test_root_only_facts_correlation_and_safety_matrix(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c17-facts-") as directory:
             root = Path(directory); path = root / "facts.json"; authority = P7C17RootOnlyOracleFactsAuthority(path); facts = _synthetic_facts()
-            self.assertEqual(facts, authority.write(facts)); self.assertEqual(facts, authority.read(expected={"source_head": "h" * 40, "run_id_hash": "r" * 64}))
+            self.assertEqual(facts, authority.write(facts)); self.assertEqual(facts, authority.read(expected={"source_head": "h" * 40, "run_id_hash": "a" * 64}))
             for key, wrong in (("source_head", "x" * 40), ("run_id_hash", "x" * 64), ("boot_authority_sha256", "x" * 64)):
                 with self.subTest(key=key), self.assertRaises(P7C17PreparationError): authority.read(expected={key: wrong})
             duplicate = root / "duplicate.json"; duplicate.write_text('{"schema":"p7c17-oracle-facts-v1","schema":"p7c17-oracle-facts-v1"}\n', encoding="utf-8"); os.chmod(duplicate, 0o600)
@@ -936,7 +1281,7 @@ class P7C17OracleFactsTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="p7c17-attribution-") as directory:
             root = Path(directory); target = str(root / "target"); unrelated = str(root / "unrelated")
             source = {"source_head": "h" * 40, "source_tree": "t" * 40, "launcher_blob": "l" * 40,
-                      "run_id_hash": "r" * 64, "boot_authority_sha256": "b" * 64}
+                      "run_id_hash": "a" * 64, "boot_authority_sha256": "b" * 64}
             before = {target: (1, 1), unrelated: (1, 2)}; after_target = {unrelated: (1, 2)}
             false_record = _p7c17_safe_attribution(before, after_target, {target}, source=source, path=root / "false.json")
             self.assertFalse(false_record["unrelated_removed"]); self.assertEqual([], false_record["removed_unrelated_path_hashes"])
@@ -945,10 +1290,152 @@ class P7C17OracleFactsTests(unittest.TestCase):
             self.assertTrue(true_record["unrelated_removed"]); self.assertEqual(1, true_record["removed_unrelated_count"])
             self.assertNotIn(target, json.dumps(true_record)); self.assertNotIn(unrelated, json.dumps(true_record))
 
+    def test_actual_schema_drift_is_non_v4_and_exact_predicate_fails(self) -> None:
+        facts = _synthetic_facts(post_delete_schema_class=_schema_class(3), post_delete_schema_version=3)
+        evaluation = evaluate_p7c17_oracle_facts(facts)
+        self.assertEqual("NON_V4", facts["post_delete_schema_class"])
+        self.assertIn("post_delete.schema == 4", evaluation.failed)
+        self.assertNotIn("isolation.envelope == VALID", evaluation.failed)
+
+    def test_independent_isolation_envelope_fact_is_not_schema_or_shape_flag(self) -> None:
+        facts = _synthetic_facts(isolation_envelope_class="INVALID")
+        evaluation = evaluate_p7c17_oracle_facts(facts)
+        self.assertIn("isolation.envelope == VALID", evaluation.failed)
+        self.assertNotIn("post_delete.schema == 4", evaluation.failed)
+
+    def test_attribution_near_maximum_scale_fits_and_over_bound_rejects(self) -> None:
+        source = {"source_head": "h" * 40, "source_tree": "t" * 40, "launcher_blob": "l" * 40,
+                  "run_id_hash": "a" * 64, "boot_authority_sha256": "b" * 64}
+        with tempfile.TemporaryDirectory(prefix="p7c17-attribution-bound-") as directory:
+            root = Path(directory)
+            paths = {str(root / f"regular-{index}") for index in range(P7C17UnrelatedRemovalAttributionAuthority.MAX_LIST_COUNT)}
+            before = {path: (1, index + 1) for index, path in enumerate(paths)}
+            record = _p7c17_safe_attribution(before, before, paths, source=source, path=root / "near.json")
+            self.assertEqual(P7C17UnrelatedRemovalAttributionAuthority.MAX_LIST_COUNT, record["before_count"])
+            self.assertLessEqual((root / "near.json").stat().st_size, P7C17UnrelatedRemovalAttributionAuthority.MAX_BYTES)
+            over = {str(root / f"over-{index}"): (1, index + 1) for index in range(P7C17UnrelatedRemovalAttributionAuthority.MAX_LIST_COUNT + 1)}
+            with self.assertRaises(P7C17PreparationError):
+                _p7c17_safe_attribution(over, {}, set(), source=source, path=root / "over.json")
+
+    def test_frozen_attribution_edge_replays_without_thread_id_heuristic(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p7c17-attribution-edge-") as directory:
+            root = Path(directory); target = str(root / "target.json"); unrelated = str(root / "regular.json")
+            source = {"source_head": "h" * 40, "source_tree": "t" * 40, "launcher_blob": "l" * 40,
+                      "run_id_hash": "a" * 64, "boot_authority_sha256": "b" * 64}
+            before = {unrelated: (1, 1), target: (1, 2)}; after = {target: (1, 2)}
+            frozen = p7c13.derived_unrelated_removal_fact(before, after, target_paths={target})
+            record = _p7c17_safe_attribution(before, after, {target}, source=source, path=root / "edge.json")
+            self.assertTrue(frozen)
+            self.assertEqual(frozen, replay_p7c17_unrelated_removal_fact(record))
+
+
+class P7C17ParentGateTests(unittest.TestCase):
+    def _contract(self) -> P7C17ArchitectContract:
+        return P7C17ArchitectContract("token", "h" * 40, "t" * 40, "l" * 40,
+                                      "1" * 40, "2" * 40, "3" * 40, "4" * 40, "5" * 40,
+                                      "6" * 40, "7" * 40)
+
+    def _valid(self) -> tuple[Any, dict[str, Any], dict[str, Any], dict[str, Any]]:
+        observed = p7c13.WatchdogResult("COMPLETED", child_count=1, child_result_valid=True,
+                                         owned_group_active=0, owned_group_zombies=0, group_scan_errors=0)
+        result = _synthetic_child_result(); result["_authority_sha256"] = "d" * 64
+        facts = _synthetic_facts()
+        attribution = _synthetic_attribution()
+        state, recovery = _p7c17_parent_terminal_state(
+            observed, result, facts, attribution, facts_digest_agrees=True,
+            attribution_digest_agrees=True, contract=self._contract(), parent_retry_count=0,
+        )
+        return observed, result, facts, attribution
+
+    def test_full_parent_terminal_gate_and_exact_recovery_authority(self) -> None:
+        observed, result, facts, attribution = self._valid()
+        state, recovery = _p7c17_parent_terminal_state(
+            observed, result, facts, attribution, facts_digest_agrees=True,
+            attribution_digest_agrees=True, contract=self._contract(), parent_retry_count=0,
+        )
+        self.assertEqual("COMPLETED", state)
+        for key in ("watchdog_status", "child_result_valid", "child_status", "child_verdict",
+                    "runtime_child_quiescent", "exact_effect_gate", "owned_group_active",
+                    "owned_group_zombies", "group_scan_errors", "signals_sent_count", "child_count",
+                    "retry_count", "last_confirmed_stage", "child_result_authority_hash",
+                    "oracle_facts_valid", "oracle_facts_sha256", "facts_failed_predicate_count",
+                    "facts_unavailable_predicate_count", "unrelated_removal_authority_valid",
+                    "unrelated_removal_sha256_agreement", "marker_policy_authority_valid"):
+            self.assertIn(key, recovery)
+
+    def test_timeout_and_all_process_group_negatives_cannot_complete(self) -> None:
+        observed, result, facts, attribution = self._valid()
+        timeout = replace(observed, status="TIMEOUT")
+        state, _ = _p7c17_parent_terminal_state(
+            timeout, result, facts, attribution, facts_digest_agrees=True,
+            attribution_digest_agrees=True, contract=self._contract(), parent_retry_count=0,
+        )
+        self.assertEqual("TIMEOUT", state)
+        for field in ("owned_group_active", "owned_group_zombies", "group_scan_errors", "child_count"):
+            values = {"owned_group_active": 1, "owned_group_zombies": 1,
+                      "group_scan_errors": 1, "child_count": 2}
+            with self.subTest(field=field):
+                invalid = replace(observed, **{field: values[field]})
+                state, _ = _p7c17_parent_terminal_state(
+                    invalid, result, facts, attribution, facts_digest_agrees=True,
+                    attribution_digest_agrees=True, contract=self._contract(), parent_retry_count=0,
+                )
+                self.assertNotEqual("COMPLETED", state)
+        invalid_retry = replace(observed, retry=True)
+        state, _ = _p7c17_parent_terminal_state(
+            invalid_retry, result, facts, attribution, facts_digest_agrees=True,
+            attribution_digest_agrees=True, contract=self._contract(), parent_retry_count=1,
+        )
+        self.assertNotEqual("COMPLETED", state)
+
+    def test_production_watchdog_deadline_has_bounded_evidence_margin(self) -> None:
+        self.assertEqual(
+            p7c16.P7C16_REAL_WATCHDOG_HARD_DEADLINE + P7C17_EVIDENCE_PROCESSING_MARGIN,
+            P7C17_REAL_WATCHDOG_HARD_DEADLINE,
+        )
+        self.assertGreater(P7C17_REAL_WATCHDOG_HARD_DEADLINE,
+                           p7c16.P7C16_REAL_WATCHDOG_HARD_DEADLINE)
+
+    def test_facts_child_attribution_and_marker_negatives_block_completion(self) -> None:
+        observed, result, facts, attribution = self._valid()
+        cases = {
+            "child_result_invalid": (replace(observed, child_result_valid=False), result, facts, attribution, True, True),
+            "facts_missing": (observed, result, None, attribution, False, True),
+            "facts_digest": (observed, result, facts, attribution, False, True),
+            "facts_failed": (observed, result, _synthetic_facts(persistent_marker_count=1), attribution, True, True),
+            "child_failed_count": (observed, {**result, "failed_predicate_count": 1}, facts, attribution, True, True),
+            "child_unavailable_count": (observed, {**result, "unavailable_predicate_count": 1}, facts, attribution, True, True),
+            "attribution_missing": (observed, result, facts, None, True, False),
+            "attribution_digest": (observed, result, facts, attribution, True, False),
+            "marker_version": (observed, result, _synthetic_facts(marker_policy_version="wrong"), attribution, True, True),
+            "marker_classes": (observed, result, _synthetic_facts(enabled_marker_classes=["memory_marker"]), attribution, True, True),
+        }
+        for name, (item_observed, item_result, item_facts, item_attr, facts_agree, attr_agree) in cases.items():
+            with self.subTest(name=name):
+                state, _ = _p7c17_parent_terminal_state(
+                    item_observed, item_result, item_facts, item_attr,
+                    facts_digest_agrees=facts_agree, attribution_digest_agrees=attr_agree,
+                    contract=self._contract(), parent_retry_count=0,
+                )
+                self.assertNotEqual("COMPLETED", state)
+
+    def test_child_authority_projects_inherited_schema_and_rejects_shape_drift(self) -> None:
+        payload = _synthetic_child_result()
+        authority = P7C17ChildResultAuthority(Path("/tmp/p7c17-child-validation.json"))
+        self.assertEqual(payload, authority._validate(payload))
+        for key in ("effect_counts", "outcomes", "classes", "runtime_child_quiescent", "parent_process_group_quiescent"):
+            invalid = dict(payload)
+            if key == "effect_counts": invalid[key] = {"unexpected": 1}
+            elif key in {"outcomes", "classes"}: invalid[key] = {str(index): "x" for index in range(65)}
+            elif key == "parent_process_group_quiescent": invalid[key] = "true"
+            else: invalid[key] = "true"
+            with self.subTest(key=key), self.assertRaises((P7C17PreparationError, p7c16.P7C16PreparationError)):
+                authority._validate(invalid)
+
 
 class P7C17HandoffTests(unittest.TestCase):
     def _authority_environment(self) -> tuple[P7C17SourceAuthority, P7C17ArchitectContract, dict[str, str]]:
-        actual = current_p7c17_source_authority()
+        actual = replace(current_p7c17_source_authority(), tracked_worktree_clean=True, tracked_index_clean=True)
         values = (actual.head, actual.tree, actual.launcher_blob, actual.p7c16_launcher_blob, actual.p7c15_launcher_blob,
                   actual.p7c14_launcher_blob, actual.p7c13_harness_blob, actual.p7c12_matcher_blob, actual.tests_init_blob, actual.tests_real_init_blob)
         contract = P7C17ArchitectContract("synthetic-token", *values)
@@ -965,7 +1452,11 @@ class P7C17HandoffTests(unittest.TestCase):
                 return p7c17_future_child_main(boot, runtime_factory=p7c16._P7C16UnderlyingFakeRuntimeManager)
             executor = P7C17PreparedFutureExecutor._production_with_authority(
                 contract, ledger_path=ledger, child_dispatch=dispatch, test_only_codex_home=home, test_only_watchdog_bounds=(10, 1, 1))
-            with patch.object(P7C17PreparedFutureExecutor, "production", return_value=executor):
+            # The synthetic handoff supplies a captured clean source
+            # authority; the real source gate still executes all namespace,
+            # protected-blob and import-root checks.
+            with patch.object(P7C17PreparedFutureExecutor, "production", return_value=executor), \
+                 patch(__name__ + ".current_p7c17_source_authority", return_value=authority):
                 observed = p7c17_real_entrypoint(environ=environment, authority=authority, executor=None)
             self.assertEqual("COMPLETED", observed.status); self.assertEqual("COMPLETED", P7C17DurableOneShotLedger(ledger).read()["state"])
             result = P7C17ChildResultAuthority(executor.run_paths["child_result"]).read()
@@ -975,6 +1466,24 @@ class P7C17HandoffTests(unittest.TestCase):
             facts = P7C17RootOnlyOracleFactsAuthority(executor.run_paths["oracle_facts"]).read()
             self.assertEqual(0, facts["persistent_marker_count"]); self.assertEqual(0, facts["combined_scan_errors"])
             self.assertEqual(0, result["failed_predicate_count"]); self.assertEqual(1, result["effect_counts"]["thread/delete"])
+
+    def test_watchdog_completed_but_parent_proof_failed_projects_nonzero(self) -> None:
+        authority, contract, environment = self._authority_environment()
+        with tempfile.TemporaryDirectory(prefix="p7c17-cli-proof-") as directory:
+            root = Path(directory); ledger = root / "authority" / "p7c17-one-shot.json"; home = root / "home"
+            def dispatch(boot: Path) -> int:
+                code = p7c17_future_child_main(boot, runtime_factory=p7c16._P7C16UnderlyingFakeRuntimeManager)
+                Path(boot).parent.joinpath(Path(boot).name.replace("boot-", "oracle-facts-")).write_text("{}\n", encoding="utf-8")
+                return code
+            executor = P7C17PreparedFutureExecutor._production_with_authority(
+                contract, ledger_path=ledger, child_dispatch=dispatch, test_only_codex_home=home,
+                test_only_watchdog_bounds=(10, 1, 1),
+            )
+            with patch.object(P7C17PreparedFutureExecutor, "production", return_value=executor), \
+                 patch(__name__ + ".current_p7c17_source_authority", return_value=authority), \
+                 patch.dict(os.environ, environment, clear=True):
+                self.assertEqual(1, _module_main(["--p7c17-real-run"]))
+            self.assertEqual("FAILED", P7C17DurableOneShotLedger(ledger).read()["state"])
 
     def test_disabled_entrypoint_has_zero_effect_and_no_real_ledger(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p7c17-disabled-") as directory, patch.dict(os.environ, {}, clear=True):
@@ -990,6 +1499,19 @@ class P7C17HandoffTests(unittest.TestCase):
                 self.assertEqual(1, p7c17_future_child_main(boot["boot_authority_path"], runtime_factory=lambda: manager))
                 result = P7C17ChildResultAuthority(boot["child_result_path"]).read()
                 self.assertEqual(expected, result["status"]); self.assertEqual(1, manager.client.calls.count("thread/delete")); self.assertEqual(0, result["effect_counts"]["real_retry"])
+
+    def test_schema_drift_fixture_retains_actual_version_and_exact_failure(self) -> None:
+        # Source-equivalent offline fixture for the inherited
+        # postdelete_schema_drift scenario.  The production wrapper records
+        # the inherited read result; this proves the retained authority does
+        # not turn version 3 into a generic envelope failure.
+        observed_version = 3
+        facts = _synthetic_facts(post_delete_schema_class=_schema_class(observed_version),
+                                 post_delete_schema_version=observed_version)
+        evaluation = evaluate_p7c17_oracle_facts(facts)
+        self.assertEqual(3, facts["post_delete_schema_version"])
+        self.assertEqual("NON_V4", facts["post_delete_schema_class"])
+        self.assertEqual(frozenset({"post_delete.schema == 4"}), evaluation.failed)
 
 
 def _module_main(argv: Sequence[str] | None = None) -> int:

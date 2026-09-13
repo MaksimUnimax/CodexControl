@@ -1,12 +1,14 @@
 # P7.C17 post-delete oracle successor preparation evidence — 2026-09-13
 
-Status: **PREPARATION COMPLETE / ZERO REAL EFFECT / REAL EXECUTION NOT AUTHORIZED**
+Status: **REPAIR-1 PREPARATION COMPLETE / ZERO REAL EFFECT / REAL EXECUTION NOT AUTHORIZED**
 
 ## Immutable preparation binding
 
 ```text
-P7C17_PREP_BASE_HEAD=d0a7c7dbda94c28c2f6a0eb011453fb0692696de
-P7C17_PREP_BASE_TREE=61d6591879a66d93dc2f8959ba3a17b8470a34a7
+P7C17_REPAIR1_BASE_HEAD=95c15bf03d58dddd86229faafe715271996a98ae
+P7C17_REPAIR1_BASE_TREE=03ee32040a767eef8dfd1ba85f88caf50a802a38
+PRIOR_P7C17_LAUNCHER_BLOB=66ff812bff5f843cc8b83af7dbaa79274ad20839
+PRIOR_P7C17_EVIDENCE_BLOB=c3b507fe50bc0b21ca5e2e011a86ce172062620d
 P7C16_FORENSIC_EVIDENCE_BLOB=fb3ca5366f38e9374b6175c8b35b9a392a2a8249
 INHERITED_P7C16_LAUNCHER_BLOB=2c500d7d5787a7eda71c1e3e3591d8034dded590
 INHERITED_P7C15_LAUNCHER_BLOB=ebe4ffab2d08494452c1b132fe2fed50f4830a6b
@@ -15,8 +17,8 @@ INHERITED_P7C13_HARNESS_BLOB=5a1fe8e32cd985b1e1845d73266211632e33950c
 INHERITED_P7C12_MATCHER_BLOB=f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1
 TESTS_INIT_BLOB=080243830be797f87d23b459dbfd12c142a9d49a
 TESTS_REAL_INIT_BLOB=23d73d7648ed14ef6857ee665784b87f57fde9f3
-P7C17_LAUNCHER_BLOB=RECORDED_AFTER_COMMIT
-P7C17_EVIDENCE_BLOB=RECORDED_AFTER_COMMIT
+P7C17_LAUNCHER_BLOB=66718dd22467e13d741b26759f295836c3aa369f
+P7C17_EVIDENCE_BLOB=RECORDED_AFTER_FINAL_EVIDENCE_EDIT
 P7C17_HELPER_BLOB=NONE
 ```
 
@@ -166,26 +168,71 @@ All filesystem mutations above were confined to temporary test directories.
 No real gate was invoked, no real token was created, and no historical ledger
 or retained material was changed.
 
+## Repair-1 authority repairs
+
+The P7.C17 parent now applies the complete inherited terminal gate: watchdog
+completion and child-result validity, root-only child authority, PASS/true
+status, runtime quiescence, exact effects, one child, zero retry, clean owned
+group/zombie/scan facts, correlated facts and attribution authorities, exact
+facts evaluation, marker-policy authority, digest agreement, and both
+failed/unavailable predicate counts. Terminal mapping is `TIMEOUT`,
+`UNKNOWN`, `CONFIRMED_PENDING`, `COMPLETED`, or fail-closed `FAILED` in that
+order. Recovery stores only bounded safe facts and the CLI projects the final
+durable ledger state.
+
+Child validation projects all inherited P7.C16 fields through the accepted
+validator and adds the P7.C17 facts digest plus both predicate counts. The
+production watchdog deadline is
+`P7C16_REAL_WATCHDOG_HARD_DEADLINE + 60.0`, leaving a bounded evidence
+processing margin.
+
+The post-delete schema fact is captured from the inherited post-delete schema
+read through one await-helper delegation. No production schema literal is
+used to construct observed facts. Isolation-envelope validity is captured
+independently from schema and sqlite/log descendant observations. The facts
+authority is written, read back root-only, independently evaluated, and then
+the frozen acceptance oracle is called exactly once; disagreement fails
+closed.
+
+Unrelated-removal attribution has a dedicated 2 MiB bound and 4096-entry
+per-list bound with no truncation. Sanitized before/after/target/removed
+SHA-256 identities replay the frozen set subtraction exactly. Near-maximum
+and over-bound fixtures, including the removed regular-file path without a
+thread-ID substring, are covered.
+
 ## Validation
 
-Focused P7.C17: 10 tests passed.
+Focused P7.C17 Repair-1: 21 tests passed, 29 subtests passed. This includes
+the marker-policy regression, actual positive handoff, schema/evaluator
+matrix, independent envelope distinction, child-authority projection,
+parent group/timeout/facts/attribution gates, bounded attribution limits,
+durable-state CLI projection, and disabled smoke.
 
-The old-marker reproduction and corrected marker matrix are included in that
-focused suite. Root-only authority safety/correlation, predicate
-reconstruction, attribution replay, terminal outcome, disabled smoke, and
-default-entrypoint handoff are included there as well. Additional offline
-P7.C16/P7.C15/P7.C14/P7.C13 and P7.C12 regressions, plus relevant P7.C2–P7.C5
-non-real regressions, passed. Complete non-real pytest passed with 1061 tests
-and 647 subtests. Category unittest discovery passed: unit 485, integration
-493, acceptance 83. Combined unittest discovery was attempted with every
-real gate unset but stalled in the existing real-test area after known
-timeout/resource warnings and was stopped; this is reported separately and
-is not a P7.C17 failure. A full repository pytest run likewise encountered
-only existing historical P7.C7–P7.C11 latch contamination and an immutable
-consumed P7.C15 source expectation. Compileall, diff-check, leakage, and exact
-scope checks passed after this evidence edit. Any immutable consumed-latch
-failures were reported separately and were not repaired.
+Additional offline results: P7.C13 75 tests/36 subtests passed; P7.C14 and
+P7.C12 21 tests/92 subtests passed; P7.C16 14 tests/7 subtests passed; P7.C2–
+P7.C5 106 tests/54 subtests passed. The P7.C15 suite retains one existing
+offline production-positive failure (`result.status == FAILED` instead of
+`COMPLETED`); no P7.C15 source or material was changed.
 
+Complete repository pytest with every P7 real gate unset was blocked by the
+pre-existing consumed P7.C10 latch
+`/root/.codexcontrol/p7c10-real-latch.json`; it was not removed or reset.
+Unittest discovery was attempted with every gate unset and terminated inside
+the existing real-test area without a final discovery summary (only existing
+timeout/resource warnings were emitted). These immutable historical results
+are reported separately and are not P7.C17 repairs. Compileall and
+`git diff --check` passed; leakage/security and exact changed-path checks are
+recorded below.
+
+P7C17_REPAIR1_FULL_PARENT_TERMINAL_GATE=PASS
+P7C17_REPAIR1_CHILD_RESULT_AUTHORITY=PASS
+P7C17_REPAIR1_ACTUAL_SCHEMA_AND_ENVELOPE_AUTHORITY=PASS
+P7C17_REPAIR1_FACTS_EVALUATOR_EQUIVALENCE=PASS
+P7C17_REPAIR1_FACTS_AND_ATTRIBUTION_CORRELATION=PASS
+P7C17_REPAIR1_BOUNDED_ATTRIBUTION_AUTHORITY=PASS
+P7C17_REPAIR1_RICH_PARENT_RECOVERY=PASS
+P7C17_REPAIR1_DURABLE_STATE_CLI_PROJECTION=PASS
+P7C17_REPAIR1_DEFAULT_ENTRYPOINT_FULL_HANDOFF=PASS
 P7C17_PREP_STATIC_MARKER_FALSE_POSITIVE_REPRODUCED=PASS
 P7C17_PREP_CURRENT_RUN_MARKER_POLICY=PASS
 P7C17_PREP_UNRELATED_STATIC_TEXT_IMMUNITY=PASS
