@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -282,6 +283,13 @@ class ImmutableSemanticCatalogSnapshot:
             tuple((model.model_id, model.default_reasoning_effort) for model in catalog.models),
             catalog.fetched_at, catalog.expires_at,
         )
+
+    def default_reasoning_effort_for(self, model_id: str) -> str:
+        """Resolve effort by selected model identity, never catalog order."""
+        for selected_id, effort in self.default_reasoning_effort:
+            if selected_id == model_id:
+                return effort
+        raise P7C15PreparationError("selected model reasoning authority missing")
 
 
 class GenerationReboundCatalogView:
@@ -643,6 +651,16 @@ def p7c15_parent_exit_projection(result: P7C15WatchdogResult, *, gate_enabled: b
     return 0 if result.status == "COMPLETED" and result.child_result_valid else 1
 
 
+def p7c15_exact_effect_pass_gate(counts: Mapping[str, int]) -> bool:
+    """Parent-owned exact effect matrix; ceilings alone cannot pass."""
+    required = ("new_threads", "model/list", "thread/start", "thread/resume", "turn/start",
+                "approval_responses", "allow_responses", "turn/interrupt", "thread/delete")
+    forbidden = ("thread/read", "thread/list", "second_child", "real_retry", "telegram")
+    return all(type(counts.get(key)) is int and counts[key] == P7C15_FROZEN_EFFECT_BUDGET[key] for key in required) and all(
+        type(counts.get(key)) is int and counts[key] == 0 for key in forbidden
+    )
+
+
 def _p7c15_child_result_payload(
     boot: Mapping[str, Any], result: Mapping[str, Any], pre_child_budget: EffectBudget,
     child: Any | None = None,
@@ -671,6 +689,71 @@ class _LiveChild:
         self.budget = budget
 
 
+async def _observe_turn3_request_after_response(
+    *, client: Any, turn_lifecycle: Any, binding: Any,
+    timeout: float, join_timeout: float,
+) -> tuple[Any | None, bool, bool]:
+    """Own the post-response request observer through Turn-3 convergence."""
+    terminal_task = asyncio.create_task(turn_lifecycle.wait_turn(binding))
+    request_task = asyncio.create_task(client.next_server_request())
+    terminal: Any | None = None
+    second_request = False
+    same_slice = False
+    fault = False
+    cancel_request = False
+    try:
+        done, _ = await asyncio.wait(
+            (terminal_task, request_task), timeout=timeout,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            raise P7C15PreparationError("Turn-3 terminal/request convergence timeout")
+        await asyncio.sleep(0)
+        if request_task.done():
+            if not request_task.cancelled():
+                try:
+                    request_task.result()
+                    second_request = True
+                except Exception:
+                    fault = True
+            if terminal_task.done():
+                same_slice = True
+            else:
+                try:
+                    terminal = await asyncio.wait_for(asyncio.shield(terminal_task), timeout=timeout)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    fault = True
+        elif terminal_task.done():
+            try:
+                terminal = terminal_task.result()
+            except (asyncio.CancelledError, Exception):
+                fault = True
+            await asyncio.sleep(0)
+            if request_task.done() and not request_task.cancelled():
+                try:
+                    request_task.result()
+                    second_request = True
+                    same_slice = True
+                except Exception:
+                    fault = True
+    finally:
+        if not terminal_task.done():
+            terminal_task.cancel()
+        if not request_task.done():
+            cancel_request = True
+            request_task.cancel()
+        for task in (terminal_task, request_task):
+            try:
+                await asyncio.wait_for(task, timeout=join_timeout)
+            except asyncio.CancelledError:
+                pass
+            except (asyncio.TimeoutError, Exception):
+                fault = True
+    if not request_task.done() or (request_task.cancelled() and not cancel_request):
+        fault = True
+    return terminal, second_request or same_slice, fault
+
+
 class P7C15ProductionChildOrchestrator:
     """The production child graph with the P7.C15 generation correction.
 
@@ -680,9 +763,13 @@ class P7C15ProductionChildOrchestrator:
     """
 
     def __init__(self, boot: Mapping[str, Any], journal: P7C15StageJournal, *,
-                 runtime_factory: Callable[[], Any] | None = None, force_failure: bool = False) -> None:
+                 runtime_factory: Callable[[], Any] | None = None, force_failure: bool = False,
+                 stage_timeouts: Mapping[str, float] | None = None) -> None:
         self.boot, self.journal, self.runtime_factory = boot, journal, runtime_factory
         self.force_failure, self.budget = force_failure, EffectBudget(dict(boot["effect_ceiling"]))
+        self.stage_timeouts = dict(p7c13.REAL_STAGE_TIMEOUTS)
+        if stage_timeouts is not None:
+            self.stage_timeouts.update(stage_timeouts)
         self.last_confirmed_stage = "INSTALLED_AUTHORITY"
 
     def _mark(self, stage: str, state: str = "CONFIRMED", effect_class: str = "none", error: BaseException | None = None) -> None:
@@ -701,7 +788,22 @@ class P7C15ProductionChildOrchestrator:
             "approval_target": Path(self.boot["approval_target"]), "ledger": Path(self.boot["ledger_path"]),
             "boot": Path(self.boot["boot_authority_path"]), "result": Path(self.boot["child_result_path"]),
         })
-        workdir = p7c13.create_fresh_private_workdir(self.boot["workdir"])
+        workdir = await p7c13._await_owned(
+            asyncio.to_thread(p7c13.create_fresh_private_workdir, self.boot["workdir"]),
+            timeout=self.stage_timeouts["thread_start"], stage="fresh workdir creation",
+        )
+        workdir_path = Path(workdir.path)
+        workdir_stat = workdir_path.lstat()
+        workdir_identity = (workdir_stat.st_dev, workdir_stat.st_ino)
+        p7c13.validate_stable_workdir(workdir_path, workdir_identity)
+        profile = p7c13.CodexProfile(P7C15_PROFILE_ID, self.boot["codex_home"], "P7.C15", self.boot["isolated_root"])
+        isolation_authority = p7c13.IsolationPathAuthority(
+            (profile,), controller_db_root=str(Path(self.boot["controller_db"]).parent),
+            repository_root=str(_repository()), protected_roots=(),
+        )
+        isolated_state = p7c13.IsolatedStateRoot(isolation_authority)
+        isolated_state.provision(profile)
+        isolated_state.validate(profile)
         manager = self.runtime_factory() if self.runtime_factory is not None else _build_p7c15_runtime_manager(self.boot)
         configure = getattr(manager, "configure", None)
         if callable(configure):
@@ -709,12 +811,23 @@ class P7C15ProductionChildOrchestrator:
         tracker = manager if isinstance(manager, GenerationTrackingRuntimeManager) else GenerationTrackingRuntimeManager(manager)
         self._mark("INSTALLED_AUTHORITY", effect_class="authority")
         self.budget.record("new_threads")
-        await tracker.acquire(P7C15_PROFILE_ID)
+        runtime = await p7c13._await_owned(
+            tracker.acquire(P7C15_PROFILE_ID),
+            timeout=self.stage_timeouts["runtime_acquire_generation_1"], stage="runtime acquire generation 1",
+        )
+        client = runtime.client
+        memory_marker, response_marker = p7c13.fresh_non_secret_markers()
+        configure_markers = getattr(client, "configure_markers", None)
+        if callable(configure_markers):
+            configure_markers(memory_marker, response_marker)
         self._mark("RUNTIME_GENERATION_1", effect_class="runtime")
         catalog_adapter = P7C15SingleCatalogAcquisition(CodexModelCatalogAdapter(tracker))
         self._mark("MODEL_LIST_DISPATCH", "DISPATCHED", "model/list")
         self.budget.record("model/list")
-        catalog = await catalog_adapter.acquire_once(P7C15_PROFILE_ID)
+        catalog = await p7c13._await_owned(
+            catalog_adapter.acquire_once(P7C15_PROFILE_ID),
+            timeout=self.stage_timeouts["model_list"], stage="model list",
+        )
         self._mark("MODEL_LIST_CONFIRMED", effect_class="model/list")
         snapshot = ImmutableSemanticCatalogSnapshot.from_catalog(catalog)
         rebound = GenerationReboundCatalogView(snapshot, tracker)
@@ -722,44 +835,65 @@ class P7C15ProductionChildOrchestrator:
         turn_lifecycle = CodexTurnLifecycleAdapter(tracker, rebound)
         self._mark("THREAD_START_DISPATCH", "DISPATCHED", "thread/start")
         self.budget.record("thread/start")
-        started = await thread_lifecycle.start(
+        selected_model = snapshot.default_model
+        reasoning_effort = snapshot.default_reasoning_effort_for(selected_model)
+        started = await p7c13._await_owned(thread_lifecycle.start(
             P7C15_PROFILE_ID, model_id=snapshot.default_model,
-            reasoning_effort=snapshot.default_reasoning_effort[0][1], working_directory=workdir,
-        )
+            reasoning_effort=reasoning_effort, working_directory=workdir,
+        ), timeout=self.stage_timeouts["thread_start"], stage="thread start")
         if started.status is not ThreadOperationStatus.START_CONFIRMED or started.binding is None:
             raise P7C15PreparationError("P7.C15 thread start not confirmed")
         binding = started.binding
         self._mark("THREAD_START_CONFIRMED", effect_class="thread/start")
         self._mark("TURN1_START_DISPATCH", "DISPATCHED", "turn/start")
         self.budget.record("turn/start")
-        turn1 = await turn_lifecycle.start_turn(
-            thread_binding=binding, model_id=snapshot.default_model, reasoning_effort="medium",
-            user_text="Remember the P7.C15 marker.", working_directory=workdir,
-        )
+        turn1 = await p7c13._await_owned(turn_lifecycle.start_turn(
+            thread_binding=binding, model_id=selected_model, reasoning_effort=reasoning_effort,
+            user_text=f"Remember {memory_marker}; respond with {response_marker}.", working_directory=workdir,
+        ), timeout=self.stage_timeouts["turn1_start_terminal"], stage="turn 1 start")
         if turn1.status is not TurnStartStatus.CONFIRMED or turn1.binding is None:
             raise P7C15PreparationError("P7.C15 Turn 1 not confirmed")
-        await turn_lifecycle.wait_turn(turn1.binding)
+        turn1_terminal = await p7c13._await_owned(
+            turn_lifecycle.wait_turn(turn1.binding),
+            timeout=self.stage_timeouts["turn1_start_terminal"], stage="turn 1 terminal",
+        )
+        if turn1_terminal.status is not TurnTerminalStatus.COMPLETED or response_marker not in " ".join(message.text for message in turn1_terminal.messages):
+            raise P7C15PreparationError("Turn-1 response marker missing")
         self._mark("TURN1_START_CONFIRMED", effect_class="turn/start")
         self._mark("TURN1_TERMINAL", effect_class="terminal")
-        await tracker.shutdown_profile(P7C15_PROFILE_ID)
+        await p7c13._await_owned(
+            tracker.shutdown_profile(P7C15_PROFILE_ID),
+            timeout=self.stage_timeouts["runtime_shutdown_generation_1"], stage="runtime shutdown generation 1",
+        )
         self._mark("RUNTIME_SHUTDOWN_GENERATION_1", effect_class="runtime")
-        await tracker.acquire(P7C15_PROFILE_ID)
+        second_runtime = await p7c13._await_owned(
+            tracker.acquire(P7C15_PROFILE_ID),
+            timeout=self.stage_timeouts["runtime_acquire_generation_2"], stage="runtime acquire generation 2",
+        )
         self._mark("RUNTIME_GENERATION_2", effect_class="runtime")
         self._mark("THREAD_RESUME_DISPATCH", "DISPATCHED", "thread/resume")
         self.budget.record("thread/resume")
-        resumed = await thread_lifecycle.resume(binding=binding, working_directory=workdir)
+        resumed = await p7c13._await_owned(
+            thread_lifecycle.resume(binding=binding, working_directory=workdir),
+            timeout=self.stage_timeouts["thread_resume"], stage="thread resume",
+        )
         if resumed.status is not ThreadOperationStatus.RESUME_CONFIRMED:
             raise P7C15PreparationError("P7.C15 thread resume not confirmed")
         self._mark("THREAD_RESUME_CONFIRMED", effect_class="thread/resume")
         self._mark("TURN2_START_DISPATCH", "DISPATCHED", "turn/start")
         self.budget.record("turn/start")
-        turn2 = await turn_lifecycle.start_turn(
-            thread_binding=binding, model_id=snapshot.default_model, reasoning_effort="medium",
-            user_text="Return the exact remembered marker.", working_directory=workdir,
-        )
+        turn2 = await p7c13._await_owned(turn_lifecycle.start_turn(
+            thread_binding=binding, model_id=selected_model, reasoning_effort=reasoning_effort,
+            user_text=f"Return the exact remembered marker {memory_marker}.", working_directory=workdir,
+        ), timeout=self.stage_timeouts["turn2_start_terminal"], stage="turn 2 start")
         if turn2.status is not TurnStartStatus.CONFIRMED or turn2.binding is None:
             raise P7C15PreparationError("P7.C15 Turn 2 not confirmed")
-        await turn_lifecycle.wait_turn(turn2.binding)
+        turn2_terminal = await p7c13._await_owned(
+            turn_lifecycle.wait_turn(turn2.binding),
+            timeout=self.stage_timeouts["turn2_start_terminal"], stage="turn 2 terminal",
+        )
+        if turn2_terminal.status is not TurnTerminalStatus.COMPLETED or memory_marker not in " ".join(message.text for message in turn2_terminal.messages):
+            raise P7C15PreparationError("Turn-2 memory marker missing")
         self._mark("TURN2_START_CONFIRMED", effect_class="turn/start")
         self._mark("TURN2_TERMINAL", effect_class="terminal")
         if self.force_failure:
@@ -768,20 +902,17 @@ class P7C15ProductionChildOrchestrator:
         target = Path(self.boot["approval_target"])
         if target.exists() or target.is_symlink():
             raise P7C15PreparationError("approval target must be absent")
-        client = getattr(getattr(manager, "client", None), "client", None) or getattr(manager, "client", None)
-        if client is None:
-            runtime = await tracker.acquire(P7C15_PROFILE_ID)
-            client = runtime.client
+        client = second_runtime.client
 
         # Turn 3 is an actual adapter dispatch.  The bridge/operator owns the
         # only request correlation and response path.
         turn3_prompt = p7c13.c11_explicit_escalation_prompt(str(target))
         self._mark("TURN3_START_DISPATCH", "DISPATCHED", "turn/start")
         self.budget.record("turn/start")
-        turn3 = await turn_lifecycle.start_turn(
-            thread_binding=binding, model_id=snapshot.default_model, reasoning_effort="medium",
+        turn3 = await p7c13._await_owned(turn_lifecycle.start_turn(
+            thread_binding=binding, model_id=selected_model, reasoning_effort=reasoning_effort,
             user_text=turn3_prompt, working_directory=workdir,
-        )
+        ), timeout=self.stage_timeouts["turn3_start_approval_terminal"], stage="turn 3 start")
         if turn3.status is not TurnStartStatus.CONFIRMED or turn3.binding is None:
             raise P7C15PreparationError("Turn-3 actual binding required")
         self._mark("TURN3_START_CONFIRMED", effect_class="turn/start")
@@ -795,29 +926,36 @@ class P7C15ProductionChildOrchestrator:
         operator.on_correlated = lambda: self._mark("APPROVAL_REQUEST", effect_class="approval")
         operator.turn_binding = turn3.binding
         bridge = p7c13.CodexApprovalBridge(profile_id=P7C15_PROFILE_ID, client=client, operator=operator)
-        approval = await bridge.handle_next()
-        response_count = int(getattr(client, "response_calls", 0))
-        if response_count != 1 or operator.request_count != 1:
-            raise P7C15PreparationError("exactly one correlated approval request/response required")
+        approval = await p7c13._await_owned(
+            bridge.handle_next(), timeout=self.stage_timeouts["turn3_start_approval_terminal"], stage="turn 3 approval",
+        )
         self._mark("APPROVAL_RESPONSE", effect_class="approval_responses")
-        if int(getattr(client, "pending_approval_count", 0)) != 0:
-            raise P7C15PreparationError("second approval request is non-pass")
+        recovery.append({"event": "RESPONSE", "request_ordinal": operator.request_count, "response_count": 1, "status": approval.status.value})
+        wire_record = wire.read()
+        recovery_records = recovery.read()
         if (
             approval.status is not p7c13.ApprovalHandlingStatus.ALLOWED
+            or operator.request_count != 1
             or operator.allow_count != 1 or operator.deny_count != 0
             or operator.response_unknown or self.budget.count("approval_responses") != 1
             or self.budget.count("allow_responses") != 1
+            or wire_record["request_ordinal"] != 1
+            or sum(record.get("event") == "RESPONSE" for record in recovery_records) != 1
         ):
             raise P7C15PreparationError("C12 exact matcher ALLOW required")
         self._mark("ALLOW", effect_class="allow_responses")
 
-        turn3_terminal = await turn_lifecycle.wait_turn(turn3.binding)
-        if turn3_terminal.status is not TurnTerminalStatus.COMPLETED:
-            raise P7C15PreparationError("Turn-3 completion required")
+        turn3_terminal, second_request, observer_fault = await _observe_turn3_request_after_response(
+            client=client, turn_lifecycle=turn_lifecycle, binding=turn3.binding,
+            timeout=self.stage_timeouts["turn3_start_approval_terminal"],
+            join_timeout=self.stage_timeouts["final_runtime_local_convergence"],
+        )
+        if observer_fault or second_request or turn3_terminal is None or turn3_terminal.status is not TurnTerminalStatus.COMPLETED:
+            raise P7C15PreparationError("Turn-3 completion or second-request observer failed")
         self._mark("TURN3_TERMINAL", effect_class="terminal")
         target_stat = target.lstat()
         if (
-            not stat.S_ISREG(target_stat.st_mode) or target_stat.st_uid != os.getuid()
+            not stat.S_ISREG(target_stat.st_mode) or target_stat.st_uid != 0
             or target_stat.st_nlink != 1 or stat.S_IMODE(target_stat.st_mode) != 0o600
         ):
             raise P7C15PreparationError("approval target metadata unsafe")
@@ -828,15 +966,18 @@ class P7C15ProductionChildOrchestrator:
         # the actual interrupt RPC.
         self._mark("TURN4_START_DISPATCH", "DISPATCHED", "turn/start")
         self.budget.record("turn/start")
-        turn4 = await turn_lifecycle.start_turn(
-            thread_binding=binding, model_id=snapshot.default_model, reasoning_effort="medium",
+        turn4 = await p7c13._await_owned(turn_lifecycle.start_turn(
+            thread_binding=binding, model_id=selected_model, reasoning_effort=reasoning_effort,
             user_text=p7c13.TURN4_STIMULUS, working_directory=workdir,
-        )
+        ), timeout=self.stage_timeouts["turn4_start"], stage="turn 4 start")
         if turn4.status is not TurnStartStatus.CONFIRMED or turn4.binding is None:
             raise P7C15PreparationError("Turn-4 actual binding required")
         self._mark("TURN4_START_CONFIRMED", effect_class="turn/start")
         turn4_gate = await p7c13.observe_owned_turn4(
             client=client, turn_lifecycle=turn_lifecycle, binding=turn4.binding, budget=self.budget,
+            active_timeout=self.stage_timeouts["turn4_active_observation"],
+            interrupt_timeout=self.stage_timeouts["turn4_interrupt_terminal"],
+            join_timeout=self.stage_timeouts["final_runtime_local_convergence"],
         )
         if not turn4_gate.passed:
             if turn4_gate.unexpected_request_count:
@@ -846,29 +987,53 @@ class P7C15ProductionChildOrchestrator:
         if getattr(turn4_gate.terminal, "status", None) is not TurnTerminalStatus.FAILED:
             raise P7C15PreparationError("Turn-4 definitive terminal missing")
         self._mark("TURN4_TERMINAL", effect_class="terminal")
-        await tracker.shutdown_profile(P7C15_PROFILE_ID)
+        await p7c13._await_owned(
+            tracker.shutdown_profile(P7C15_PROFILE_ID),
+            timeout=self.stage_timeouts["runtime_shutdown_before_scan"], stage="runtime shutdown before oracle",
+        )
         self._mark("RUNTIME_SHUTDOWN_BEFORE_ORACLE", effect_class="runtime")
+        # The canonical application delete still needs a confirmed live
+        # generation; this reacquire changes only generation authority and
+        # cannot trigger another model/list acquisition.
+        await p7c13._await_owned(
+            tracker.acquire(P7C15_PROFILE_ID),
+            timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="runtime acquire delete generation",
+        )
 
         profile = p7c13.CodexProfile(P7C15_PROFILE_ID, self.boot["codex_home"], "P7.C15", self.boot["isolated_root"])
-        markers = (str(target).encode(), p7c13.TURN4_STIMULUS.encode(), P7C15_PROFILE_ID.encode())
+        markers = (
+            memory_marker.encode(), response_marker.encode(), str(target).encode(),
+            turn3_prompt.encode(), p7c13.TURN4_STIMULUS.encode(),
+        )
         oracle = p7c13.BoundedTargetOracle(profile, binding.thread_id, markers)
         before = oracle.observe()
         if not p7c13.predelete_observation_conclusive(before) or before.scan_errors:
             raise P7C15PreparationError("pre-delete physical oracle inconclusive")
+        unrelated_before, target_paths = p7c13.target_metadata_snapshot(profile, binding.thread_id)
 
-        storage = await p7c13.SqliteStorage.open(self.boot["controller_db"], now_ms=lambda: 10)
-        schema_version = await storage.read(lambda connection: int(connection.execute("PRAGMA user_version").fetchone()[0]))
+        storage = await p7c13._await_owned(
+            p7c13.SqliteStorage.open(self.boot["controller_db"]),
+            timeout=self.stage_timeouts["controller_open_binding"], stage="controller open",
+        )
+        schema_version = await p7c13._await_owned(
+            storage.read(lambda connection: int(connection.execute("PRAGMA user_version").fetchone()[0])),
+            timeout=self.stage_timeouts["controller_open_binding"], stage="schema read",
+        )
         if schema_version != 4:
             await storage.close()
             raise P7C15PreparationError("controller schema is not v4")
-        repository = p7c13.DialogueRepository(storage, now_ms=lambda: 10)
-        dialogue = await repository.create_intent(
-            dialogue_id=f"p7c15-{self.boot['run_id_hash'][:24]}", server_id="server-80", profile_id=P7C15_PROFILE_ID,
+        repository = p7c13.DialogueRepository(storage)
+        dialogue = await p7c13._await_owned(
+            repository.create_intent(dialogue_id=f"p7c15-{self.boot['run_id_hash'][:24]}", server_id="server-80", profile_id=P7C15_PROFILE_ID),
+            timeout=self.stage_timeouts["controller_open_binding"], stage="dialogue create",
         )
-        idle = await repository.confirm_created(
-            dialogue_id=dialogue.dialogue_id, expected_version=dialogue.version, thread_id=binding.thread_id,
+        idle = await p7c13._await_owned(
+            repository.confirm_created(dialogue_id=dialogue.dialogue_id, expected_version=dialogue.version, thread_id=binding.thread_id),
+            timeout=self.stage_timeouts["controller_open_binding"], stage="dialogue confirm",
         )
-        durable = await repository.get_live()
+        durable = await p7c13._await_owned(
+            repository.get_live(), timeout=self.stage_timeouts["controller_open_binding"], stage="durable binding read",
+        )
         if durable is None or durable.state is not p7c13.DialogueState.IDLE or durable.thread_id != binding.thread_id or durable.profile_id != P7C15_PROFILE_ID:
             await storage.close()
             raise P7C15PreparationError("schema-v4 durable binding invalid")
@@ -887,24 +1052,58 @@ class P7C15ProductionChildOrchestrator:
                 )
                 if isinstance(manager, _FakeRuntimeManager)
                 else p7c13.DeleteStorageCleanupCoordinator(storage, tracker)
-            ), now_ms=lambda: 20,
+            ),
         )
         self._mark("THREAD_DELETE_DISPATCH", "DISPATCHED", "thread/delete")
         self.budget.record("thread/delete")
-        application = await service.delete(p7c13.DialogueDeleteRequest(idle.dialogue_id, idle.version))
+        application = await p7c13._await_owned(
+            service.delete(p7c13.DialogueDeleteRequest(idle.dialogue_id, idle.version)),
+            timeout=self.stage_timeouts["canonical_application_delete"], stage="canonical application delete",
+        )
         if official.calls != 1 or official.status is None:
             await storage.close()
             raise P7C15PreparationError("official delete observation missing")
         self._mark("THREAD_DELETE_RESULT", effect_class="thread/delete")
         application_status = getattr(application.status, "value", None)
         self._mark("APPLICATION_DELETE_RESULT", effect_class="application")
-        await tracker.shutdown_profile(P7C15_PROFILE_ID)
+        if getattr(manager, "scenario", "") == "postdelete_schema_drift":
+            await p7c13._await_owned(
+                storage.read(lambda connection: connection.execute("PRAGMA user_version = 3").fetchone()),
+                timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="test schema drift",
+            )
+        await p7c13._await_owned(
+            tracker.shutdown_profile(P7C15_PROFILE_ID),
+            timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="final runtime shutdown",
+        )
         self._mark("RUNTIME_SHUTDOWN_FINAL", effect_class="runtime")
-        tombstone = await p7c13.DeletionRepository(storage, now_ms=lambda: 20).get_tombstone(idle.dialogue_id)
-        live_after = await repository.get_live()
-        await storage.close()
+        tombstone = await p7c13._await_owned(
+            p7c13.DeletionRepository(storage).get_tombstone(idle.dialogue_id),
+            timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="tombstone read",
+        )
+        live_after = await p7c13._await_owned(
+            repository.get_live(), timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="post-delete live-binding read",
+        )
+        post_schema_version = await p7c13._await_owned(
+            storage.read(lambda connection: int(connection.execute("PRAGMA user_version").fetchone()[0])),
+            timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="post-delete schema read",
+        )
+        await p7c13._await_owned(storage.close(), timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="storage close")
 
-        after = oracle.observe()
+        after_persistent = p7c13.BoundedTargetOracle(
+            profile, binding.thread_id, markers, families=("persistent_sessions", "persistent_history"),
+        ).observe()
+        after_isolated = p7c13.BoundedTargetOracle(
+            profile, binding.thread_id, markers, families=("isolated_sqlite", "isolated_logs"),
+        ).observe()
+        unrelated_after, _ = p7c13.target_metadata_snapshot(profile, binding.thread_id)
+        unrelated_removed = p7c13.derived_unrelated_removal_fact(
+            unrelated_before, unrelated_after, target_paths=target_paths,
+        )
+        try:
+            isolated_state.validate(profile)
+            envelope_valid = True
+        except Exception:
+            envelope_valid = False
         sqlite_descendants = p7c13.bounded_descendant_observation(Path(self.boot["isolated_sqlite"]))
         logs_descendants = p7c13.bounded_descendant_observation(Path(self.boot["isolated_logs"]))
         tombstone_bounded = (
@@ -919,27 +1118,29 @@ class P7C15ProductionChildOrchestrator:
         if recovery_class == "UNKNOWN":
             return {
                 "status": "UNKNOWN", "verdict": False, "last_confirmed_stage": self.last_confirmed_stage,
-                "outcomes": {"delete": official_status, "application": application_status or "UNKNOWN"},
+                "outcomes": {"delete": official_status, "application": application_status or "UNKNOWN", "post_schema": post_schema_version},
                 "classes": {"recovery": "UNKNOWN"}, "runtime_child_quiescent": self._runtime_quiescent(manager),
             }
         if recovery_class == "CONFIRMED_PENDING":
             return {
                 "status": "CONFIRMED_PENDING", "verdict": False, "last_confirmed_stage": self.last_confirmed_stage,
-                "outcomes": {"delete": official_status, "application": application_status or "UNKNOWN"},
+                "outcomes": {"delete": official_status, "application": application_status or "UNKNOWN", "post_schema": post_schema_version},
                 "classes": {"recovery": "CONFIRMED_PENDING"}, "runtime_child_quiescent": self._runtime_quiescent(manager),
             }
         clean_envelope = (
-            sqlite_descendants[1] == sqlite_descendants[2] == 0
+            envelope_valid and post_schema_version == 4
+            and sqlite_descendants[1] == sqlite_descendants[2] == 0
             and logs_descendants[1] == logs_descendants[2] == 0
         )
         accepted = p7c13.post_delete_acceptance(
             official_delete=official_status, application_result=application_status or "",
             tombstone_bounded=tombstone_bounded, live_binding=live_after is not None,
             envelope_valid=clean_envelope, isolated_sqlite_descendants=sqlite_descendants[0],
-            isolated_logs_descendants=logs_descendants[0], persistent=after,
-            isolated=after, scan_errors=sqlite_descendants[3] + logs_descendants[3],
-            owned_children=0, owned_group_active=False, owned_group_zombies=0,
-            unrelated_signals=0, budgets_ok=recovery_class == "COMPLETED",
+            isolated_logs_descendants=logs_descendants[0], persistent=after_persistent,
+            isolated=after_isolated, scan_errors=sqlite_descendants[3] + logs_descendants[3],
+            owned_children=None, owned_group_active=None, owned_group_zombies=None,
+            unrelated_signals=None, budgets_ok=recovery_class == "COMPLETED",
+            unrelated_target_specific_removal_detected=unrelated_removed,
         )
         if not accepted:
             raise P7C15PreparationError("post-delete observed oracle failed")
@@ -1030,26 +1231,41 @@ class _FakeClient:
         self._server_requests: asyncio.Queue[Any] = asyncio.Queue()
         self._terminal = asyncio.Event()
         self._turn = 0
-        self.response_calls = 0
-        self.responses: list[dict[str, Any]] = []
+        self._wire_responses: list[dict[str, Any]] = []
+        self._wire_choices: list[tuple[str, str | None]] = []
         self.target: Path | None = None
         self.isolated_root: Path | None = None
+        self.persistent_home: Path | None = None
+        self._persistent_target: Path | None = None
+        self._memory_marker = ""
+        self._response_marker = ""
+        self._created_mode: int | None = None
         self.thread_id = "thread-p7c15"
         self.material_marker = b"p7c15-fake-material"
 
     def configure(self, boot: Mapping[str, Any]) -> None:
         self.target = Path(boot["approval_target"])
         self.isolated_root = Path(boot["isolated_root"])
+        self.persistent_home = Path(boot["codex_home"])
         self._workdir = boot["workdir"]
-        self.isolated_root.joinpath("sqlite").mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.isolated_root.joinpath("logs").mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    def configure_markers(self, memory_marker: str, response_marker: str) -> None:
+        self._memory_marker, self._response_marker = memory_marker, response_marker
 
     def _write_material(self) -> None:
         if self.scenario == "predelete_inconclusive" or self.isolated_root is None:
             return
+        material = self.thread_id.encode() + self.material_marker + self._memory_marker.encode() + self._response_marker.encode()
         for root, name in ((self.isolated_root / "sqlite", "state.db"), (self.isolated_root / "logs", "app.log")):
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
-            root.joinpath(name).write_bytes(self.thread_id.encode() + self.material_marker)
+            root.joinpath(name).write_bytes(material)
+        if self.persistent_home is not None and str(self.persistent_home) != "/root/.codex_second":
+            sessions = self.persistent_home / "sessions"
+            sessions.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._persistent_target = sessions / f"{self.thread_id}.jsonl"
+            self._persistent_target.write_bytes(material)
+            if self.scenario == "unrelated_removal":
+                sessions.joinpath("unrelated-p7c15-current-run.jsonl").write_bytes(b"unrelated-current-run")
         if self.scenario == "scan_error":
             self.isolated_root.joinpath("sqlite", "unexpected-link").symlink_to("/tmp")
 
@@ -1071,17 +1287,22 @@ class _FakeClient:
             self.target.write_text("synthetic", encoding="utf-8")
             os.chmod(self.target, 0o644)
         else:
-            self.target.touch(mode=0o600, exist_ok=False)
-
-    @property
-    def pending_approval_count(self) -> int:
-        return self._server_requests.qsize()
+            # 0666 is intentional: the child-installed private umask must
+            # produce the required 0600 target mode.
+            self.target.touch(mode=0o666, exist_ok=False)
+        self._created_mode = stat.S_IMODE(self.target.lstat().st_mode)
 
     async def request(self, method: str, params: Mapping[str, Any]) -> dict[str, Any]:
         self.calls.append(method)
         if method == "model/list":
+            if self.scenario == "non_first_default":
+                return {"data": [
+                    {"id": "model-first", "model": "wire-first", "displayName": "First", "description": "synthetic", "hidden": False, "isDefault": False, "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": "medium"}], "defaultReasoningEffort": "medium"},
+                    {"id": "model-selected", "model": "wire-selected", "displayName": "Selected", "description": "synthetic", "hidden": False, "isDefault": True, "supportedReasoningEfforts": [{"reasoningEffort": "fast", "description": "fast"}], "defaultReasoningEffort": "fast"},
+                ]}
             return {"data": [{"id": "model-p7c15", "model": "wire-p7c15", "displayName": "Synthetic", "description": "synthetic", "hidden": False, "isDefault": True, "supportedReasoningEfforts": [{"reasoningEffort": "medium", "description": "medium"}], "defaultReasoningEffort": "medium"}]}
         if method == "thread/start":
+            self._wire_choices.append((str(params.get("model")), params.get("effort")))
             self._workdir = params["cwd"] if isinstance(params.get("cwd"), str) else "/tmp"
             self._write_material()
             return {"thread": {"id": "thread-p7c15"}}
@@ -1090,16 +1311,28 @@ class _FakeClient:
         if method == "thread/delete":
             if self.scenario == "delete_unknown":
                 return None  # type: ignore[return-value]
-            if self.scenario != "postdelete_residual" and self.isolated_root is not None:
+            if self.scenario not in {"postdelete_residual", "isolated_residual"} and self.isolated_root is not None:
                 for path in tuple(self.isolated_root.rglob("*")):
-                    if path.is_file() or path.is_symlink():
+                    if path.name != ".codexcontrol-state-root-v1" and (path.is_file() or path.is_symlink()):
                         path.unlink()
+            if self._persistent_target is not None and self.scenario != "persistent_residual":
+                self._persistent_target.unlink(missing_ok=True)
+            if self.scenario == "unrelated_removal" and self.persistent_home is not None:
+                self.persistent_home.joinpath("sessions", "unrelated-p7c15-current-run.jsonl").unlink(missing_ok=True)
+            if self.scenario == "isolation_invalid" and self.isolated_root is not None:
+                self.isolated_root.joinpath("unexpected-entry").write_bytes(b"invalid")
             return {}
         if method == "turn/start":
+            self._wire_choices.append((str(params.get("model")), params.get("effort")))
             self._turn += 1
             turn_id = f"turn-p7c15-{self._turn}"
             if self._turn <= 3:
-                self._notifications.put_nowait({"method": "item/completed", "params": {"threadId": params["threadId"], "turnId": turn_id, "item": {"type": "agentMessage", "id": f"item-{self._turn}", "text": "synthetic"}}})
+                text = "synthetic"
+                if self._turn == 1 and self.scenario != "missing_turn1_response_marker":
+                    text = self._response_marker
+                elif self._turn == 2 and self.scenario != "missing_turn2_memory_marker":
+                    text = self._memory_marker
+                self._notifications.put_nowait({"method": "item/completed", "params": {"threadId": params["threadId"], "turnId": turn_id, "item": {"type": "agentMessage", "id": f"item-{self._turn}", "text": text}}})
                 self._notifications.put_nowait({"method": "turn/completed", "params": {"threadId": params["threadId"], "turn": {"id": turn_id, "status": "completed"}}})
             if self._turn == 3:
                 if self.target is None:
@@ -1128,8 +1361,7 @@ class _FakeClient:
         return request is not None
 
     async def respond_server_request(self, request: Any, result: dict[str, Any]) -> None:
-        self.response_calls += 1
-        self.responses.append(dict(result))
+        self._wire_responses.append(dict(result))
         if result.get("decision") == "accept":
             self._materialize_target_after_allow()
 
@@ -1159,6 +1391,8 @@ class _FakeRuntimeManager:
     async def acquire(self, profile_id: str) -> _FakeRuntime:
         if profile_id != self.profile_id:
             raise P7C15PreparationError("profile mismatch")
+        if self.scenario == "stage_timeout" and self.generation == 1:
+            await asyncio.Event().wait()
         return _FakeRuntime(profile_id, self.generation, self.client)
 
     async def shutdown_profile(self, profile_id: str) -> None:
@@ -1182,9 +1416,9 @@ class _P7C15FakeStorageCleanup:
                 "dialogue": await p7c13.DialogueRepository(self.storage).get_live(),
                 "tombstone": None,
             })()
-        finalized = await p7c13.DeletionRepository(self.storage, now_ms=lambda: 30).finalize_confirmed(
+        finalized = await p7c13.DeletionRepository(self.storage).finalize_confirmed(
             dialogue_id=dialogue_id, expected_version=expected_dialogue_version,
-            tombstone_expires_at_ms=100000,
+            tombstone_expires_at_ms=int(time.time() * 1000) + 100000,
         )
         if getattr(self, "missing_tombstone", False):
             return type("CleanupOutcome", (), {
@@ -1331,6 +1565,32 @@ class P7C15AccountingJournalTests(unittest.TestCase):
 
 
 class P7C15GateLedgerTests(unittest.TestCase):
+    def test_parent_exact_effect_gate_rejects_missing_positive_effect(self) -> None:
+        counts = dict(P7C15_FROZEN_EFFECT_BUDGET)
+        self.assertTrue(p7c15_exact_effect_pass_gate(counts))
+        counts["turn/interrupt"] = 0
+        self.assertFalse(p7c15_exact_effect_pass_gate(counts))
+        counts = dict(P7C15_FROZEN_EFFECT_BUDGET)
+        counts["thread/read"] = 1
+        self.assertFalse(p7c15_exact_effect_pass_gate(counts))
+
+    def test_production_watchdog_uses_real_deadline_authority(self) -> None:
+        source = inspect.getsource(P7C15PreparedFutureExecutor._run_production)
+        for name in ("REAL_WATCHDOG_HARD_DEADLINE", "REAL_WATCHDOG_TERM_GRACE", "REAL_WATCHDOG_KILL_GRACE"):
+            self.assertIn(name, source)
+        self.assertNotIn("timeout_seconds=" + "5.0", source)
+        self.assertNotIn("term_grace_seconds=" + "0.2", source)
+        self.assertNotIn("kill_grace_seconds=" + "0.2", source)
+        self.assertGreater(p7c13.REAL_WATCHDOG_HARD_DEADLINE, sum(p7c13.REAL_STAGE_TIMEOUTS.values()))
+
+    def test_production_child_has_no_fake_approval_accounting_dependency(self) -> None:
+        source = inspect.getsource(P7C15ProductionChildOrchestrator) + inspect.getsource(_observe_turn3_request_after_response)
+        self.assertNotIn("response_" + "calls", source)
+        self.assertNotIn("pending_" + "approval_count", source)
+        self.assertNotIn('reasoning_effort="medium"', source)
+        self.assertNotIn("now_ms=lambda", source)
+        self.assertIn("next_server_request", source)
+
     def test_parent_exit_projection_never_maps_failures_to_zero(self) -> None:
         self.assertEqual(2, p7c15_parent_exit_projection(P7C15WatchdogResult("DISABLED"), gate_enabled=False))
         for status in ("FAILED", "UNKNOWN", "CONFIRMED_PENDING", "TIMEOUT"):
@@ -1554,10 +1814,12 @@ def _p7c15_child_result_file_is_valid(path: Path, boot: Mapping[str, Any]) -> bo
 class P7C15PreparedFutureExecutor:
     def __init__(self, ledger: P7C15DurableOneShotLedger, child: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None, *,
                  watchdog: Any | None = None, child_command_factory: Callable[[Path], Sequence[str]] | None = None,
-                 run_paths: Mapping[str, str] | None = None, boot_path: Path | None = None) -> None:
+                 run_paths: Mapping[str, str] | None = None, boot_path: Path | None = None,
+                 test_only_watchdog_bounds: tuple[float, float, float] | None = None) -> None:
         self.ledger, self.child, self.calls = ledger, child, 0
         self.watchdog, self.child_command_factory = watchdog, child_command_factory
         self.run_paths, self.boot_path = dict(run_paths or {}), boot_path
+        self.test_only_watchdog_bounds = test_only_watchdog_bounds
 
     @classmethod
     def production(cls, contract: P7C15ArchitectContract) -> "P7C15PreparedFutureExecutor":
@@ -1572,9 +1834,18 @@ class P7C15PreparedFutureExecutor:
         zombie_group_probe: Callable[[int], int] | None = None,
         group_scan_error_probe: Callable[[int], int] | None = None,
         child_dispatch: Callable[[Path], int] | None = None,
+        test_only_watchdog_bounds: tuple[float, float, float] | None = None,
     ) -> "P7C15PreparedFutureExecutor":
         run_hash = _sha256(os.urandom(32))
-        paths = p7c15_fresh_run_paths(run_hash[:32], root=ledger_path.parent.parent, authority=ledger_path.parent)
+        # Keep each mutable boundary on its own private parent.  This is
+        # required by the inherited topology preflight and prevents a state
+        # root from aliasing the controller/work authority directory.
+        state_parent = ledger_path.parent.parent / f"p7c15-state-parent-{run_hash[:12]}"
+        work_parent = ledger_path.parent.parent / f"p7c15-work-parent-{run_hash[:12]}"
+        state_parent.mkdir(mode=0o700, exist_ok=False)
+        work_parent.mkdir(mode=0o700, exist_ok=False)
+        paths = p7c15_fresh_run_paths(run_hash[:32], root=state_parent, authority=ledger_path.parent)
+        paths["workdir"] = str(work_parent / f"p7c15-work-{run_hash[:32]}")
         boot_path = Path(paths["boot"])
         record = {
             "schema": P7C15_LEDGER_SCHEMA, "state": "RESERVED",
@@ -1599,7 +1870,8 @@ class P7C15PreparedFutureExecutor:
             )
 
         executor = cls(P7C15DurableOneShotLedger(ledger_path), watchdog=watchdog,
-                       child_command_factory=command_factory, run_paths=paths, boot_path=boot_path)
+                       child_command_factory=command_factory, run_paths=paths, boot_path=boot_path,
+                       test_only_watchdog_bounds=test_only_watchdog_bounds)
         executor._offline_child_dispatch = child_dispatch
         executor._record = record
         return executor
@@ -1635,9 +1907,13 @@ class P7C15PreparedFutureExecutor:
                     self.returncode = child_dispatch(Path(command[-1]))
                     return self.returncode
             self.watchdog.process_factory = lambda *_args, **_kwargs: _OfflineProcess()
+        hard_deadline, term_grace, kill_grace = self.test_only_watchdog_bounds or (
+            p7c13.REAL_WATCHDOG_HARD_DEADLINE, p7c13.REAL_WATCHDOG_TERM_GRACE,
+            p7c13.REAL_WATCHDOG_KILL_GRACE,
+        )
         observed = self.watchdog.run(
-            command, result_path=boot["child_result_path"], timeout_seconds=5.0,
-            term_grace_seconds=0.2, kill_grace_seconds=0.2,
+            command, result_path=boot["child_result_path"], timeout_seconds=hard_deadline,
+            term_grace_seconds=term_grace, kill_grace_seconds=kill_grace,
             result_validator=lambda path: _p7c15_child_result_file_is_valid(path, boot),
         )
         child_status = None
@@ -1652,7 +1928,13 @@ class P7C15PreparedFutureExecutor:
             state = "TIMEOUT"
         elif child_status in {"UNKNOWN", "CONFIRMED_PENDING"}:
             state = child_status
-        elif observed.status == "COMPLETED" and child_result_valid and child_status == "PASS" and child_result["verdict"] and observed.owned_group_active == observed.owned_group_zombies == observed.group_scan_errors == 0:
+        elif (
+            observed.status == "COMPLETED" and child_result_valid and child_status == "PASS"
+            and child_result["verdict"] and child_result["runtime_child_quiescent"]
+            and p7c15_exact_effect_pass_gate(child_result["effect_counts"])
+            and observed.child_count == 1 and getattr(self.watchdog, "retry_count", 0) == 0
+            and observed.owned_group_active == observed.owned_group_zombies == observed.group_scan_errors == 0
+        ):
             state = "COMPLETED"
         else:
             state = "FAILED"
@@ -1751,11 +2033,15 @@ def p7c15_synthetic_handoff(*, force_failure: bool = False) -> tuple[P7C15Watchd
 
 
 class P7C15Repair2ContinuationTests(unittest.IsolatedAsyncioTestCase):
-    async def _run_continuation(self, scenario: str = "positive") -> tuple[dict[str, Any], _FakeRuntimeManager, list[dict[str, Any]]]:
+    async def _run_continuation(
+        self, scenario: str = "positive", *, stage_timeouts: Mapping[str, float] | None = None,
+    ) -> tuple[dict[str, Any], _FakeRuntimeManager, list[dict[str, Any]]]:
         contract = _synthetic_contract()
         with tempfile.TemporaryDirectory(prefix="p7c15-repair2-continuation-") as directory:
             root = Path(directory)
             boot = _synthetic_boot(root, contract)
+            boot["codex_home"] = str(root / "persistent-home")
+            Path(boot["codex_home"]).mkdir(mode=0o700)
             authority = root / "authority"
             authority.mkdir(mode=0o700)
             fresh = p7c15_fresh_run_paths("b" * 24, root=root, authority=authority)
@@ -1776,6 +2062,7 @@ class P7C15Repair2ContinuationTests(unittest.IsolatedAsyncioTestCase):
             code = await asyncio.to_thread(
                 p7c15_future_child_main,
                 boot["boot_authority_path"], runtime_factory=factory, verify_installed=False,
+                stage_timeouts=stage_timeouts,
             )
             result = P7C15ChildResultAuthority.read(boot["child_result_path"], boot)
             reader = P7C15StageJournal.__new__(P7C15StageJournal)
@@ -1802,8 +2089,9 @@ class P7C15Repair2ContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(4, manager.client.calls.count("turn/start"))
         self.assertEqual(1, manager.client.calls.count("turn/interrupt"))
         self.assertEqual(1, manager.client.calls.count("thread/delete"))
-        self.assertEqual(1, manager.client.response_calls)
-        self.assertEqual(["accept"], [response.get("decision") for response in manager.client.responses])
+        self.assertEqual(1, len(manager.client._wire_responses))
+        self.assertEqual(["accept"], [response.get("decision") for response in manager.client._wire_responses])
+        self.assertEqual(0o600, manager.client._created_mode)
         self.assertEqual(1, records.count(next(record for record in records if record["stage"] == "APPROVAL_REQUEST")))
         names = [record["stage"] for record in records]
         self.assertLess(names.index("TURN3_START_DISPATCH"), names.index("TURN3_START_CONFIRMED"))
@@ -1812,6 +2100,49 @@ class P7C15Repair2ContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(names.index("THREAD_DELETE_DISPATCH"), names.index("THREAD_DELETE_RESULT"))
         self.assertLess(names.index("THREAD_DELETE_RESULT"), names.index("APPLICATION_DELETE_RESULT"))
         self.assertIn("POST_DELETE_ORACLE", names)
+
+    async def test_real_client_surface_and_second_request_observer(self) -> None:
+        result, manager, _ = await self._run_continuation()
+        client = manager.client
+        self.assertEqual("PASS", result["status"])
+        self.assertNotIn("response_" + "calls", vars(client))
+        self.assertNotIn("pending_" + "approval_count", vars(client))
+        self.assertEqual(1, len(client._wire_responses))
+        second, manager, _ = await self._run_continuation("second_approval")
+        self.assertEqual("FAILED", second["status"])
+        self.assertEqual(1, len(manager.client._wire_responses))
+
+    async def test_non_first_default_model_and_keyed_effort_survive_rebound(self) -> None:
+        result, manager, _ = await self._run_continuation("non_first_default")
+        self.assertEqual("PASS", result["status"])
+        self.assertEqual(1, manager.client.calls.count("model/list"))
+        self.assertEqual({("wire-selected", None), ("wire-selected", "fast")}, set(manager.client._wire_choices))
+        self.assertEqual(4, manager.client._wire_choices.count(("wire-selected", "fast")))
+
+    async def test_markers_are_required_before_progression(self) -> None:
+        missing_response, manager, _ = await self._run_continuation("missing_turn1_response_marker")
+        self.assertEqual("FAILED", missing_response["status"])
+        self.assertEqual(0, manager.shutdowns)
+        self.assertEqual(0, manager.client.calls.count("thread/resume"))
+        missing_memory, manager, _ = await self._run_continuation("missing_turn2_memory_marker")
+        self.assertEqual("FAILED", missing_memory["status"])
+        self.assertEqual(1, manager.shutdowns)
+        self.assertEqual(0, manager.client.calls.count("turn/interrupt"))
+
+    async def test_internal_stage_timeout_is_owned_and_finite(self) -> None:
+        result, manager, _ = await self._run_continuation(
+            "stage_timeout", stage_timeouts={"runtime_acquire_generation_1": 0.01},
+        )
+        self.assertEqual("FAILED", result["status"])
+        self.assertEqual([], manager.client.calls)
+        self.assertEqual(0, result["effect_counts"]["real_retry"])
+
+    async def test_physical_negative_authorities_remain_fail_closed(self) -> None:
+        for scenario in ("postdelete_schema_drift", "isolation_invalid", "unrelated_removal", "persistent_residual", "isolated_residual"):
+            with self.subTest(scenario=scenario):
+                result, manager, _ = await self._run_continuation(scenario)
+                self.assertEqual("FAILED", result["status"])
+                self.assertEqual(1, manager.client.calls.count("thread/delete"))
 
     async def test_required_negative_continuation_matrix_is_fail_closed(self) -> None:
         expectations = {
@@ -1882,16 +2213,21 @@ def _p7c15_parse_child_boot(arguments: Sequence[str]) -> Path:
 def p7c15_future_child_main(
     boot_path: str | Path, *, runtime_factory: Callable[[], Any] | None = None,
     force_failure: bool = False, verify_installed: bool = True,
+    stage_timeouts: Mapping[str, float] | None = None,
 ) -> int:
     """Actual P7.C15 child dispatcher; returns zero only for a valid PASS."""
     boot = P7C15RootOnlyBootAuthority(boot_path).read()
     journal = P7C15StageJournal(boot["stage_journal_path"])
     pre_child_budget = EffectBudget(dict(boot["effect_ceiling"]))
     child: P7C15ProductionChildOrchestrator | None = None
+    previous_umask = os.umask(0o077)
     try:
         if verify_installed:
             p7c13.InstalledRuntimeAuthority().verify()
-        child = P7C15ProductionChildOrchestrator(boot, journal, runtime_factory=runtime_factory, force_failure=force_failure)
+        child = P7C15ProductionChildOrchestrator(
+            boot, journal, runtime_factory=runtime_factory, force_failure=force_failure,
+            stage_timeouts=stage_timeouts,
+        )
         result = asyncio.run(child.run_async())
         result["stage_journal_sha256"] = journal.digest()
         payload = _p7c15_child_result_payload(boot, result, pre_child_budget, child)
@@ -1917,6 +2253,8 @@ def p7c15_future_child_main(
         except (OSError, P7C15PreparationError):
             pass
         return 1
+    finally:
+        os.umask(previous_umask)
 
 
 def _module_main(argv: Sequence[str] | None = None) -> int:

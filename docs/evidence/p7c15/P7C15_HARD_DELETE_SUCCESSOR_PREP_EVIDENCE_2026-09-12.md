@@ -7,18 +7,21 @@ Status: **PREPARATION ONLY / ZERO REAL EFFECT / REAL EXECUTION NOT AUTHORIZED**
 The preparation branch was fetched and checked out without merge or rebase.
 
 ```text
-branch=prep-p7-c15-hard-delete-successor-repair2-2026-09-13
+branch=prep-p7-c15-hard-delete-successor-repair3-2026-09-13
+P7C15_REPAIR3_BASE_HEAD=52e20e42e451955ba0d417a47d89903cadf142f2
+P7C15_REPAIR3_BASE_TREE=03c555267442b8ce6df5255e08152c2cd112908c
+PRIOR_P7C15_LAUNCHER_BLOB=7303cebc8fd157ecef590b4ec9575453ee982176
+PRIOR_P7C15_EVIDENCE_BLOB=5cde70aea9e3b7d089deece991b677e6ea61b74e
 P7C15_REPAIR2_BASE_HEAD=3dc12289fc34b4beac67e7139d740852c5caa2dc
 P7C15_REPAIR2_BASE_TREE=09446141fcb30875f0b8d081bd68b66ac6e73899
-origin/main=903c2aa5e14c3e3a884049be9b421d88072b918d
-origin/main_tree=ad136d233425e38ed24a569ddbb95acb9ea2cce3
-PRIOR_P7C15_LAUNCHER_BLOB=c129ac0820104b9860e50938a6529b3522773dbe
-PRIOR_P7C15_EVIDENCE_BLOB=0b9c0780fdf541e3642a044de7eb7c6099541b1f
-FINAL_P7C15_LAUNCHER_BLOB=7303cebc8fd157ecef590b4ec9575453ee982176
-FINAL_P7C15_EVIDENCE_BLOB=REPORTED_AFTER_FINAL_EDIT_READBACK
+origin/main=064acac971d825e2bf8593930fda79d7ef5d3559
+origin/main_tree=51b86d12404fe616369a5e9394d8b71ef80ee54a
+FINAL_P7C15_LAUNCHER_BLOB=5e964d9408413b968b03e334759037f906174ffd
+FINAL_P7C15_EVIDENCE_BLOB=COMPUTED_AFTER_FINAL_EVIDENCE_EDIT
 FINAL_P7C15_HELPER_BLOB=NONE
-P7C15_LAUNCHER_BLOB=37b5926ad998fb146bba154546059d9d1439bb38
-P7C14_FORENSIC_EVIDENCE_BLOB=648a149e4210ae40fdb44d1669d17f5c0e689af4
+P7C15_REPAIR3_LAUNCHER_BLOB=5e964d9408413b968b03e334759037f906174ffd
+P7C15_REPAIR3_EVIDENCE_BLOB=COMPUTED_AFTER_FINAL_EVIDENCE_EDIT
+P7C14_RETAINED_FORENSIC_ACCEPTANCE_BLOB=0624a5d3c2dd784d97d8ab94d612b33f05fcc1b5
 INHERITED_P7C14_LAUNCHER_BLOB=fcce1352d581522b4c4ab0e5235d0b927d2eceb8
 INHERITED_P7C13_HARNESS_BLOB=5a1fe8e32cd985b1e1845d73266211632e33950c
 INHERITED_P7C12_MATCHER_BLOB=f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1
@@ -251,8 +254,8 @@ Codex/app-server process was started and no P7.C15 real ledger was created.
 focused P7.C15 Repair-1: 18 passed
 P7.C14/P7.C13/P7.C12 offline regression: 96 passed, 128 subtests passed
 P7.C2/P7.C3/P7.C4/P7.C5 fake/non-real: 106 passed, 54 subtests passed
-full pytest: 1881 passed, 7 skipped, 6 retained historical-latch failures
-unittest discovery: 1894 tests, 7 skipped, 5 retained historical-latch failures, 1 retained historical-authority error
+full pytest: 1889 passed, 7 skipped, 6 retained historical P7.C7-P7.C11 failures
+unittest discovery: 1902 tests, 7 skipped, 5 retained historical-latch failures, 1 retained historical-authority error
 Repair-2 production-shaped full continuation: PASS; positive exact effect counts and 10 negative subtests passed
 gate-disabled module smoke: exit 2; P7.C15 production ledger absent; real Codex/app-server starts 0
 P7.C2/P7.C3/P7.C4/P7.C5 explicit files: 106 passed, 54 subtests passed
@@ -318,6 +321,112 @@ P7C15_REPAIR2_OFFICIAL_APPLICATION_DELETE_SEPARATION=PASS
 P7C15_REPAIR2_REAL_POST_DELETE_ORACLE=PASS
 P7C15_REPAIR2_STAGE_EFFECT_COUPLING=PASS
 P7C15_REPAIR2_PRODUCTION_SHAPED_FULL_HANDOFF=PASS
+P7C15_PREP_READY=YES
+
+P7C15_REAL_EXECUTION_AUTHORIZED=NO
+P7C14_REAL_RETRY_AUTHORIZED=NO
+P7C13_REAL_RETRY_AUTHORIZED=NO
+
+P8_STARTED=NO
+P9_STARTED=NO
+
+## Repair-3 final production-hardening preparation
+
+Repair-3 was executed from the exact Repair-2 candidate above, without merge,
+rebase, squash, history rewrite, historical retry, real authorization token,
+real Codex process, app-server, RPC, approval, interrupt, delete, Telegram, or
+P7.C14 orphan cleanup. The only tracked changes are this evidence file and
+the P7.C15 successor launcher.
+
+The child now derives the selected default model and reasoning effort from the
+single authenticated catalog by model identity. Its immutable semantic
+snapshot is rebound only to confirmed runtime generation authority. The
+non-first-default offline catalog selected `wire-selected` with effort `fast`
+for all four turns and dispatched exactly one model/list.
+
+Turn 1 and Turn 2 use fresh bounded in-memory markers. The completed agent
+messages were checked for the response marker before generation restart and
+the exact memory marker after generation-2 resume. Marker plaintext is not
+written to the stage journal or Git evidence. The fake client exposes the
+public protocol operations only; it has no response-count or pending-request
+test property. After the first bridge response, one owned
+`next_server_request()` observer remained live through Turn-3 terminal
+convergence. A second request failed closed and left the one response intact;
+the observer was joined before Turn 4 and sent no response.
+
+The child installs `umask(0o077)` before runtime construction and restores it
+in `finally`. The touch-style fake target was observed as root-owned, regular,
+nlink 1, non-symlink, mode `0600`; an ambient `0644` target failed before
+Turn 4. Production watchdog construction selects
+`p7c13.REAL_WATCHDOG_HARD_DEADLINE`, TERM grace, and KILL grace. The hard
+deadline is greater than the sum of `REAL_STAGE_TIMEOUTS` plus margin; short
+bounds are available only through an explicit offline injection seam.
+
+Every potentially blocking runtime, lifecycle, approval, observer, storage,
+delete, oracle, schema, and close operation is bounded through owned waits.
+The injected runtime-acquire timeout completed finitely, cancelled and joined
+its owned task, dispatched no later RPC, and recorded retry zero.
+
+Before delete, a conclusive target-specific oracle was followed immediately by
+the metadata snapshot `unrelated_before` and `target_paths`. After the single
+canonical `DialogueDeleteService.delete()`, persistent and isolated oracles
+were independently observed for their respective families. Persistent thread,
+marker, and scan residuals were zero; isolated thread, marker, and scan
+residuals were zero. `unrelated_after` was collected and the derived
+`derived_unrelated_removal_fact(...)` was passed to acceptance. Isolation
+authority validation plus sqlite/log special-descendant and symlink counts
+passed. `PRAGMA user_version` was independently re-read after delete and was
+exactly 4. Live binding absence, bounded tombstone, official delete status,
+application status, and runtime-child quiescence were all observed.
+
+Parent-owned process-group facts remain unknown in the child result. The
+parent gate independently requires watchdog COMPLETED, valid root-only child
+result, child PASS/verdict/quiescence, active group 0, zombies 0, scan errors
+0, one child, retry 0, and the exact positive effect matrix:
+
+```text
+new_threads=1 model/list=1 thread/start=1 thread/resume=1 turn/start=4
+approval_responses=1 allow_responses=1 turn/interrupt=1 thread/delete=1
+thread/read=0 thread/list=0 second_child=0 real_retry=0 telegram=0
+```
+
+Production-shaped full handoff counts were one child, one model/list, one
+thread/start, one thread/resume, four turns, one approval request, one wire
+response, one ALLOW, zero DENY, one interrupt, one controller binding, one
+canonical delete and one independent official observation. UNKNOWN,
+CONFIRMED_PENDING_STORAGE, missing/invalid tombstone, live binding, schema
+drift, persistent-only residual, isolated-only residual, scan/proof error,
+unrelated removal, invalid isolation envelope, missing marker, invalid target,
+second request, and missing required effect all remained non-PASS with no
+retry or second destructive effect. Turn-4 unexpected request prevented
+controller/delete continuation.
+
+Repair-3 focused totals: 30 tests, 15 negative subtests, all passed. The
+historical Repair-2 continuation remains covered by the same focused run.
+
+P7C15_REPAIR3_REAL_CLIENT_APPROVAL_AUTHORITY=PASS
+P7C15_REPAIR3_TURN1_TURN2_MEMORY_PROOF=PASS
+P7C15_REPAIR3_REASONING_AUTHORITY=PASS
+P7C15_REPAIR3_PRIVATE_UMASK_TARGET=PASS
+P7C15_REPAIR3_REAL_WATCHDOG_BOUNDS=PASS
+P7C15_REPAIR3_STAGE_TIMEOUT_OWNERSHIP=PASS
+P7C15_REPAIR3_POST_DELETE_OBSERVED_AUTHORITY=PASS
+P7C15_REPAIR3_EXACT_EFFECT_PASS_GATE=PASS
+P7C15_REPAIR3_PRODUCTION_SHAPED_FULL_HANDOFF=PASS
+P7C15_REPAIR3_FINAL_LAUNCHER_BLOB=5e964d9408413b968b03e334759037f906174ffd
+P7C15_REPAIR3_FINAL_EVIDENCE_BLOB=COMPUTED_AFTER_FINAL_EVIDENCE_EDIT
+P7C15_REPAIR3_HELPER_BLOB=NONE
+P7C15_PREP_READY=YES
+
+P7C15_REPAIR3_REAL_CLIENT_APPROVAL_AUTHORITY=PASS
+P7C15_REPAIR3_TURN1_TURN2_MEMORY_PROOF=PASS
+P7C15_REPAIR3_REASONING_AUTHORITY=PASS
+P7C15_REPAIR3_PRIVATE_UMASK_TARGET=PASS
+P7C15_REPAIR3_REAL_WATCHDOG_BOUNDS=PASS
+P7C15_REPAIR3_STAGE_TIMEOUT_OWNERSHIP=PASS
+P7C15_REPAIR3_POST_DELETE_OBSERVED_AUTHORITY=PASS
+P7C15_REPAIR3_EXACT_EFFECT_PASS_GATE=PASS
+P7C15_REPAIR3_PRODUCTION_SHAPED_FULL_HANDOFF=PASS
 P7C15_PREP_READY=YES
 
 P7C15_REAL_EXECUTION_AUTHORIZED=NO
