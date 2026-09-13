@@ -11,13 +11,13 @@ P8A_BASE_TREE=4d8595c70c635122ee3764161983bd0ea0d8195a
 
 The implementation commit immediately above that base is:
 
-P8A_IMPLEMENTATION_HEAD=9faff36993ebafe6c10115eacdc9173a10987584
+P8A_IMPLEMENTATION_HEAD=acb1c261735a89376e5f0e522b19fce1bf192a40
 
-P8A_IMPLEMENTATION_TREE=f51abbb49ad364deaf578f41c4df6329dfe98bb0
+P8A_IMPLEMENTATION_TREE=0b1f08b5c41ecd4a4ba97b27679f775d1be4e7a5
 
-The evidence commit is the following linear commit and is the final branch
-head after publication. Its exact hash/tree are recorded in the handoff
-report because this file cannot contain its own future Git object identity.
+The evidence refresh is a linear commit after the implementation above. The
+final branch hash/tree are recorded in the handoff report because this file
+cannot contain its own future Git object identity.
 
 The implementation history is linear from the required base; no merge,
 rebase, squash, force push, or main mutation was used.
@@ -81,15 +81,15 @@ No P7 historical file, P7 ledger/evidence, `docs/ROADMAP.md`, or
 systemd unit sha256 = 7df63042b9fcf9763c33cff980c9e4c3fadb25cef3d96c6dbe97532d3ad10870
 deployment helper sha256 = fd94b93fd626c33c7347dd2c27253c747f7a05f7e059b9073f8664fdefe70b00
 deployment module sha256 = 805c643fc9fc0ed7ba76cca3a06325be13f03aa44a2c49c5c9d92245ed6f9d4b
-service module sha256 = 694e7166f1d67e2d39b6016848d11d18f2a4e023f9fc3fd0080652dd47741dbe
+service module sha256 = 2259d7ad74323a8a190874e3541052f4468f1f9cf6a2180244f50d3876eff6b0
 Telegram transport sha256 = 1e423dafc3697f04d3ac0b70bbb41f51b6d9c5949823e4f95e500ca9408ef0d2
 secrets module sha256 = cb5be9fa8929b997f88380515ff4a2ebab5f0393c9cee3d457a79e8bc045c6a7
 ```
 
 The controlled temporary-root manifest rehearsal recovered the accepted
-implementation SHA `9faff36993ebafe6c10115eacdc9173a10987584` without Git
+implementation SHA `acb1c261735a89376e5f0e522b19fce1bf192a40` without Git
 metadata. Its manifest SHA-256 was
-`357684f717efaf42ab1213d99c9d89f2ae5bf95d7796a5eb441781b862072cf8`, with
+`10e89edabb6620638d42cf9de8bd88bb6a1c66e7a7ff0889b9b9587e0d0d3f47`, with
 schema support 4 and the fixed Codex 0.144.6 capability-schema authority.
 Manifest determinism/source authority is asserted; wheel-byte
 reproducibility is not claimed.
