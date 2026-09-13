@@ -141,7 +141,7 @@ async def _preflight_production_authority(
     test_only: bool = False,
     installed_authority_probe: Any | None = None,
     require_existing_db: bool = True,
-) -> tuple[ServerConfiguration, SecretAuthority, Any]:
+) -> tuple[ServerConfiguration, SecretAuthority, IsolationPathAuthority, Any]:
     """Shared ordered preflight for validate, serve and deployment checks."""
     try:
         config = load_production_configuration(config_path, test_only=test_only)
@@ -151,11 +151,11 @@ async def _preflight_production_authority(
     authority = _validate_filesystem_authority(config, test_only=test_only)
     if require_existing_db:
         _read_schema(config.controller_db_path)
-    await _probe_installed_authority(
+    manifest = await _probe_installed_authority(
         config.codex_executable,
         installed_authority_probe=installed_authority_probe,
     )
-    return config, secrets, authority
+    return config, secrets, authority, manifest
 
 
 async def preflight_production_authority(
@@ -165,7 +165,7 @@ async def preflight_production_authority(
     test_only: bool = False,
     installed_authority_probe: Any | None = None,
     require_existing_db: bool = True,
-) -> tuple[ServerConfiguration, SecretAuthority, Any]:
+) -> tuple[ServerConfiguration, SecretAuthority, IsolationPathAuthority, Any]:
     """Public async seam shared by deployment verification and service start."""
     return await _preflight_production_authority(
         config_path,
@@ -192,7 +192,7 @@ def validate_production_authority(
     installed_authority_probe: Any | None = None,
 ) -> ServerConfiguration:
     """Run the complete zero-external-effect installed-authority preflight."""
-    config, _, _ = _run_async(_preflight_production_authority(
+    config, _, _, _ = _run_async(_preflight_production_authority(
         config_path,
         secrets_path,
         test_only=test_only,
@@ -209,7 +209,7 @@ async def _initialize_controller_state(
     installed_authority_probe: Any | None = None,
 ) -> int:
     """Explicit first-install action; ordinary serve never creates a DB."""
-    config, _, _ = await _preflight_production_authority(
+    config, _, _, _ = await _preflight_production_authority(
         config_path,
         secrets_path,
         test_only=test_only,
@@ -276,7 +276,7 @@ async def build_production_assembly(config_path: str | Path, secrets_path: str |
                                     installed_authority_probe: Any | None = None) -> ProductionAssembly:
     """Construct accepted P0--P7 services after fail-closed preflight."""
     storage: SqliteStorage | None = None
-    config, secrets, authority = await _preflight_production_authority(
+    config, secrets, authority, _ = await _preflight_production_authority(
         config_path,
         secrets_path,
         test_only=test_only,

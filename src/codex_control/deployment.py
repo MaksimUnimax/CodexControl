@@ -642,7 +642,7 @@ def install_upgrade(
 ) -> dict[str, Any]:
     """Production-shaped transaction requiring all real authority inputs."""
     root = _production_authority(root_authority)
-    config, _, _ = _preflight_for_deployment(Path(config_path), Path(secrets_path), test_only=test_only, installed_authority_probe=installed_authority_probe)
+    config, _, _, _ = _preflight_for_deployment(Path(config_path), Path(secrets_path), test_only=test_only, installed_authority_probe=installed_authority_probe)
     schema = _actual_db_schema(config.controller_db_path)
     old = current_target(root_authority)
     if old is not None:
@@ -680,7 +680,7 @@ def production_rollback(
     installed_authority_probe: Any | None = None, test_only: bool = False,
 ) -> Path:
     root = _production_authority(root_authority)
-    config, _, _ = _preflight_for_deployment(Path(config_path), Path(secrets_path), test_only=test_only, installed_authority_probe=installed_authority_probe)
+    config, _, _, _ = _preflight_for_deployment(Path(config_path), Path(secrets_path), test_only=test_only, installed_authority_probe=installed_authority_probe)
     schema = _actual_db_schema(config.controller_db_path)
     previous = _previous_sha(root)
     target = release_path(root_authority, previous, allow_production_root=root == Path("/"))
