@@ -17,6 +17,9 @@ from codex_control.application.response_delivery import (
 )
 
 
+POLL_HTTP_MARGIN_SECONDS = 5.0
+
+
 class TelegramTransportError(RuntimeError):
     """Allowlisted, token-free transport diagnostic."""
 
@@ -92,7 +95,13 @@ class TelegramBotApiTransport:
         if any(value <= 0 or value > 120 for value in (connect_timeout, request_timeout, poll_timeout)):
             raise ValueError("timeout_invalid")
         self._token = token
-        self._http = http or UrlLibHttpClient(token, timeout=max(request_timeout, poll_timeout))
+        # The Telegram server is allowed to hold getUpdates for the full
+        # polling window.  The client deadline must include a bounded
+        # response/transport margin and must not truncate that window.
+        self._http = http or UrlLibHttpClient(
+            token,
+            timeout=max(request_timeout, poll_timeout + POLL_HTTP_MARGIN_SECONDS),
+        )
         self._request_timeout = request_timeout
         self._poll_timeout = poll_timeout
         self._offset = 0
@@ -132,7 +141,11 @@ class TelegramBotApiTransport:
         return value["result"]
 
     async def get_updates(self) -> tuple[dict[str, Any], ...]:
-        result = await self._call("getUpdates", {"offset": self._offset, "timeout": int(self._poll_timeout)}, timeout=self._poll_timeout + 5)
+        result = await self._call(
+            "getUpdates",
+            {"offset": self._offset, "timeout": int(self._poll_timeout)},
+            timeout=self._poll_timeout + POLL_HTTP_MARGIN_SECONDS,
+        )
         if not isinstance(result, list):
             raise TelegramTransportError("RESPONSE_INVALID")
         updates: list[dict[str, Any]] = []
@@ -199,4 +212,7 @@ class TelegramBotApiTransport:
         return await self.send_message(chat_id=chat_id, text=projection["text"], reply_markup=projection.get("reply_markup"))
 
 
-__all__ = ["HttpResponse", "TelegramBotApiTransport", "TelegramTransportError", "UrlLibHttpClient"]
+__all__ = [
+    "HttpResponse", "POLL_HTTP_MARGIN_SECONDS", "TelegramBotApiTransport",
+    "TelegramTransportError", "UrlLibHttpClient",
+]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import signal
 import sqlite3
@@ -12,7 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .adapters.codex.capabilities import REQUIRED_V1_CAPABILITIES, SUPPORTED_CODEX_VERSION, load_manifest
+from .adapters.codex.capabilities import (
+    REQUIRED_V1_CAPABILITIES,
+    SCHEMA_SHA256,
+    SUPPORTED_CODEX_VERSION,
+    StorageRuntimeCapabilities,
+    validate_manifest_authority,
+)
 from .adapters.codex.isolation import IsolationError, IsolationPathAuthority
 from .adapters.codex.model_catalog import CodexModelCatalogAdapter
 from .adapters.codex.runtime import CodexRuntimeManager
@@ -33,6 +40,7 @@ from .application import (
 from .application.fleet_control import GroupInboundKind
 from .application.live_approval import ApprovalDecisionSignal
 from .config import ConfigurationError, ServerConfiguration, load_production_configuration
+from .adapters.codex.version_probe import CodexVersionProbe, VersionProbeError, probe_supported_manifest
 from .secrets import SecretAuthority, SecretsError, load_secrets
 from .storage import ControllerRuntimeRepository, SqliteStorage
 
@@ -71,41 +79,171 @@ def _read_schema(path: str) -> int:
     return value
 
 
-def validate_production_authority(config_path: str | Path, secrets_path: str | Path,
-                                  *, test_only: bool = False) -> ServerConfiguration:
-    """Run static, zero-external-effect preflight for ``validate``."""
+async def _probe_installed_authority(
+    executable: str,
+    *,
+    installed_authority_probe: Any | None = None,
+) -> Any:
+    """Probe the installed CLI and bind it to the one accepted manifest.
+
+    The injected callback is deliberately a test-only seam supplied by the
+    caller of the offline assembly helpers.  The production default always
+    executes the bounded ``codex --version`` probe.
+    """
     try:
-        config = load_production_configuration(config_path, test_only=test_only)
-        load_secrets(secrets_path, test_only=test_only)
-    except (ConfigurationError, SecretsError):
-        raise ServiceError("configuration_or_secrets_invalid") from None
-    _safe_dir(config.state_root, "state_root_invalid", require_root=not test_only)
-    _safe_dir(config.working_directory, "working_directory_invalid", require_root=not test_only)
-    _safe_dir(config.repository_root, "repository_root_invalid", require_root=not test_only)
+        if installed_authority_probe is None:
+            manifest = await probe_supported_manifest(CodexVersionProbe(executable))
+        else:
+            value = installed_authority_probe()
+            manifest = await value if inspect.isawaitable(value) else value
+        manifest = validate_manifest_authority(manifest, SUPPORTED_CODEX_VERSION)
+        if manifest.codex_cli_version != SUPPORTED_CODEX_VERSION or manifest.schema_sha256 != SCHEMA_SHA256:
+            raise ServiceError("capability_mismatch")
+        StorageRuntimeCapabilities().validate(
+            installed_version=manifest.codex_cli_version,
+            installed_schema=manifest.schema_sha256,
+        )
+        if manifest.check_required(REQUIRED_V1_CAPABILITIES).missing:
+            raise ServiceError("capability_mismatch")
+        return manifest
+    except ServiceError:
+        raise
+    except (VersionProbeError, Exception):
+        raise ServiceError("capability_mismatch") from None
+
+
+def _validate_filesystem_authority(config: ServerConfiguration, *, test_only: bool) -> IsolationPathAuthority:
+    try:
+        _safe_dir(config.state_root, "state_root_invalid", require_root=not test_only)
+        _safe_dir(config.working_directory, "working_directory_invalid", require_root=not test_only)
+        _safe_dir(config.repository_root, "repository_root_invalid", require_root=not test_only)
+    except ServiceError:
+        raise
     for profile in config.profiles:
         _safe_dir(profile.codex_home, "codex_home_invalid", require_root=not test_only)
         _safe_dir(profile.isolated_state_root, "isolated_state_root_invalid", require_root=not test_only)
-    executable = Path(config.codex_executable)
-    if not executable.is_file() or not os.access(executable, os.X_OK):
-        raise ServiceError("codex_executable_invalid")
     try:
-        manifest = load_manifest(SUPPORTED_CODEX_VERSION)
-        if manifest.check_required(REQUIRED_V1_CAPABILITIES).missing:
-            raise ServiceError("capability_mismatch")
-    except ServiceError:
-        raise
-    except Exception:
-        raise ServiceError("capability_mismatch") from None
-    _read_schema(config.controller_db_path)
-    try:
-        IsolationPathAuthority(
+        authority = IsolationPathAuthority(
             config.profiles, controller_db_path=config.controller_db_path,
             controller_db_root=config.controller_db_root, repository_root=config.repository_root,
             protected_roots=config.protected_roots,
-        ).validate_runtime_authority()
+        )
+        authority.validate_runtime_authority()
+        return authority
     except IsolationError:
         raise ServiceError("filesystem_authority_invalid") from None
+
+
+async def _preflight_production_authority(
+    config_path: str | Path,
+    secrets_path: str | Path,
+    *,
+    test_only: bool = False,
+    installed_authority_probe: Any | None = None,
+    require_existing_db: bool = True,
+) -> tuple[ServerConfiguration, SecretAuthority, Any]:
+    """Shared ordered preflight for validate, serve and deployment checks."""
+    try:
+        config = load_production_configuration(config_path, test_only=test_only)
+        secrets = load_secrets(secrets_path, test_only=test_only)
+    except (ConfigurationError, SecretsError):
+        raise ServiceError("configuration_or_secrets_invalid") from None
+    authority = _validate_filesystem_authority(config, test_only=test_only)
+    if require_existing_db:
+        _read_schema(config.controller_db_path)
+    await _probe_installed_authority(
+        config.codex_executable,
+        installed_authority_probe=installed_authority_probe,
+    )
+    return config, secrets, authority
+
+
+async def preflight_production_authority(
+    config_path: str | Path,
+    secrets_path: str | Path,
+    *,
+    test_only: bool = False,
+    installed_authority_probe: Any | None = None,
+    require_existing_db: bool = True,
+) -> tuple[ServerConfiguration, SecretAuthority, Any]:
+    """Public async seam shared by deployment verification and service start."""
+    return await _preflight_production_authority(
+        config_path,
+        secrets_path,
+        test_only=test_only,
+        installed_authority_probe=installed_authority_probe,
+        require_existing_db=require_existing_db,
+    )
+
+
+def _run_async(coroutine: Any) -> Any:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coroutine)
+    raise ServiceError("async_preflight_required")
+
+
+def validate_production_authority(
+    config_path: str | Path,
+    secrets_path: str | Path,
+    *,
+    test_only: bool = False,
+    installed_authority_probe: Any | None = None,
+) -> ServerConfiguration:
+    """Run the complete zero-external-effect installed-authority preflight."""
+    config, _, _ = _run_async(_preflight_production_authority(
+        config_path,
+        secrets_path,
+        test_only=test_only,
+        installed_authority_probe=installed_authority_probe,
+    ))
     return config
+
+
+async def _initialize_controller_state(
+    config_path: str | Path,
+    secrets_path: str | Path,
+    *,
+    test_only: bool = False,
+    installed_authority_probe: Any | None = None,
+) -> int:
+    """Explicit first-install action; ordinary serve never creates a DB."""
+    config, _, _ = await _preflight_production_authority(
+        config_path,
+        secrets_path,
+        test_only=test_only,
+        installed_authority_probe=installed_authority_probe,
+        require_existing_db=False,
+    )
+    if os.path.lexists(config.controller_db_path):
+        raise ServiceError("database_already_initialized")
+    parent = Path(config.controller_db_path).parent
+    try:
+        parent.mkdir(mode=0o700, parents=True, exist_ok=False)
+        os.chmod(parent, 0o700)
+        storage = await SqliteStorage.open(config.controller_db_path)
+        await storage.close()
+    except ServiceError:
+        raise
+    except Exception:
+        raise ServiceError("state_initialization_failed") from None
+    return _read_schema(config.controller_db_path)
+
+
+def initialize_controller_state(
+    config_path: str | Path,
+    secrets_path: str | Path,
+    *,
+    test_only: bool = False,
+    installed_authority_probe: Any | None = None,
+) -> int:
+    return _run_async(_initialize_controller_state(
+        config_path,
+        secrets_path,
+        test_only=test_only,
+        installed_authority_probe=installed_authority_probe,
+    ))
 
 
 class _WorkingDirectoryResolver:
@@ -134,51 +272,22 @@ class ProductionAssembly:
 
 async def build_production_assembly(config_path: str | Path, secrets_path: str | Path,
                                     *, test_only: bool = False, telegram: TelegramBotApiTransport | None = None,
-                                    runtime_manager_factory: Any | None = None) -> ProductionAssembly:
+                                    runtime_manager_factory: Any | None = None,
+                                    installed_authority_probe: Any | None = None) -> ProductionAssembly:
     """Construct accepted P0--P7 services after fail-closed preflight."""
     storage: SqliteStorage | None = None
-    try:
-        config = load_production_configuration(config_path, test_only=test_only)
-        secrets = load_secrets(secrets_path, test_only=test_only)
-    except (ConfigurationError, SecretsError):
-        raise ServiceError("configuration_or_secrets_invalid") from None
-    # This is the same fail-closed authority check as `validate`, except that
-    # a first boot may create a missing controller DB under the configured
-    # state root. Existing databases must already be v4; otherwise opening
-    # them would silently invoke the legacy migration path.
-    _safe_dir(config.state_root, "state_root_invalid", require_root=not test_only)
-    _safe_dir(config.working_directory, "working_directory_invalid", require_root=not test_only)
-    _safe_dir(config.repository_root, "repository_root_invalid", require_root=not test_only)
-    executable = Path(config.codex_executable)
-    if not executable.is_file() or not os.access(executable, os.X_OK):
-        raise ServiceError("codex_executable_invalid")
-    try:
-        manifest = load_manifest(SUPPORTED_CODEX_VERSION)
-        if manifest.check_required(REQUIRED_V1_CAPABILITIES).missing:
-            raise ServiceError("capability_mismatch")
-    except ServiceError:
-        raise
-    except Exception:
-        raise ServiceError("capability_mismatch") from None
-    if os.path.lexists(config.controller_db_path):
-        _read_schema(config.controller_db_path)
-    # The controller DB is created only in its explicitly configured parent.
-    Path(config.controller_db_path).parent.mkdir(mode=0o700, exist_ok=True)
-    try:
-        os.chmod(Path(config.controller_db_path).parent, 0o700)
-    except OSError:
-        raise ServiceError("database_authority_invalid") from None
+    config, secrets, authority = await _preflight_production_authority(
+        config_path,
+        secrets_path,
+        test_only=test_only,
+        installed_authority_probe=installed_authority_probe,
+        require_existing_db=True,
+    )
     try:
         storage = await SqliteStorage.open(config.controller_db_path)
     except Exception:
         raise ServiceError("storage_open_failed") from None
     try:
-        authority = IsolationPathAuthority(
-            config.profiles, controller_db_path=config.controller_db_path,
-            controller_db_root=config.controller_db_root, repository_root=config.repository_root,
-            protected_roots=config.protected_roots,
-        )
-        authority.validate_runtime_authority()
         factory = runtime_manager_factory or CodexRuntimeManager
         runtime_manager = factory(list(config.profiles), client_version="codex-control-p8a",
                                   executable=config.codex_executable, isolation_authority=authority)
@@ -372,8 +481,16 @@ def install_signal_handlers(service: ProductionService, loop: asyncio.AbstractEv
 
 
 async def serve(config_path: str | Path, secrets_path: str | Path, *, test_only: bool = False,
-                telegram: TelegramBotApiTransport | None = None, runtime_manager_factory: Any | None = None) -> None:
-    assembly = await build_production_assembly(config_path, secrets_path, test_only=test_only, telegram=telegram, runtime_manager_factory=runtime_manager_factory)
+                telegram: TelegramBotApiTransport | None = None, runtime_manager_factory: Any | None = None,
+                installed_authority_probe: Any | None = None) -> None:
+    assembly = await build_production_assembly(
+        config_path,
+        secrets_path,
+        test_only=test_only,
+        telegram=telegram,
+        runtime_manager_factory=runtime_manager_factory,
+        installed_authority_probe=installed_authority_probe,
+    )
     service = ProductionService(assembly)
     install_signal_handlers(service, asyncio.get_running_loop())
     await service.run()
@@ -383,4 +500,8 @@ async def serve(config_path: str | Path, secrets_path: str | Path, *, test_only:
 from .domain import ControllerMode
 
 
-__all__ = ["ProductionAssembly", "ProductionService", "ServiceError", "build_production_assembly", "serve", "validate_production_authority"]
+__all__ = [
+    "ProductionAssembly", "ProductionService", "ServiceError", "build_production_assembly",
+    "initialize_controller_state", "preflight_production_authority", "serve",
+    "validate_production_authority",
+]

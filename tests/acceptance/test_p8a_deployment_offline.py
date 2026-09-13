@@ -11,8 +11,8 @@ from codex_control.storage import ControllerRuntimeRepository, SqliteStorage
 from codex_control.adapters.telegram.bot_api import HttpResponse, TelegramBotApiTransport
 
 from codex_control.deployment import (
-    DeploymentError, current_target, install_upgrade, rollback, stage_release,
-    switch_current, validate_release, verify_installation,
+    DeploymentError, current_target, rehearsal_install_upgrade, rehearsal_rollback,
+    rehearsal_switch_current, stage_rehearsal_release, validate_release,
 )
 
 
@@ -38,9 +38,9 @@ class P8ADeploymentOfflineAcceptance(unittest.TestCase):
                 connection.execute("PRAGMA user_version=4")
             before = (config.read_bytes(), secrets.read_bytes(), state.read_bytes())
             sha_a, sha_b = "a" * 40, "b" * 40
-            stage_release(source_a, root=root, git_sha=sha_a)
-            switch_current(root, sha_a)
-            result = install_upgrade(root, source_b, git_sha=sha_b, health_check=lambda: False)
+            stage_rehearsal_release(source_a, root=root, git_sha=sha_a)
+            rehearsal_switch_current(root, sha_a, current_db_schema=4)
+            result = rehearsal_install_upgrade(root, source_b, git_sha=sha_b, current_db_schema=4, health_check=lambda: False)
             self.assertTrue(result["rolled_back"])
             self.assertEqual(sha_a, current_target(root).name)
             self.assertEqual(before, (config.read_bytes(), secrets.read_bytes(), state.read_bytes()))
@@ -51,12 +51,12 @@ class P8ADeploymentOfflineAcceptance(unittest.TestCase):
             root = Path(directory) / "root"; root.mkdir()
             source = Path(directory) / "source"; source.mkdir(); (source / "x").write_text("x")
             sha = "c" * 40
-            first = stage_release(source, root=root, git_sha=sha)
-            second = stage_release(source, root=root, git_sha=sha)
+            first = stage_rehearsal_release(source, root=root, git_sha=sha)
+            second = stage_rehearsal_release(source, root=root, git_sha=sha)
             self.assertEqual(first, second)
             with self.assertRaises(DeploymentError):
-                switch_current(root, sha, current_db_schema=3)
-            switch_current(root, sha)
+                rehearsal_switch_current(root, sha, current_db_schema=3)
+            rehearsal_switch_current(root, sha, current_db_schema=4)
             current = root / "opt" / "codex-control" / "current"
             current.unlink()
             current.symlink_to("../../../../outside")
@@ -68,11 +68,11 @@ class P8ADeploymentOfflineAcceptance(unittest.TestCase):
             root = Path(directory) / "root"; root.mkdir()
             source = Path(directory) / "source"; source.mkdir(); (source / "x").write_text("x")
             sha = "d" * 40
-            stage_release(source, root=root, git_sha=sha); switch_current(root, sha)
-            info = verify_installation(root, expected_sha=sha)
-            self.assertEqual(sha, info["installed_release_sha"])
-            self.assertEqual(64, len(info["manifest_sha256"]))
-            self.assertEqual((), info["configured_profiles"])
+            stage_rehearsal_release(source, root=root, git_sha=sha); rehearsal_switch_current(root, sha, current_db_schema=4)
+            manifest = validate_release(current_target(root))
+            self.assertEqual(sha, manifest.git_sha)
+            self.assertEqual(64, len(hashlib.sha256((current_target(root) / "release-manifest.json").read_bytes()).hexdigest()))
+            self.assertTrue((current_target(root) / ".venv/bin/codex-control").is_file())
 
     def test_assembly_boots_sleep_and_recovers_before_poll(self):
         import asyncio
@@ -83,7 +83,7 @@ class P8ADeploymentOfflineAcceptance(unittest.TestCase):
                 state, repo, work, home, isolated = [base / name for name in ("state", "repo", "work", "home", "isolated")]
                 for item in (state, repo, work, home, isolated): item.mkdir(mode=0o700)
                 executable = base / "codex"
-                executable.write_text("#!/bin/sh\nexit 0\n"); executable.chmod(0o755)
+                executable.write_text("#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.144.6'; exit 0; fi\nexit 0\n"); executable.chmod(0o755)
                 db = state / "controller.sqlite3"
                 seed = await SqliteStorage.open(str(db)); await seed.close()
                 config = base / "server.toml"
