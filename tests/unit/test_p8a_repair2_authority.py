@@ -18,6 +18,7 @@ from codex_control.deployment import (
     DeploymentError,
     DeploymentRootAuthority,
     DeploymentState,
+    current_target,
     install_upgrade,
     production_rollback,
     release_path,
@@ -136,12 +137,60 @@ class Repair2AuthorityTests(unittest.TestCase):
                 )
             self.assertFalse(release_path(root, BASE_SHA).exists())
 
+    def test_export_manifest_and_final_validation_failures_never_publish_final_release(self):
+        failures = (
+            lambda repo, sha, stage: (_ for _ in ()).throw(RuntimeError("export")),
+            lambda stage, package, sha, tree, requirement, unit: (_ for _ in ()).throw(RuntimeError("manifest")),
+            lambda path, **kwargs: (_ for _ in ()).throw(RuntimeError("validation")),
+        )
+        for index, hooks in enumerate(failures):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory) / "root"
+                kwargs = {"export_hook": hooks} if index == 0 else {}
+                if index == 1:
+                    kwargs["manifest_hook"] = hooks
+                if index == 2:
+                    kwargs["validation_hook"] = hooks
+                with self.assertRaises(DeploymentError):
+                    stage_release("/root/CodexControl", root=root, git_sha=BASE_SHA, **kwargs)
+                self.assertFalse(release_path(root, BASE_SHA).exists())
+
+    def test_previous_record_failure_between_preparation_and_current_is_truthful(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            source.mkdir()
+            (source / "payload").write_text("A")
+            stage_rehearsal_release(source, root=base / "root", git_sha="a" * 40)
+            rehearsal_switch_current(base / "root", "a" * 40, current_db_schema=4)
+            stage_rehearsal_release(source, root=base / "root", git_sha="b" * 40)
+            original_replace = os.replace
+            calls = 0
+
+            def fail_current(source_path, target_path):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise OSError("injected current failure")
+                return original_replace(source_path, target_path)
+
+            with mock.patch("codex_control.deployment.os.replace", side_effect=fail_current):
+                with self.assertRaises(DeploymentError):
+                    rehearsal_switch_current(base / "root", "b" * 40, current_db_schema=4)
+            self.assertEqual("a" * 40, (current_target(base / "root")).name)
+            self.assertFalse((base / "root/opt/codex-control/previous").exists())
+
     def test_production_switch_requires_actual_db_config_secrets_runtime_preflight(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             repo, sha, _ = self._git_repo(base)
-            with self.assertRaises(TypeError):
-                install_upgrade(DeploymentRootAuthority(base / "root"), repo, git_sha=sha)  # type: ignore[call-arg]
+            with self.assertRaises(DeploymentError):
+                install_upgrade(
+                    DeploymentRootAuthority(base / "root"), repo, git_sha=sha,
+                    config_path=base / "missing.toml", secrets_path=base / "missing.env",
+                    service_unit="/root/CodexControl/deploy/systemd/codex-control.service",
+                    test_only=True,
+                )
 
     def test_missing_health_evidence_is_not_success(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -159,12 +208,13 @@ class Repair2AuthorityTests(unittest.TestCase):
             config, secrets, _, _ = self._service_authority(base, "codex-cli 0.144.7")
             source = base / "source"
             source.mkdir()
-            stage_rehearsal_release(source, root=base / "root", git_sha="a" * 40)
+            unit = "/root/CodexControl/deploy/systemd/codex-control.service"
+            stage_rehearsal_release(source, root=base / "root", git_sha="a" * 40, service_unit=unit)
             rehearsal_switch_current(base / "root", "a" * 40, current_db_schema=4)
             with self.assertRaises(DeploymentError):
                 verify_installation(
                     DeploymentRootAuthority(base / "root"), config_path=config,
-                    secrets_path=secrets, service_unit="/root/CodexControl/deploy/systemd/codex-control.service",
+                    secrets_path=secrets, service_unit=unit,
                     test_only=True,
                 )
 

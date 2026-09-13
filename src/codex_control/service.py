@@ -40,7 +40,7 @@ from .application import (
 from .application.fleet_control import GroupInboundKind
 from .application.live_approval import ApprovalDecisionSignal
 from .config import ConfigurationError, ServerConfiguration, load_production_configuration
-from .adapters.codex.version_probe import CodexVersionProbe, VersionProbeError, probe_supported_manifest
+from .adapters.codex.version_probe import CodexVersionProbe, probe_supported_manifest
 from .secrets import SecretAuthority, SecretsError, load_secrets
 from .storage import ControllerRuntimeRepository, SqliteStorage
 
@@ -108,7 +108,7 @@ async def _probe_installed_authority(
         return manifest
     except ServiceError:
         raise
-    except (VersionProbeError, Exception):
+    except Exception:
         raise ServiceError("capability_mismatch") from None
 
 
@@ -181,6 +181,8 @@ def _run_async(coroutine: Any) -> Any:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coroutine)
+    if inspect.iscoroutine(coroutine):
+        coroutine.close()
     raise ServiceError("async_preflight_required")
 
 
