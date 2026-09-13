@@ -19,92 +19,99 @@ Final successful one-shot:
 - successor: P7.C17;
 - execution source HEAD `3da1817172f7f197276ec388c94e399fa0d31640`;
 - execution tree `70effe87dd31acd92cd2e2984e65e0d114e2451b`;
-- launcher blob `66718dd22467e13d741b26759f295836c3aa369f`;
 - real evidence commit `cd793ffcc3afac6aaf83d14e1baba6599ecc25a9`;
-- real evidence blob `79271d70c52f5aa6239c21dbf65668321ff8490d`;
 - architect acceptance `docs/evidence/p7c17/P7C17_FINAL_HARD_DELETE_REAL_ARCHITECT_ACCEPTANCE_2026-09-13.md`.
 
-Accepted real result:
+All consumed P7 real probes/successors remain immutable and non-retryable.
 
-- parent exit `0`;
-- durable ledger `COMPLETED`;
-- watchdog `COMPLETED`;
-- child-result-valid true;
-- child `PASS`, verdict true;
-- one child, zero retries;
-- exact effect matrix passed;
-- official delete `DELETE_CONFIRMED`;
-- application delete `DELETED`;
-- post-delete schema `4 / V4`;
-- isolation envelope valid;
-- persistent/isolated thread/marker/scan residuals all zero;
-- process group quiescent, zero signals/zombies/scan errors;
-- P7.C17 current-run marker policy excludes fixed/common Turn-4 stimulus from residual identity;
-- oracle facts valid and correlated;
-- unrelated-removal attribution valid and replayable;
-- failed predicate count `0`;
-- unavailable predicate count `0`.
+## P8.A final authority
 
-`P7_HARD_DELETE_CORRECTION_LOOP=CLOSED`
+P8.A is **COMPLETE / ARCHITECT_ACCEPTED**.
 
-All prior consumed P7 real probes/successors remain immutable evidence. In particular P7.C13, P7.C14, P7.C15, P7.C16 and P7.C17 must never be rerun or have their one-shot ledgers reset/removed.
+Final accepted branch:
 
-`P7C17_REAL_RETRY_AUTHORIZED=NO`
+`impl-p8a-deployment-package-rollback-repair4-2026-09-13`
 
-`P7C16_REAL_RETRY_AUTHORIZED=NO`
+Final accepted HEAD/tree:
 
-`P7C15_REAL_RETRY_AUTHORIZED=NO`
+`1273b273ed7f58ba235b35cbce485b623c340b8d`
 
-`P7C14_REAL_RETRY_AUTHORIZED=NO`
+`8def3b3e8591e82f77f0cea8c5f9f690949979f5`
 
-`P7C13_REAL_RETRY_AUTHORIZED=NO`
+Final production-code checkpoint/tree:
 
-## Current executable slice
+`6ffd5193962115d6e07114369e4d442ea25c34d1`
 
-**P8.A — deployable production assembly + deployment package + rollback preparation.**
+`0c16a336f70008461daa002e0f4af87f7ca70656`
 
-Binding contract:
+Architect acceptance:
 
-`docs/evidence/p8/P8A_DEPLOYMENT_PACKAGE_ROLLBACK_PREP_CONTRACT_2026-09-13.md`
+`docs/evidence/p8/P8A_FINAL_ARCHITECT_ACCEPTANCE_2026-09-13.md`
 
-Implementation branch:
+Accepted surface:
 
-`impl-p8a-deployment-package-rollback-2026-09-13`
+- `codex-control validate` / `serve` production assembly;
+- strict V1 config and root-only secrets authority;
+- concrete Telegram Bot API transport with bounded long-poll margin;
+- actual installed-Codex `0.144.6` preflight before writable storage/polling;
+- explicit first-install schema-v4 controller-state initialization;
+- exact Git commit/tree release export;
+- private release staging + release-local executable;
+- staged executable validation before final atomic publication;
+- production/rehearsal transaction separation;
+- actual DB-schema gates;
+- finite deployment health states;
+- truthful installed verification;
+- crash-recoverable atomic pending previous/current journal;
+- zero real P8.A production effects.
 
-P8.A is a zero-production-effect implementation and offline acceptance slice. The repository currently has accepted application/local orchestration but lacks the complete deployable process surface: no production console/service entrypoint, no concrete Telegram Bot API long-poll transport, no console script and no real systemd package beyond the placeholder deployment README.
-
-P8.A must materialize the smallest V1 production assembly required before deployment while preserving accepted P0–P7 semantics:
-
-- production `codex-control validate` and `codex-control serve` entrypoint;
-- complete explicit V1 server/fleet/profile/runtime configuration and root-only secrets loading;
-- concrete Telegram Bot API long-poll/outbound transport with fake-HTTP test seam and no live calls;
-- schema-v4 SQLite + accepted Codex runtime + accepted LocalControllerOrchestrator composition;
-- boot in effective SLEEP and startup recovery before polling;
-- bounded graceful shutdown;
-- systemd unit source;
-- immutable exact-SHA release layout under future `/opt/codex-control/releases/<sha>` + `current` symlink;
-- deterministic install/upgrade rehearsal;
-- non-destructive rollback with schema compatibility check;
-- build/release manifest and pre-deploy verification surface.
-
-Absolute boundary for P8.A:
-
-- no real `/etc/codex-control`, `/opt/codex-control`, `/var/lib/codex-control` or systemd mutation;
-- no `systemctl` against the real host;
-- no live Telegram token/network;
-- no real Codex/app-server/thread/turn/approval/delete effect;
-- no production SQLite mutation;
-- no mutation/cleanup of consumed P7 material;
-- no P9.
-
-All P8.A deployment/service/install/rollback testing uses temporary roots, fake HTTP, fake Codex/runtime boundaries and temporary SQLite.
+`P8A_COMPLETE=YES`
 
 `P8A_PRODUCTION_EFFECTS=0`
 
-`P8_REAL_DEPLOYMENT_AUTHORIZED=NO`
+## Current executable slice
+
+**P8.B — server-80 real production installation + rollback acceptance, with service kept stopped.**
+
+Binding contract:
+
+`docs/evidence/p8/P8B_SERVER80_PRODUCTION_DEPLOYMENT_ROLLBACK_CONTRACT_2026-09-13.md`
+
+P8.B may mutate only the explicitly named real deployment/config/state/systemd paths and may perform `systemctl daemon-reload` plus read-only service inspection.
+
+P8.B MUST NOT start/restart/enable the service. Consequently P8.B must produce zero Telegram HTTP/message effects and zero Codex app-server/RPC effects. The first service start belongs to P9.
+
+P8.B real rollback acceptance uses:
+
+- temporary immediately-previous accepted-code release A: `6ffd5193962115d6e07114369e4d442ea25c34d1`;
+- final operational release B: `1273b273ed7f58ba235b35cbce485b623c340b8d`.
+
+Required final production current release is B.
+
+Before any production mutation, P8.B must resolve real owner-specific routing IDs, Telegram secret authority and exact accepted profile/CODEX_HOME authority. Repository example IDs are placeholders and must never be deployed. Missing owner identity/secret/profile authority is a hard pre-mutation stop.
+
+Required real sequence after gates pass:
+
+- create/validate production config/state roots;
+- stage exact A and B Git releases;
+- initialize or validate controller DB schema v4;
+- install A as current;
+- install B;
+- rollback B→A using actual schema authority;
+- install B again;
+- install exact systemd unit and daemon-reload;
+- verify final current B, unit loaded/inactive/disabled, production config/secrets/DB/profile/Codex authority.
+
+Evidence branch:
+
+`real-p8b-server80-deployment-2026-09-13`
+
+`P8B_SERVICE_ACTIVE=NO`
+
+`P8B_SERVICE_ENABLED=NO`
 
 `P9_STARTED=NO`
 
-## After P8.A
+## After P8.B
 
-P8.A Codex implementation is pushed only for architect review and never merged by the executor. If accepted, architect will freeze a separate P8.B server-80 production deployment/rollback contract. Only P8.B may authorize exact `/etc`/`/opt`/`/var`/systemd mutations and service restart. P9 live Telegram acceptance remains blocked until P8 production deployment is accepted.
+Only independent architect acceptance of exact P8.B evidence may unblock P9. P9 owns the first live service start, Telegram polling and user-visible real workflow acceptance.
