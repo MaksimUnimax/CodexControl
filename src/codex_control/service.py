@@ -271,7 +271,10 @@ class ProductionService:
                         break
                     await self.dispatch(update)
                 if not updates:
-                    await asyncio.wait_for(self._stop.wait(), timeout=self._poll_interval)
+                    try:
+                        await asyncio.wait_for(self._stop.wait(), timeout=self._poll_interval)
+                    except asyncio.TimeoutError:
+                        continue
         finally:
             await self.shutdown()
 
