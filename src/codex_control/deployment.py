@@ -575,6 +575,8 @@ def current_target(root: str | os.PathLike[str] | DeploymentRootAuthority, *, al
 
 _PENDING_NAME = ".previous.next"
 _PENDING_STATES = {"PREPARED", "CURRENT_SWITCHED", "FINALIZED"}
+_MAX_PENDING_JOURNAL = 512
+_PENDING_TEMP_PREFIX = ".previous.next."
 
 
 def _sync_directory(directory: Path) -> None:
@@ -594,6 +596,48 @@ def _pending_path(root: Path) -> Path:
     return root / "opt" / "codex-control" / _PENDING_NAME
 
 
+def _validate_pending_path(path: Path) -> Path:
+    """Require the canonical, private pending-journal location."""
+    path = Path(path)
+    if (
+        not path.is_absolute()
+        or path.name != _PENDING_NAME
+        or path.parent.name != "codex-control"
+        or path.parent.parent.name != "opt"
+        or ".." in path.parts
+    ):
+        raise DeploymentError("pending_previous_invalid")
+    current = Path(path.anchor or os.sep)
+    for component in path.parts[1:-1]:
+        current /= component
+        if current.is_symlink() or (current.exists() and not current.is_dir()):
+            raise DeploymentError("pending_previous_invalid")
+    if os.path.lexists(path):
+        try:
+            info = path.lstat()
+        except OSError:
+            raise DeploymentError("pending_previous_invalid") from None
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise DeploymentError("pending_previous_invalid")
+    return path
+
+
+def _cleanup_pending_temp(path: Path) -> None:
+    """Remove only a temp file created by this writer attempt."""
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError:
+        raise DeploymentError("pending_previous_write_failed") from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise DeploymentError("pending_previous_invalid")
+    try:
+        path.unlink()
+    except OSError:
+        raise DeploymentError("pending_previous_write_failed") from None
+
+
 def _write_pending(path: Path, *, old_current_sha: str | None, new_target_sha: str, state: str) -> None:
     if (
         not isinstance(state, str) or state not in _PENDING_STATES
@@ -601,17 +645,25 @@ def _write_pending(path: Path, *, old_current_sha: str | None, new_target_sha: s
         or not isinstance(new_target_sha, str) or _SHA.fullmatch(new_target_sha) is None
     ):
         raise DeploymentError("pending_previous_invalid")
-    if path.is_symlink() or (path.exists() and not path.is_file()):
-        raise DeploymentError("pending_previous_invalid")
+    path = _validate_pending_path(path)
     value = json.dumps(
         {"old_current_sha": old_current_sha, "new_target_sha": new_target_sha, "state": state},
         sort_keys=True, separators=(",", ":"),
     ).encode("ascii") + b"\n"
+    if len(value) > _MAX_PENDING_JOURNAL:
+        raise DeploymentError("pending_previous_invalid")
+    temporary = path.parent / f"{_PENDING_TEMP_PREFIX}{uuid.uuid4().hex}.tmp"
+    if os.path.lexists(temporary):
+        raise DeploymentError("pending_previous_invalid")
+    created = False
+    replaced = False
     try:
         fd = os.open(
-            path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
             0o600,
         )
+        created = True
         try:
             view = memoryview(value)
             while view:
@@ -620,21 +672,50 @@ def _write_pending(path: Path, *, old_current_sha: str | None, new_target_sha: s
             os.fsync(fd)
         finally:
             os.close(fd)
+        os.replace(temporary, path)
+        replaced = True
+        # Once replacement succeeds, retain the new valid record if this
+        # durability step fails and fail closed for the caller.
         _sync_directory(path.parent)
-    except DeploymentError:
-        raise
     except OSError:
+        if created and not replaced:
+            _cleanup_pending_temp(temporary)
         raise DeploymentError("pending_previous_write_failed") from None
+    except DeploymentError:
+        if created and not replaced:
+            _cleanup_pending_temp(temporary)
+        raise
 
 
 def _read_pending(root: Path) -> dict[str, Any] | None:
-    path = _pending_path(root)
+    path = _validate_pending_path(_pending_path(root))
     if not os.path.lexists(path):
         return None
-    if path.is_symlink() or not path.is_file():
+    try:
+        info = path.lstat()
+    except OSError:
+        raise DeploymentError("pending_previous_invalid") from None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_PENDING_JOURNAL:
         raise DeploymentError("pending_previous_invalid")
     try:
-        raw = json.loads(path.read_bytes().decode("ascii"))
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_PENDING_JOURNAL:
+                raise DeploymentError("pending_previous_invalid")
+            value = b""
+            while len(value) <= _MAX_PENDING_JOURNAL:
+                chunk = os.read(fd, _MAX_PENDING_JOURNAL + 1 - len(value))
+                if not chunk:
+                    break
+                value += chunk
+            if len(value) > _MAX_PENDING_JOURNAL:
+                raise DeploymentError("pending_previous_invalid")
+        finally:
+            os.close(fd)
+        raw = json.loads(value.decode("ascii"))
+    except DeploymentError:
+        raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         raise DeploymentError("pending_previous_invalid") from None
     if not isinstance(raw, dict) or set(raw) != {"old_current_sha", "new_target_sha", "state"}:
@@ -671,23 +752,46 @@ def _recover_pending_previous(root: Path) -> str | None:
     old = record["old_current_sha"]
     new = record["new_target_sha"]
     state = record["state"]
-    if not (release_path(root, new).is_dir() and not release_path(root, new).is_symlink()):
+    new_path = release_path(root, new)
+    if not (new_path.is_dir() and not new_path.is_symlink()):
         raise DeploymentError("pending_release_missing")
-    validate_release(release_path(root, new))
+    validate_release(new_path)
     if state == "PREPARED":
-        if (current is None and old is not None) or (current is not None and (old is None or current.name != old)):
+        if old is None and current is None:
+            _remove_pending(root)
+            return None
+        if old is not None and current is not None and current.name == old:
+            validate_release(current)
+            _remove_pending(root)
+            return None
+        if current is None or current.name != new:
             raise DeploymentError("pending_current_disagreement")
-        _remove_pending(root)
-        return None
-    if old is None or current is None or current.name != new:
+        if old is not None:
+            old_path = release_path(root, old)
+            if not old_path.is_dir() or old_path.is_symlink():
+                raise DeploymentError("pending_release_missing")
+            validate_release(old_path)
+        # Current replacement happened, so make that fact durable before
+        # finalizing the exact old current as rollback authority.
+        _write_pending(_pending_path(root), old_current_sha=old, new_target_sha=new, state="CURRENT_SWITCHED")
+        _finalize_pending_previous(root, {"old_current_sha": old, "new_target_sha": new, "state": "CURRENT_SWITCHED"})
+        return old
+    if current is None or current.name != new:
         raise DeploymentError("pending_current_disagreement")
-    old_path = release_path(root, old)
-    if not old_path.is_dir() or old_path.is_symlink():
-        raise DeploymentError("pending_release_missing")
-    validate_release(old_path)
+    if old is None:
+        if state == "FINALIZED":
+            _remove_pending(root)
+            return None
+    else:
+        old_path = release_path(root, old)
+        if not old_path.is_dir() or old_path.is_symlink():
+            raise DeploymentError("pending_release_missing")
+        validate_release(old_path)
     if state == "CURRENT_SWITCHED":
         _finalize_pending_previous(root, record)
         return old
+    if old is None:
+        raise DeploymentError("pending_current_disagreement")
     previous = root / "opt" / "codex-control" / "previous"
     if previous.is_symlink() or not previous.is_file():
         raise DeploymentError("pending_previous_disagreement")
