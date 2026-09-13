@@ -397,7 +397,7 @@ def validate_release(
     )
 
 
-def stage_release(
+def _prepare_release(
     source: str | os.PathLike[str], *, root: str | os.PathLike[str] | DeploymentRootAuthority,
     git_sha: str, package_version: str = "0.1.0", python_requirement: str = ">=3.11",
     service_unit: str | os.PathLike[str] | None = None,
@@ -407,8 +407,8 @@ def stage_release(
     build_hook: Callable[[Path], None] | None = None,
     manifest_hook: Callable[..., ReleaseManifest] | None = None,
     validation_hook: Callable[..., ReleaseManifest] | None = None,
-) -> tuple[Path, str]:
-    """Export an exact Git object, build privately, then atomically publish."""
+) -> tuple[Path, bool]:
+    """Prepare an exact Git release without publishing a new final target."""
     root_path = _layout_root(root, allow_production_root=allow_production_root)
     target = release_path(root_path, git_sha, allow_production_root=allow_production_root)
     repository = Path(source).resolve()
@@ -424,7 +424,7 @@ def stage_release(
         existing = validate_release(target, service_unit=unit, source_repository=repository)
         if existing.source_git_sha != git_sha:
             raise DeploymentError("release_already_present_invalid")
-        return target, hashlib.sha256((target / "release-manifest.json").read_bytes()).hexdigest()
+        return target, True
 
     stage = target.parent / f".stage-{git_sha}-{uuid.uuid4().hex}"
     try:
@@ -453,9 +453,9 @@ def stage_release(
             if target.is_symlink() or not target.is_dir():
                 raise DeploymentError("release_target_invalid")
             shutil.rmtree(stage)
-            existing = validate_release(target, service_unit=unit)
-            return target, hashlib.sha256((target / "release-manifest.json").read_bytes()).hexdigest()
-        os.replace(stage, target)
+            validate_release(target, service_unit=unit, source_repository=repository)
+            return target, True
+        return stage, False
     except DeploymentError:
         if stage.exists() or stage.is_symlink():
             shutil.rmtree(stage, ignore_errors=True)
@@ -464,6 +464,53 @@ def stage_release(
         if stage.exists() or stage.is_symlink():
             shutil.rmtree(stage, ignore_errors=True)
         raise DeploymentError("release_stage_failed") from None
+    raise AssertionError("unreachable")
+
+
+def _publish_prepared_release(root: Path, prepared: Path, git_sha: str) -> Path:
+    target = release_path(root, git_sha)
+    if prepared == target:
+        return target
+    try:
+        if target.exists() or target.is_symlink():
+            if target.is_symlink() or not target.is_dir():
+                raise DeploymentError("release_target_invalid")
+            shutil.rmtree(prepared)
+            validate_release(target)
+            return target
+        os.replace(prepared, target)
+    except DeploymentError:
+        if prepared.exists() or prepared.is_symlink():
+            shutil.rmtree(prepared, ignore_errors=True)
+        raise
+    except (OSError, shutil.Error):
+        if prepared.exists() or prepared.is_symlink():
+            shutil.rmtree(prepared, ignore_errors=True)
+        raise DeploymentError("release_publish_failed") from None
+    return target
+
+
+def stage_release(
+    source: str | os.PathLike[str], *, root: str | os.PathLike[str] | DeploymentRootAuthority,
+    git_sha: str, package_version: str = "0.1.0", python_requirement: str = ">=3.11",
+    service_unit: str | os.PathLike[str] | None = None,
+    allow_production_root: bool = False,
+    python_executable: str | None = None,
+    export_hook: Callable[[Path, str, Path], str] | None = None,
+    build_hook: Callable[[Path], None] | None = None,
+    manifest_hook: Callable[..., ReleaseManifest] | None = None,
+    validation_hook: Callable[..., ReleaseManifest] | None = None,
+) -> tuple[Path, str]:
+    """Export an exact Git object, build privately, then atomically publish."""
+    root_path = _layout_root(root, allow_production_root=allow_production_root)
+    prepared, existing = _prepare_release(
+        source, root=root, git_sha=git_sha, package_version=package_version,
+        python_requirement=python_requirement, service_unit=service_unit,
+        allow_production_root=allow_production_root, python_executable=python_executable,
+        export_hook=export_hook, build_hook=build_hook, manifest_hook=manifest_hook,
+        validation_hook=validation_hook,
+    )
+    target = prepared if existing else _publish_prepared_release(root_path, prepared, git_sha)
     data = (target / "release-manifest.json").read_bytes()
     return target, hashlib.sha256(data).hexdigest()
 
@@ -526,9 +573,167 @@ def current_target(root: str | os.PathLike[str] | DeploymentRootAuthority, *, al
     return target
 
 
+_PENDING_NAME = ".previous.next"
+_PENDING_STATES = {"PREPARED", "CURRENT_SWITCHED", "FINALIZED"}
+
+
+def _sync_directory(directory: Path) -> None:
+    try:
+        fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        raise DeploymentError("deployment_authority_failed") from None
+    try:
+        os.fsync(fd)
+    except OSError:
+        raise DeploymentError("deployment_authority_failed") from None
+    finally:
+        os.close(fd)
+
+
+def _pending_path(root: Path) -> Path:
+    return root / "opt" / "codex-control" / _PENDING_NAME
+
+
+def _write_pending(path: Path, *, old_current_sha: str | None, new_target_sha: str, state: str) -> None:
+    if (
+        not isinstance(state, str) or state not in _PENDING_STATES
+        or (old_current_sha is not None and (not isinstance(old_current_sha, str) or _SHA.fullmatch(old_current_sha) is None))
+        or not isinstance(new_target_sha, str) or _SHA.fullmatch(new_target_sha) is None
+    ):
+        raise DeploymentError("pending_previous_invalid")
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise DeploymentError("pending_previous_invalid")
+    value = json.dumps(
+        {"old_current_sha": old_current_sha, "new_target_sha": new_target_sha, "state": state},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("ascii") + b"\n"
+    try:
+        fd = os.open(
+            path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+        )
+        try:
+            view = memoryview(value)
+            while view:
+                view = view[os.write(fd, view):]
+            os.fchmod(fd, 0o600)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        _sync_directory(path.parent)
+    except DeploymentError:
+        raise
+    except OSError:
+        raise DeploymentError("pending_previous_write_failed") from None
+
+
+def _read_pending(root: Path) -> dict[str, Any] | None:
+    path = _pending_path(root)
+    if not os.path.lexists(path):
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise DeploymentError("pending_previous_invalid")
+    try:
+        raw = json.loads(path.read_bytes().decode("ascii"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        raise DeploymentError("pending_previous_invalid") from None
+    if not isinstance(raw, dict) or set(raw) != {"old_current_sha", "new_target_sha", "state"}:
+        raise DeploymentError("pending_previous_invalid")
+    old = raw["old_current_sha"]
+    new = raw["new_target_sha"]
+    state = raw["state"]
+    if old is not None and (not isinstance(old, str) or _SHA.fullmatch(old) is None):
+        raise DeploymentError("pending_previous_invalid")
+    if not isinstance(new, str) or _SHA.fullmatch(new) is None or not isinstance(state, str) or state not in _PENDING_STATES:
+        raise DeploymentError("pending_previous_invalid")
+    return {"old_current_sha": old, "new_target_sha": new, "state": state}
+
+
+def _remove_pending(root: Path) -> None:
+    path = _pending_path(root)
+    if not os.path.lexists(path):
+        return
+    if path.is_symlink() or not path.is_file():
+        raise DeploymentError("pending_previous_invalid")
+    try:
+        path.unlink()
+        _sync_directory(path.parent)
+    except OSError:
+        raise DeploymentError("pending_previous_remove_failed") from None
+
+
+def _recover_pending_previous(root: Path) -> str | None:
+    """Resolve the pending release authority after an interrupted switch."""
+    record = _read_pending(root)
+    if record is None:
+        return None
+    current = current_target(root)
+    old = record["old_current_sha"]
+    new = record["new_target_sha"]
+    state = record["state"]
+    if not (release_path(root, new).is_dir() and not release_path(root, new).is_symlink()):
+        raise DeploymentError("pending_release_missing")
+    validate_release(release_path(root, new))
+    if state == "PREPARED":
+        if (current is None and old is not None) or (current is not None and (old is None or current.name != old)):
+            raise DeploymentError("pending_current_disagreement")
+        _remove_pending(root)
+        return None
+    if old is None or current is None or current.name != new:
+        raise DeploymentError("pending_current_disagreement")
+    old_path = release_path(root, old)
+    if not old_path.is_dir() or old_path.is_symlink():
+        raise DeploymentError("pending_release_missing")
+    validate_release(old_path)
+    if state == "CURRENT_SWITCHED":
+        _finalize_pending_previous(root, record)
+        return old
+    previous = root / "opt" / "codex-control" / "previous"
+    if previous.is_symlink() or not previous.is_file():
+        raise DeploymentError("pending_previous_disagreement")
+    try:
+        previous_value = previous.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeDecodeError):
+        raise DeploymentError("pending_previous_disagreement") from None
+    if previous_value != old:
+        raise DeploymentError("pending_previous_disagreement")
+    _remove_pending(root)
+    return old
+
+
+def _finalize_pending_previous(root: Path, record: dict[str, Any]) -> None:
+    old = record["old_current_sha"]
+    new = record["new_target_sha"]
+    if old is None:
+        _write_pending(_pending_path(root), old_current_sha=old, new_target_sha=new, state="FINALIZED")
+        _remove_pending(root)
+        return
+    directory = root / "opt" / "codex-control"
+    previous = directory / "previous"
+    temporary = directory / ".previous.finalize"
+    if previous.is_symlink() or (previous.exists() and not previous.is_file()):
+        raise DeploymentError("previous_release_invalid")
+    if temporary.is_symlink() or (temporary.exists() and not temporary.is_file()):
+        raise DeploymentError("previous_release_invalid")
+    try:
+        temporary.write_text(old + "\n", encoding="ascii")
+        os.chmod(temporary, 0o600)
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, previous)
+        _sync_directory(directory)
+    except OSError:
+        raise DeploymentError("previous_record_failed") from None
+    # The pending record remains the rollback authority until this durable
+    # finalization state is itself persisted and removed.
+    _write_pending(_pending_path(root), old_current_sha=old, new_target_sha=new, state="FINALIZED")
+    _remove_pending(root)
+
+
 def rehearsal_switch_current(root: str | os.PathLike[str], git_sha: str, *, current_db_schema: int) -> Path:
     """Caller-fact based primitive for offline rehearsal tests only."""
     root_path = _layout_root(root)
+    _recover_pending_previous(root_path)
     target = release_path(root_path, git_sha)
     manifest = validate_release(target, current_db_schema=current_db_schema)
     if manifest.source_git_sha != git_sha:
@@ -538,39 +743,41 @@ def rehearsal_switch_current(root: str | os.PathLike[str], git_sha: str, *, curr
         raise DeploymentError("current_target_invalid")
     current.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
     prior = current_target(root_path)
-    temporary_previous = current.parent / ".previous.next"
     temporary_current = current.parent / ".current.next"
-    for path in (temporary_previous, temporary_current):
-        if path.exists() or path.is_symlink():
-            path.unlink()
+    if temporary_current.exists() or temporary_current.is_symlink():
+        raise DeploymentError("current_transaction_ambiguous")
     if prior is not None:
         if (current.parent / "previous").is_symlink() or (current.parent / "previous").exists() and not (current.parent / "previous").is_file():
             raise DeploymentError("previous_release_invalid")
-        temporary_previous.write_text(prior.name + "\n", encoding="ascii")
-    # Current is the linearization point.  A failure here leaves the old
-    # previous record untouched and therefore cannot fabricate a rollback fact.
+    _write_pending(_pending_path(root_path), old_current_sha=None if prior is None else prior.name, new_target_sha=git_sha, state="PREPARED")
     os.symlink(os.path.relpath(target, current.parent), temporary_current)
     try:
         os.replace(temporary_current, current)
     except OSError:
         if temporary_current.is_symlink() or temporary_current.exists():
             temporary_current.unlink()
-        if temporary_previous.exists():
-            temporary_previous.unlink()
+        _remove_pending(root_path)
         raise DeploymentError("current_switch_failed") from None
+    try:
+        _write_pending(_pending_path(root_path), old_current_sha=None if prior is None else prior.name, new_target_sha=git_sha, state="CURRENT_SWITCHED")
+    except DeploymentError:
+        # Keep the pending PREPARED record: it still identifies the immediate
+        # old current and forces fail-closed recovery after a restart.
+        raise
     if prior is not None:
         try:
-            os.replace(temporary_previous, current.parent / "previous")
-        except OSError:
-            if temporary_previous.exists():
-                temporary_previous.unlink()
-            # The new current still has the old previous record, which is
-            # truthful and safer than fabricating a target.
-            raise DeploymentError("previous_record_failed") from None
+            _finalize_pending_previous(root_path, {"old_current_sha": prior.name, "new_target_sha": git_sha, "state": "CURRENT_SWITCHED"})
+        except DeploymentError:
+            # Do not discard the only old-current authority. The pending
+            # record is deliberately left for rollback/recovery.
+            raise
+    else:
+        _finalize_pending_previous(root_path, {"old_current_sha": None, "new_target_sha": git_sha, "state": "CURRENT_SWITCHED"})
     return target
 
 
 def _previous_sha(root: Path) -> str:
+    _recover_pending_previous(root)
     try:
         value = (root / "opt" / "codex-control" / "previous").read_text(encoding="ascii").strip()
     except OSError:
@@ -607,10 +814,8 @@ def _production_authority(root_authority: DeploymentRootAuthority) -> Path:
     return _layout_root(root_authority)
 
 
-def _run_staged_validate(executable: Path, config: Path, secrets: Path, *, test_only: bool) -> None:
+def _run_staged_validate(executable: Path, config: Path, secrets: Path) -> None:
     command = [str(executable), "validate", "--config", str(config), "--secrets", str(secrets)]
-    if test_only:
-        command.append("--test-only-authority")
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
@@ -647,14 +852,25 @@ def install_upgrade(
     old = current_target(root_authority)
     if old is not None:
         validate_release(old, current_db_schema=schema, service_unit=service_unit)
-    target, _ = stage_release(
+    prepared, existing = _prepare_release(
         source, root=root_authority, git_sha=git_sha, service_unit=service_unit,
         allow_production_root=root == Path("/"), python_executable=python_executable,
     )
-    manifest = validate_release(target, current_db_schema=schema, service_unit=service_unit, source_repository=source)
-    if manifest.source_git_sha != git_sha:
-        raise DeploymentError("manifest_sha_mismatch")
-    _run_staged_validate(target / _EXECUTABLE_RELATIVE, Path(config_path), Path(secrets_path), test_only=test_only)
+    try:
+        # The executable is validated while still private. This command runs
+        # the same production preflight against config, secrets, existing DB,
+        # and the installed Codex authority as the caller-side preflight.
+        _run_staged_validate(prepared / _EXECUTABLE_RELATIVE, Path(config_path), Path(secrets_path))
+        target = prepared if existing else _publish_prepared_release(root, prepared, git_sha)
+        manifest = validate_release(
+            target, current_db_schema=schema, service_unit=service_unit, source_repository=source,
+        )
+        if manifest.source_git_sha != git_sha:
+            raise DeploymentError("manifest_sha_mismatch")
+    except DeploymentError:
+        if not existing and (prepared.exists() or prepared.is_symlink()):
+            shutil.rmtree(prepared, ignore_errors=True)
+        raise
     state = DeploymentState.PRE_SWITCH_VALIDATED
     rehearsal_switch_current(root_authority, git_sha, current_db_schema=schema)
     state = DeploymentState.SWITCHED_AWAITING_SERVICE_HEALTH

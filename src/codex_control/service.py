@@ -112,7 +112,9 @@ async def _probe_installed_authority(
         raise ServiceError("capability_mismatch") from None
 
 
-def _validate_filesystem_authority(config: ServerConfiguration, *, test_only: bool) -> IsolationPathAuthority:
+def _validate_filesystem_authority(
+    config: ServerConfiguration, *, test_only: bool, allow_missing_db: bool = False,
+) -> IsolationPathAuthority:
     try:
         _safe_dir(config.state_root, "state_root_invalid", require_root=not test_only)
         _safe_dir(config.working_directory, "working_directory_invalid", require_root=not test_only)
@@ -128,7 +130,29 @@ def _validate_filesystem_authority(config: ServerConfiguration, *, test_only: bo
             controller_db_root=config.controller_db_root, repository_root=config.repository_root,
             protected_roots=config.protected_roots,
         )
-        authority.validate_runtime_authority()
+        database = Path(config.controller_db_path)
+        if allow_missing_db and not os.path.lexists(database):
+            # The canonical first-install layout has an existing state root,
+            # but a custom DB path may add only missing subordinate components.
+            # Validate that deferred parent lexically belongs to the explicit
+            # controller DB root before the initializer creates anything.
+            db_root = Path(config.controller_db_root or config.state_root)
+            try:
+                if os.path.commonpath((os.path.abspath(db_root), os.path.abspath(database.parent))) != os.path.abspath(db_root):
+                    raise ServiceError("database_parent_invalid")
+            except ValueError:
+                raise ServiceError("database_parent_invalid") from None
+            # The DB leaf is intentionally absent during first install. Keep
+            # the configured DB root as the protected authority while the
+            # initializer validates/creates only subordinate parent entries.
+            authority = IsolationPathAuthority(
+                config.profiles, controller_db_path=None,
+                controller_db_root=config.controller_db_root, repository_root=config.repository_root,
+                protected_roots=config.protected_roots,
+            )
+            authority.validate_runtime_authority()
+        else:
+            authority.validate_runtime_authority()
         return authority
     except IsolationError:
         raise ServiceError("filesystem_authority_invalid") from None
@@ -148,7 +172,9 @@ async def _preflight_production_authority(
         secrets = load_secrets(secrets_path, test_only=test_only)
     except (ConfigurationError, SecretsError):
         raise ServiceError("configuration_or_secrets_invalid") from None
-    authority = _validate_filesystem_authority(config, test_only=test_only)
+    authority = _validate_filesystem_authority(
+        config, test_only=test_only, allow_missing_db=not require_existing_db,
+    )
     if require_existing_db:
         _read_schema(config.controller_db_path)
     manifest = await _probe_installed_authority(
@@ -218,13 +244,28 @@ async def _initialize_controller_state(
         installed_authority_probe=installed_authority_probe,
         require_existing_db=False,
     )
-    if os.path.lexists(config.controller_db_path):
+    database = Path(config.controller_db_path)
+    if os.path.lexists(database):
         raise ServiceError("database_already_initialized")
-    parent = Path(config.controller_db_path).parent
+    parent = database.parent
     try:
-        parent.mkdir(mode=0o700, parents=True, exist_ok=False)
-        os.chmod(parent, 0o700)
-        storage = await SqliteStorage.open(config.controller_db_path)
+        # state_root/controller_db_root is the pre-validated containment
+        # authority. Existing canonical parents are retained; only missing
+        # subordinate directory components are created privately.
+        db_root = Path(config.controller_db_root or config.state_root)
+        relative = parent.relative_to(db_root)
+        current = db_root
+        for component in relative.parts:
+            current /= component
+            if os.path.lexists(current):
+                _safe_dir(str(current), "database_parent_invalid", require_root=not test_only)
+                continue
+            current.mkdir(mode=0o700)
+            os.chmod(current, 0o700)
+            _safe_dir(str(current), "database_parent_invalid", require_root=not test_only)
+        if os.path.lexists(database):
+            raise ServiceError("database_already_initialized")
+        storage = await SqliteStorage.open(str(database))
         await storage.close()
     except ServiceError:
         raise

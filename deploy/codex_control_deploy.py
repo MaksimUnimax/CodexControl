@@ -42,7 +42,6 @@ def main(argv: list[str] | None = None) -> int:
     upgrade.add_argument("--secrets", required=True)
     upgrade.add_argument("--service-unit", required=True)
     upgrade.add_argument("--production-root-authority", action="store_true", help=argparse.SUPPRESS)
-    upgrade.add_argument("--test-only-authority", action="store_true", help=argparse.SUPPRESS)
     verify = sub.add_parser("verify")
     verify.add_argument("--root", required=True)
     verify.add_argument("--expected-sha")
@@ -63,7 +62,6 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(install_upgrade(
                 authority, args.source, git_sha=args.sha, config_path=args.config,
                 secrets_path=args.secrets, service_unit=args.service_unit,
-                test_only=args.test_only_authority,
             ), sort_keys=True))
         else:
             if args.config is None or args.secrets is None:
