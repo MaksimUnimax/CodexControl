@@ -79,6 +79,25 @@ class P7C16PreparationError(RuntimeError):
     """Finite, path-free preparation failure."""
 
 
+class P7C16ControllerStorageMismatch(P7C16PreparationError):
+    """Safe successor category for a known controller-authority mismatch."""
+
+    category = "controller_storage_mismatch"
+
+
+class P7C16LateFailure(P7C16PreparationError):
+    """Synthetic late failure used only after delete-generation acquire."""
+
+
+def _p7c16_error_category(error: BaseException) -> str | None:
+    category = getattr(error, "category", None)
+    value = getattr(category, "value", category)
+    return value if isinstance(value, str) and value else None
+
+
+P7C16_TEST_ONLY_PRODUCTION_FACTORY: Callable[["P7C16ArchitectContract"], "P7C16PreparedFutureExecutor"] | None = None
+
+
 def _sha256(value: str | bytes) -> str:
     return hashlib.sha256(value if isinstance(value, bytes) else value.encode()).hexdigest()
 
@@ -305,13 +324,14 @@ class P7C16RuntimeManagerView(p7c15.GenerationTrackingRuntimeManager):
             self._authority_view.bind_exact_path()
         return self._authority_view.authority
 
-    @property
-    def runtime_quiescent(self) -> bool:
-        return bool(getattr(self.underlying, "runtime_quiescent", False))
-
     async def acquire(self, profile_id: str) -> Any:
         self.acquire_count += 1
-        return await super().acquire(profile_id)
+        runtime = await super().acquire(profile_id)
+        if getattr(self.underlying, "generation", 0) >= 3 and getattr(self.underlying, "p7c16_failure_scenario", "") in {
+            "late_failure", "late_failure_shutdown_failure",
+        }:
+            raise P7C16LateFailure("P7.C16 synthetic late failure")
+        return runtime
 
     def configure(self, boot: Mapping[str, Any]) -> None:
         configure = getattr(self.underlying, "configure", None)
@@ -364,20 +384,54 @@ class P7C16ProductionChildOrchestrator(p7c15.P7C15ProductionChildOrchestrator):
         super().__init__(boot, journal, runtime_factory=factory, force_failure=force_failure, stage_timeouts=stage_timeouts)
 
     async def run_async(self) -> dict[str, Any]:
-        try:
-            result = await super().run_async()
-            return result
-        except BaseException:
-            manager = self.p7c16_manager
-            if manager is not None and (self._delete_generation_acquired or manager.acquire_count >= 3) and not manager.runtime_quiescent:
+        coordinator_init = DeleteStorageCleanupCoordinator.__init__
+        service_init = p7c13.DialogueDeleteService.__init__
+
+        def successor_coordinator_init(instance: Any, storage: Any, runtime_manager: Any, *args: Any, **kwargs: Any) -> None:
+            if isinstance(runtime_manager, P7C16RuntimeManagerView):
                 try:
-                    await asyncio.wait_for(
+                    # This is the exact path/storage agreement boundary. The
+                    # real coordinator constructor remains authoritative for
+                    # cleanup reservation and scanner behavior.
+                    runtime_manager.bind_controller(storage)
+                except ValueError as error:
+                    if str(error) == "controller_storage_mismatch":
+                        raise P7C16ControllerStorageMismatch() from None
+                    raise
+            coordinator_init(instance, storage, runtime_manager, *args, **kwargs)
+            if isinstance(runtime_manager, P7C16RuntimeManagerView):
+                self._mark("DELETE_CLEANUP_AUTHORITY_CONFIRMED", effect_class="controller")
+
+        def successor_service_init(instance: Any, *args: Any, **kwargs: Any) -> None:
+            service_init(instance, *args, **kwargs)
+            self._mark("DELETE_CHAIN_READY", effect_class="delete-chain")
+
+        try:
+            # Patch only constructor methods for this child lifetime. The
+            # concrete production classes and implementations remain intact.
+            with patch.object(DeleteStorageCleanupCoordinator, "__init__", successor_coordinator_init), \
+                 patch.object(p7c13.DialogueDeleteService, "__init__", successor_service_init):
+                return await super().run_async()
+        except BaseException as error:
+            manager = self.p7c16_manager
+            if manager is not None and (self._delete_generation_acquired or manager.acquire_count >= 3) and not self._runtime_quiescent(manager):
+                try:
+                    await p7c13._await_owned(
                         manager.shutdown_profile(P7C16_ENGINE_PROFILE_ID),
                         timeout=self.stage_timeouts.get("final_runtime_local_convergence", P7C16_REAL_CONVERGENCE_TIMEOUT),
+                        convergence=self.stage_timeouts.get("final_runtime_local_convergence", P7C16_REAL_CONVERGENCE_TIMEOUT),
+                        stage="P7.C16 late failure convergence",
                     )
                 except BaseException:
                     self._convergence_failed = True
+            if str(error) in {"durable controller binding mismatch", "controller_storage_mismatch"}:
+                raise P7C16ControllerStorageMismatch() from None
             raise
+
+    @staticmethod
+    def _runtime_quiescent(manager: Any) -> bool:
+        underlying = getattr(manager, "underlying", manager)
+        return not any(bool(getattr(underlying, name, {})) for name in ("_runtimes", "_starting", "_unresolved"))
 
 
 async def reproduce_p7c15_controller_authority_root_cause() -> dict[str, Any]:
@@ -685,7 +739,10 @@ class _P7C16UnderlyingFakeReservation:
         self.manager, self.profile_id, self.released = manager, profile_id, False
 
     def quiescence_proof(self) -> RuntimeQuiescenceProof:
-        return RuntimeQuiescenceProof(self.profile_id, not self.released, False, not self.manager.runtime_quiescent, False)
+        return RuntimeQuiescenceProof(
+            self.profile_id, not self.released, False,
+            not P7C16ProductionChildOrchestrator._runtime_quiescent(self.manager), False,
+        )
 
     async def release(self) -> None:
         await self.manager.release(self)
@@ -695,10 +752,20 @@ class _P7C16UnderlyingFakeRuntimeManager(p7c15._FakeRuntimeManager):
     """Fake external process boundary with real manager ownership semantics."""
 
     def __init__(self, scenario: str = "positive") -> None:
-        super().__init__(profile_id=P7C16_ENGINE_PROFILE_ID, scenario=scenario)
+        self.p7c16_failure_scenario = scenario if scenario.startswith("late_failure") else ""
+        super().__init__(
+            profile_id=P7C16_ENGINE_PROFILE_ID,
+            scenario="positive" if self.p7c16_failure_scenario else scenario,
+        )
         self._profile: Any | None = None
         self._authority: IsolationPathAuthority | None = None
         self._reservations: list[_P7C16UnderlyingFakeReservation] = []
+        # Deliberately mirror the real manager's ownership maps. The
+        # successor quiescence authority never reads the inherited fake-only
+        # runtime_quiescent boolean.
+        self._runtimes: dict[str, Any] = {}
+        self._starting: dict[str, Any] = {}
+        self._unresolved: dict[str, Any] = {}
         self.reserve_count = self.release_count = self.recreate_count = 0
 
     def configure(self, boot: Mapping[str, Any]) -> None:
@@ -727,6 +794,17 @@ class _P7C16UnderlyingFakeRuntimeManager(p7c15._FakeRuntimeManager):
         token = _P7C16UnderlyingFakeReservation(self, profile_id)
         self._reservations.append(token)
         return token
+
+    async def acquire(self, profile_id: str) -> Any:
+        runtime = await super().acquire(profile_id)
+        self._runtimes[profile_id] = runtime
+        return runtime
+
+    async def shutdown_profile(self, profile_id: str) -> None:
+        if self.p7c16_failure_scenario == "late_failure_shutdown_failure" and self.generation >= 3:
+            raise P7C16PreparationError("synthetic shutdown nonconvergence")
+        await super().shutdown_profile(profile_id)
+        self._runtimes.clear(); self._starting.clear(); self._unresolved.clear()
 
     async def release(self, token: _P7C16UnderlyingFakeReservation) -> None:
         if token not in self._reservations or token.released:
@@ -940,8 +1018,9 @@ def p7c16_future_child_main(boot_path: str | Path, *, runtime_factory: Callable[
         payload = _p7c16_child_payload(
             boot, {"status": "FAILED", "verdict": False, "last_confirmed_stage": child.last_confirmed_stage if child else "PRE_CHILD",
                    "terminal_exception_class": type(error).__name__,
-                   "terminal_error_category": getattr(getattr(error, "category", None), "value", None),
-                   "runtime_child_quiescent": bool(child and child.p7c16_manager and child.p7c16_manager.runtime_quiescent)},
+                   "terminal_error_category": _p7c16_error_category(error),
+                   "runtime_child_quiescent": bool(child and child.p7c16_manager and
+                                                    P7C16ProductionChildOrchestrator._runtime_quiescent(child.p7c16_manager))},
             child, journal,
         )
         try:
@@ -979,7 +1058,13 @@ def p7c16_real_entrypoint(*, environ: Mapping[str, str], authority: P7C16SourceA
     current = authority or current_p7c16_source_authority(); contract = _contract_from_environment(environ)
     if not p7c16_source_bundle_gate(environ, contract, current):
         raise P7C16PreparationError("P7C16_FUTURE_REAL_GATE=DISABLED_OR_SOURCE_MISMATCH")
-    return (executor or P7C16PreparedFutureExecutor(P7C16DurableOneShotLedger(P7C16_LEDGER_PATH))).run(contract)
+    if executor is not None:
+        selected = executor
+    elif P7C16_TEST_ONLY_PRODUCTION_FACTORY is not None:
+        selected = P7C16_TEST_ONLY_PRODUCTION_FACTORY(contract)
+    else:
+        selected = P7C16PreparedFutureExecutor.production(contract)
+    return selected.run(contract)
 
 
 class P7C16OfflineAuthorityTests(unittest.TestCase):
@@ -1035,6 +1120,194 @@ class P7C16OfflineAuthorityTests(unittest.TestCase):
                 finally:
                     await storage.close()
             asyncio.run(check())
+
+    def test_real_shaped_runtime_quiescence_matrix_uses_ownership_maps(self) -> None:
+        class RealShapedRuntimeManager:
+            def __init__(self) -> None:
+                self._runtimes: dict[str, object] = {}
+                self._starting: dict[str, object] = {}
+                self._unresolved: dict[str, object] = {}
+
+        manager = RealShapedRuntimeManager()
+        self.assertFalse(hasattr(manager, "runtime_quiescent"))
+        self.assertTrue(P7C16ProductionChildOrchestrator._runtime_quiescent(manager))
+        for name in ("_runtimes", "_starting", "_unresolved"):
+            setattr(manager, name, {"p7c15-successor-profile": object()})
+            self.assertFalse(P7C16ProductionChildOrchestrator._runtime_quiescent(manager))
+            setattr(manager, name, {})
+        self.assertTrue(P7C16ProductionChildOrchestrator._runtime_quiescent(manager))
+
+    def test_controller_storage_mismatch_is_finite_and_predelete(self) -> None:
+        contract = P7C16ArchitectContract("synthetic-token", "head", "tree", "launcher", "p15", "p14", "p13", "p12", "tests", "real-tests")
+        with tempfile.TemporaryDirectory(prefix="p7c16-controller-mismatch-") as directory:
+            root = Path(directory); boot = _p7c16_boot(root, contract)
+            P7C16RootOnlyBootAuthority(boot["boot_authority_path"]).create(boot, allow_test_home=True)
+            holder: dict[str, Any] = {}
+
+            def factory() -> Any:
+                manager = _P7C16UnderlyingFakeRuntimeManager(scenario="controller_mismatch")
+                holder["manager"] = manager
+                return manager
+
+            self.assertEqual(1, p7c16_future_child_main(boot["boot_authority_path"], runtime_factory=factory))
+            result = P7C16ChildResultAuthority.read(boot["child_result_path"])
+            self.assertEqual("FAILED", result["status"])
+            self.assertEqual("P7C16ControllerStorageMismatch", result["terminal_exception_class"])
+            self.assertEqual("controller_storage_mismatch", result["terminal_error_category"])
+            self.assertEqual(0, result["effect_counts"]["thread/delete"])
+            self.assertEqual(0, holder["manager"].client.calls.count("thread/delete"))
+
+    def test_late_failure_convergence_matrix_is_owned_and_one_shot(self) -> None:
+        contract = P7C16ArchitectContract("synthetic-token", "head", "tree", "launcher", "p15", "p14", "p13", "p12", "tests", "real-tests")
+        for scenario, expected_quiescent in (("late_failure", True), ("late_failure_shutdown_failure", False)):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory(prefix="p7c16-late-failure-") as directory:
+                root = Path(directory); boot = _p7c16_boot(root, contract)
+                P7C16RootOnlyBootAuthority(boot["boot_authority_path"]).create(boot, allow_test_home=True)
+                holder: dict[str, Any] = {}
+
+                def factory() -> Any:
+                    manager = _P7C16UnderlyingFakeRuntimeManager(scenario=scenario)
+                    holder["manager"] = manager
+                    return manager
+
+                self.assertEqual(1, p7c16_future_child_main(boot["boot_authority_path"], runtime_factory=factory))
+                result = P7C16ChildResultAuthority.read(boot["child_result_path"])
+                self.assertEqual("FAILED", result["status"])
+                self.assertFalse(result["verdict"])
+                self.assertEqual(expected_quiescent, result["runtime_child_quiescent"])
+                self.assertEqual(0, result["effect_counts"]["thread/delete"])
+                self.assertEqual(0, result["effect_counts"]["real_retry"])
+                self.assertEqual(0, holder["manager"].client.calls.count("thread/delete"))
+
+    def test_default_entrypoint_selects_production_and_completes_offline_handoff(self) -> None:
+        actual = current_p7c16_source_authority()
+        authority = P7C16SourceAuthority(
+            actual.head, actual.tree, actual.launcher_blob, actual.p7c15_launcher_blob,
+            actual.p7c14_launcher_blob, actual.p7c13_harness_blob, actual.p7c12_matcher_blob,
+            actual.tests_init_blob, actual.tests_real_init_blob, actual.import_root_authority,
+            True, True, True,
+        )
+        environment = {
+            P7C16_FUTURE_REAL_GATE: "synthetic-token",
+            P7C16_EXPECTED_HEAD: authority.head, P7C16_EXPECTED_TREE: authority.tree,
+            P7C16_EXPECTED_LAUNCHER_BLOB: authority.launcher_blob,
+            P7C16_EXPECTED_P7C15_LAUNCHER_BLOB: authority.p7c15_launcher_blob,
+            P7C16_EXPECTED_P7C14_LAUNCHER_BLOB: authority.p7c14_launcher_blob,
+            P7C16_EXPECTED_P7C13_HARNESS_BLOB: authority.p7c13_harness_blob,
+            P7C16_EXPECTED_P7C12_MATCHER_BLOB: authority.p7c12_matcher_blob,
+            P7C16_EXPECTED_TESTS_INIT_BLOB: authority.tests_init_blob,
+            P7C16_EXPECTED_TESTS_REAL_INIT_BLOB: authority.tests_real_init_blob,
+        }
+        with tempfile.TemporaryDirectory(prefix="p7c16-default-entrypoint-") as directory:
+            root = Path(directory); ledger_path = root / "authority" / "p7c16-one-shot.json"
+            events: list[str] = []; selection_count = 0; coordinator_count = 0; delete_count = 0
+            manager_holder: dict[str, Any] = {}
+            real_run = subprocess.run
+
+            def clean_git_run(*args: Any, **kwargs: Any) -> Any:
+                command = args[0] if args else kwargs.get("args", ())
+                if isinstance(command, (tuple, list)) and len(command) >= 2 and command[0] == "git" and command[1] == "diff":
+                    return subprocess.CompletedProcess(command, 0)
+                return real_run(*args, **kwargs)
+
+            def dispatch(boot_path: Path) -> int:
+                manager = _P7C16UnderlyingFakeRuntimeManager(); manager_holder["manager"] = manager
+                return p7c16_future_child_main(boot_path, runtime_factory=lambda: manager)
+
+            def factory(contract: P7C16ArchitectContract) -> P7C16PreparedFutureExecutor:
+                nonlocal selection_count
+                selection_count += 1
+                return P7C16PreparedFutureExecutor._production_with_authority(
+                    contract, ledger_path=ledger_path, child_dispatch=dispatch,
+                    test_only_codex_home=root / "fake-home", test_only_watchdog_bounds=(10.0, 1.0, 1.0),
+                    mutation_events=events,
+                )
+
+            original_coordinator = DeleteStorageCleanupCoordinator.__init__
+            original_delete = p7c13.DialogueDeleteService.delete
+
+            def counted_coordinator(instance: Any, *args: Any, **kwargs: Any) -> None:
+                nonlocal coordinator_count
+                coordinator_count += 1; original_coordinator(instance, *args, **kwargs)
+
+            async def counted_delete(instance: Any, request: Any) -> Any:
+                nonlocal delete_count
+                delete_count += 1; return await original_delete(instance, request)
+
+            with patch.object(subprocess, "run", side_effect=clean_git_run), \
+                 patch.object(DeleteStorageCleanupCoordinator, "__init__", counted_coordinator), \
+                 patch.object(p7c13.DialogueDeleteService, "delete", counted_delete), \
+                 patch(__name__ + ".P7C16_TEST_ONLY_PRODUCTION_FACTORY", factory):
+                observed = p7c16_real_entrypoint(environ=environment, authority=authority, executor=None)
+
+            self.assertEqual("COMPLETED", observed.status)
+            self.assertEqual(1, observed.child_count)
+            self.assertEqual(1, selection_count)
+            self.assertEqual(1, events.count("LEDGER_RESERVED"))
+            self.assertEqual(1, events.count("CHILD_DISPATCHED"))
+            self.assertEqual(1, coordinator_count); self.assertEqual(1, delete_count)
+            self.assertEqual(1, manager_holder["manager"].client.calls.count("model/list"))
+            self.assertEqual(1, manager_holder["manager"].client.calls.count("thread/delete"))
+            self.assertEqual("COMPLETED", P7C16DurableOneShotLedger(ledger_path).read()["state"])
+
+    def test_stage_authority_order_is_successor_owned(self) -> None:
+        contract = P7C16ArchitectContract("synthetic-token", "head", "tree", "launcher", "p15", "p14", "p13", "p12", "tests", "real-tests")
+        with tempfile.TemporaryDirectory(prefix="p7c16-stage-order-") as directory:
+            root = Path(directory); boot = _p7c16_boot(root, contract)
+            P7C16RootOnlyBootAuthority(boot["boot_authority_path"]).create(boot, allow_test_home=True)
+            self.assertEqual(0, p7c16_future_child_main(boot["boot_authority_path"], runtime_factory=_P7C16UnderlyingFakeRuntimeManager))
+            stages = [json.loads(line)["stage"] for line in Path(boot["stage_journal_path"]).read_text().splitlines()]
+            required = ["CONTROLLER_BINDING", "DELETE_CLEANUP_AUTHORITY_CONFIRMED", "DELETE_CHAIN_READY",
+                        "THREAD_DELETE_DISPATCH", "THREAD_DELETE_RESULT", "APPLICATION_DELETE_RESULT"]
+            positions = [stages.index(stage) for stage in required]
+            self.assertEqual(positions, sorted(positions))
+
+    def test_gate_disabled_cli_projection_is_two_without_executor_injection(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(2, _module_main(["--p7c16-real-run"]))
+
+    def test_default_entrypoint_cli_projects_every_terminal_state(self) -> None:
+        actual = current_p7c16_source_authority()
+        authority = P7C16SourceAuthority(
+            actual.head, actual.tree, actual.launcher_blob, actual.p7c15_launcher_blob,
+            actual.p7c14_launcher_blob, actual.p7c13_harness_blob, actual.p7c12_matcher_blob,
+            actual.tests_init_blob, actual.tests_real_init_blob, actual.import_root_authority,
+            True, True, True,
+        )
+        environment = {
+            P7C16_FUTURE_REAL_GATE: "synthetic-token",
+            P7C16_EXPECTED_HEAD: authority.head, P7C16_EXPECTED_TREE: authority.tree,
+            P7C16_EXPECTED_LAUNCHER_BLOB: authority.launcher_blob,
+            P7C16_EXPECTED_P7C15_LAUNCHER_BLOB: authority.p7c15_launcher_blob,
+            P7C16_EXPECTED_P7C14_LAUNCHER_BLOB: authority.p7c14_launcher_blob,
+            P7C16_EXPECTED_P7C13_HARNESS_BLOB: authority.p7c13_harness_blob,
+            P7C16_EXPECTED_P7C12_MATCHER_BLOB: authority.p7c12_matcher_blob,
+            P7C16_EXPECTED_TESTS_INIT_BLOB: authority.tests_init_blob,
+            P7C16_EXPECTED_TESTS_REAL_INIT_BLOB: authority.tests_real_init_blob,
+        }
+        real_run = subprocess.run
+
+        def clean_git_run(*args: Any, **kwargs: Any) -> Any:
+            command = args[0] if args else kwargs.get("args", ())
+            if isinstance(command, (tuple, list)) and len(command) >= 2 and command[0] == "git" and command[1] == "diff":
+                return subprocess.CompletedProcess(command, 0)
+            return real_run(*args, **kwargs)
+
+        class ProjectionExecutor:
+            def __init__(self, state: str) -> None:
+                self.state = state
+
+            def run(self, _contract: P7C16ArchitectContract) -> dict[str, str]:
+                return {"state": self.state}
+
+        for state, expected_exit in (("COMPLETED", 0), ("FAILED", 1), ("UNKNOWN", 1),
+                                     ("CONFIRMED_PENDING", 1), ("TIMEOUT", 1)):
+            with self.subTest(state=state):
+                with patch.dict(os.environ, environment, clear=True), \
+                     patch.object(subprocess, "run", side_effect=clean_git_run), \
+                     patch(__name__ + ".current_p7c16_source_authority", return_value=authority), \
+                     patch(__name__ + ".P7C16_TEST_ONLY_PRODUCTION_FACTORY", lambda _contract, selected=state: ProjectionExecutor(selected)):
+                    self.assertEqual(expected_exit, _module_main(["--p7c16-real-run"]))
 
     def test_full_production_shaped_handoff_uses_real_cleanup_chain(self) -> None:
         contract = P7C16ArchitectContract("synthetic-token", "head", "tree", "launcher", "p15", "p14", "p13", "p12", "tests", "real-tests")
