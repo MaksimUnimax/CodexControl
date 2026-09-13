@@ -611,8 +611,10 @@ def _run_staged_validate(executable: Path, config: Path, secrets: Path, *, test_
     command = [str(executable), "validate", "--config", str(config), "--secrets", str(secrets)]
     if test_only:
         command.append("--test-only-authority")
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
-        subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=30)
+        subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=30, env=environment)
     except (OSError, subprocess.SubprocessError):
         raise DeploymentError("staged_validate_failed") from None
 
