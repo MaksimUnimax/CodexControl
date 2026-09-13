@@ -331,6 +331,191 @@ P7C13_REAL_RETRY_AUTHORIZED=NO
 P8_STARTED=NO
 P9_STARTED=NO
 
+## Repair-4 final one-shot containment and evidence-integrity micro-repair
+
+Repair-4 was executed on branch
+prep-p7-c15-hard-delete-successor-repair4-2026-09-13, fetched from the
+already-published exact Repair-3 candidate.  No merge, rebase, squash, force
+push, history rewrite, historical retry, real token, real Codex process,
+app-server, RPC, approval, interrupt, delete, Telegram call, P7.C14 orphan
+mutation, or P8/P9 activity occurred.
+
+P7C15_REPAIR4_BASE_HEAD=84b901f7af208ecde240b0ba0ed13188376b4104
+P7C15_REPAIR4_BASE_TREE=31c2c22b5d11dafdcd06b8fb96e5dd0e880fc1ce
+PRIOR_P7C15_LAUNCHER_BLOB=5e964d9408413b968b03e334759037f906174ffd
+PRIOR_P7C15_EVIDENCE_BLOB=2cc14317db626d58d62189cc2669c9a7c78cb07d
+origin/main=20506b7f3c86d4ac9a317a6f2a850428de6c6d40
+origin/main_tree=fe2919faf2bd2a4b9ab57536feee88268720c0e7
+FINAL_P7C15_LAUNCHER_BLOB=ebe4ffab2d08494452c1b132fe2fed50f4830a6b
+FINAL_P7C15_EVIDENCE_BLOB=COMPUTED_AFTER_FINAL_EVIDENCE_EDIT
+FINAL_P7C15_HELPER_BLOB=NONE
+INHERITED_P7C14_LAUNCHER_BLOB=fcce1352d581522b4c4ab0e5235d0b927d2eceb8
+INHERITED_P7C13_HARNESS_BLOB=5a1fe8e32cd985b1e1845d73266211632e33950c
+INHERITED_P7C12_MATCHER_BLOB=f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1
+
+### Ledger-before-mutation proof
+
+Production construction now computes the run hash and all path strings in
+memory.  It reserves /root/.codexcontrol/p7c15-one-shot.json before creating
+either run parent, validates the fresh boundaries, creates root-only boot,
+then dispatches one owned child.  The instrumented successful prefix was:
+
+LEDGER_RESERVED
+RUN_STATE_PARENT_CREATED
+RUN_WORK_PARENT_CREATED
+BOOT_CREATED
+CHILD_DISPATCHED
+
+Source-gate failure produced zero reservation, parent mkdir, and child events.
+Already-consumed ledger produced zero new parent mkdir and zero child count.
+State-parent mkdir failure produced one reservation and left the ledger
+RESERVED/consumed with no child.  Work-parent mkdir failure produced one
+reservation, one state parent, no child, and remained consumed.  Boot creation
+failure occurred after both parents and reservation, with no child and no
+retry.  All failures were temporary offline authorities.
+
+### P7.C15 watchdog invocation-plan proof
+
+The frozen plan contains 35 sequential bounded windows and explicitly repeats
+the inherited keys used more than once:
+
+P7C15_REAL_INTERNAL_TIMEOUT_BUDGET=1420.0
+P7C15_REAL_WATCHDOG_MARGIN=60.0
+P7C15_REAL_WATCHDOG_HARD_DEADLINE=1480.0
+turn1_start_terminal=2
+turn2_start_terminal=2
+turn3_start_approval_terminal=4
+controller_open_binding=5
+final_runtime_local_convergence=10
+
+The production watchdog selects P7C15_REAL_WATCHDOG_HARD_DEADLINE; it does
+not select the inherited 670-second P7.C13 hard deadline.  TERM/KILL grace
+remains inherited and the short watchdog tuple is available only through the
+explicit offline injection seam.  No production 5.0/0.2/0.2 watchdog
+fallback exists.  The deadline is the actual plan sum plus a positive bounded
+margin.
+
+### Turn-3 post-join classification proof
+
+The observer now derives its final class only after both owned tasks have
+terminalized and joined:
+
+REQUEST_OBSERVED                         NON-PASS; no second response
+CANCELLED_BY_HARNESS_WITHOUT_REQUEST    clean no-request eligibility
+OBSERVER_ERROR                           NON-PASS; fail closed
+
+The deterministic late-window test uses events/barriers: the terminal wins,
+the preliminary request snapshot is pending, the fake server releases one
+request before final observer ownership ends, and final classification is
+REQUEST_OBSERVED.  It proves Turn-3 NON-PASS, response/ALLOW totals remain
+1/1, no second response, Turn-4/controller/delete callbacks are unreachable,
+and both tasks are joined.  Same-slice request plus terminal is NON-PASS.
+Terminal plus harness cancellation is clean.  Observer exception is
+OBSERVER_ERROR.
+
+### Bounded controller close proof
+
+After successful SqliteStorage.open(), one try/finally owns exactly one
+bounded storage.close() through _await_owned(..., stage="controller close").
+The offline production-shaped close matrix covered pre-delete schema mismatch,
+durable binding mismatch, missing official observation, normal delete failure,
+DELETE_UNKNOWN, CONFIRMED_PENDING_STORAGE, post-delete schema drift, and a
+post-delete residual.  Every opened controller had one finite close, no
+detached close task, no duplicate RPC/delete, and retry zero.  Pre-controller
+failure did not open or close storage.
+
+### Parent terminal recovery authority
+
+Terminal ledger recovery now persists safe observed facts:
+watchdog_status, child-result validity/status/verdict, runtime-child
+quiescence, exact-effect gate, owned-group active/zombie/scan-error counts,
+signal count and bounded signal classes, child count, retry count,
+last-confirmed stage, and a safe child-result authority hash/class.  It
+persists no raw thread/Turn IDs, prompt, response, wire plaintext, or token.
+
+The positive record independently contains watchdog COMPLETED, valid child
+PASS, verdict true, runtime-child quiescent true, exact-effect gate true,
+active/zombies/scan errors 0, child count 1, retry 0.  The forced failure
+record preserves actual CHILD_FAILURE, child FAILED, false verdict and
+quiescence, exact-effect false, group facts, child count 1 and retry 0.
+UNKNOWN and CONFIRMED_PENDING child classes remain non-PASS with no retry or
+second delete.  A completed recovery predicate test rejects each missing or
+contradictory safe fact.
+
+### Repair-3 exact-effect positive handoff and no regression
+
+The complete production-shaped fake handoff remains PASS with exactly:
+
+new_threads=1 model/list=1 thread/start=1 thread/resume=1 turn/start=4
+approval_responses=1 allow_responses=1 turn/interrupt=1 thread/delete=1
+thread/read=0 thread/list=0 second_child=0 real_retry=0 telegram=0
+
+It retains one real-client-shaped approval request, one bridge response, one
+ALLOW, one Turn-4 interrupt, one durable IDLE controller binding, one
+canonical DialogueDeleteService.delete(), one independent official delete
+observation, observed tombstone/live-binding transition, isolated and
+persistent post-delete observations, schema-v4 re-read, isolation envelope,
+runtime-child quiescence, and independent parent group proof.  The full
+Repair-3 positive and negative production-shaped behavior remains covered.
+
+### Validation
+
+focused Repair-4 P7.C15: 36 passed, 23 subtests passed
+P7.C15 pre-ledger/watchdog/Turn-3/close/recovery matrices: included above
+P7.C12 focused: 13 passed, 79 subtests passed
+P7.C13/P7.C14 offline regressions: 83 passed, 49 subtests passed
+P7.C2/P7.C3/P7.C4/P7.C5: 106 passed, 54 subtests passed
+non-real pytest (tests excluding tests/real): 1065 passed, 647 subtests passed, 2 warnings
+unittest discovery: 1907 run, 7 skipped, 5 historical latch failures, 1 historical authority error
+gate-disabled P7.C15 smoke: exit 2; P7.C15 ledger absent; P7.C15 state/work parents absent
+compileall: PASS
+git diff --check: PASS
+leakage/security scan: PASS
+changed-path scope: PASS; only launcher and this evidence file
+
+The six P7.C6-P7.C11 pytest failures and six corresponding unittest
+failures/errors are immutable pre-existing consumed-latch or retained
+P7.C11-parent-authority conditions.  They were reported separately and no
+historical ledger, retained orphan, or historical source/evidence was changed.
+
+Zero-real-effect accounting:
+
+REAL_CODEX_PROCESS_STARTS=0
+APP_SERVER_STARTS=0
+MODEL_LIST_CALLS=0
+THREAD_START_CALLS=0
+THREAD_RESUME_CALLS=0
+THREAD_READ_CALLS=0
+THREAD_LIST_CALLS=0
+THREAD_DELETE_CALLS=0
+TURN_START_CALLS=0
+TURN_INTERRUPT_CALLS=0
+APPROVAL_RESPONSES=0
+ALLOW_RESPONSES=0
+DENY_RESPONSES=0
+P7C13_LEDGER_MUTATIONS=0
+P7C14_LEDGER_MUTATIONS=0
+P7C15_REAL_LEDGER_CREATIONS=0
+PERSISTENT_HOME_MUTATIONS=0
+P7C14_ORPHAN_MUTATIONS=0
+TELEGRAM_CALLS=0
+REAL_PROCESS_SIGNALS=0
+
+P7C15_REPAIR4_LEDGER_BEFORE_RUN_MUTATION=PASS
+P7C15_REPAIR4_WATCHDOG_COVERS_ACTUAL_STAGE_PLAN=PASS
+P7C15_REPAIR4_TURN3_POST_JOIN_REQUEST_CLASSIFICATION=PASS
+P7C15_REPAIR4_BOUNDED_CONTROLLER_CLOSE=PASS
+P7C15_REPAIR4_PARENT_TERMINAL_RECOVERY_AUTHORITY=PASS
+P7C15_REPAIR4_REPAIR3_NO_REGRESSION=PASS
+P7C15_PREP_READY=YES
+
+P7C15_REAL_EXECUTION_AUTHORIZED=NO
+P7C14_REAL_RETRY_AUTHORIZED=NO
+P7C13_REAL_RETRY_AUTHORIZED=NO
+
+P8_STARTED=NO
+P9_STARTED=NO
+
 ## Repair-3 final production-hardening preparation
 
 Repair-3 was executed from the exact Repair-2 candidate above, without merge,

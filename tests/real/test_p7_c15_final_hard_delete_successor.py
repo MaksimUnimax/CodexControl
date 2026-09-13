@@ -71,6 +71,50 @@ P7C15_LEDGER_STATES = frozenset(
     ("RESERVED", "COMPLETED", "FAILED", "UNKNOWN", "CONFIRMED_PENDING", "TIMEOUT")
 )
 
+# This is an invocation plan, rather than a set of unique timeout keys.  A
+# number of the inherited stage buckets are consumed more than once in the
+# sequential positive path, so the parent deadline must cover each window.
+P7C15_REAL_TIMEOUT_INVOCATION_PLAN: tuple[tuple[str, str, float], ...] = (
+    ("fresh_workdir_creation", "thread_start", 30.0),
+    ("runtime_generation_1_acquire", "runtime_acquire_generation_1", 30.0),
+    ("model_list", "model_list", 20.0),
+    ("thread_start", "thread_start", 30.0),
+    ("turn1_start", "turn1_start_terminal", 60.0),
+    ("turn1_terminal", "turn1_start_terminal", 60.0),
+    ("generation_1_shutdown", "runtime_shutdown_generation_1", 30.0),
+    ("runtime_generation_2_acquire", "runtime_acquire_generation_2", 30.0),
+    ("thread_resume", "thread_resume", 30.0),
+    ("turn2_start", "turn2_start_terminal", 60.0),
+    ("turn2_terminal", "turn2_start_terminal", 60.0),
+    ("turn3_start", "turn3_start_approval_terminal", 90.0),
+    ("first_approval_handling", "turn3_start_approval_terminal", 90.0),
+    ("turn3_observer_primary_wait", "turn3_start_approval_terminal", 90.0),
+    ("turn3_terminal_convergence_after_request_first", "turn3_start_approval_terminal", 90.0),
+    ("turn3_observer_join_terminal", "final_runtime_local_convergence", 30.0),
+    ("turn3_observer_join_request", "final_runtime_local_convergence", 30.0),
+    ("turn4_start", "turn4_start", 30.0),
+    ("turn4_active_observation", "turn4_active_observation", 5.0),
+    ("turn4_interrupt_terminal", "turn4_interrupt_terminal", 45.0),
+    ("turn4_join_terminal", "final_runtime_local_convergence", 30.0),
+    ("turn4_join_request", "final_runtime_local_convergence", 30.0),
+    ("runtime_shutdown_before_oracle", "runtime_shutdown_before_scan", 30.0),
+    ("runtime_acquire_delete_generation", "final_runtime_local_convergence", 30.0),
+    ("controller_open", "controller_open_binding", 30.0),
+    ("pre_delete_schema_read", "controller_open_binding", 30.0),
+    ("dialogue_create", "controller_open_binding", 30.0),
+    ("dialogue_confirm", "controller_open_binding", 30.0),
+    ("durable_binding_read", "controller_open_binding", 30.0),
+    ("canonical_application_delete", "canonical_application_delete", 60.0),
+    ("final_runtime_shutdown", "final_runtime_local_convergence", 30.0),
+    ("tombstone_read", "final_runtime_local_convergence", 30.0),
+    ("post_delete_live_binding_read", "final_runtime_local_convergence", 30.0),
+    ("post_delete_schema_read", "final_runtime_local_convergence", 30.0),
+    ("storage_close", "final_runtime_local_convergence", 30.0),
+)
+P7C15_REAL_INTERNAL_TIMEOUT_BUDGET = sum(item[2] for item in P7C15_REAL_TIMEOUT_INVOCATION_PLAN)
+P7C15_REAL_WATCHDOG_MARGIN = 60.0
+P7C15_REAL_WATCHDOG_HARD_DEADLINE = P7C15_REAL_INTERNAL_TIMEOUT_BUDGET + P7C15_REAL_WATCHDOG_MARGIN
+
 
 def p7c15_fresh_run_paths(
     run_hash_fragment: str, *, root: Path = Path("/root"), authority: Path = Path("/root/.codexcontrol")
@@ -661,6 +705,23 @@ def p7c15_exact_effect_pass_gate(counts: Mapping[str, int]) -> bool:
     )
 
 
+def p7c15_completed_recovery_consistent(recovery: Mapping[str, Any]) -> bool:
+    """Require persisted parent facts to independently prove COMPLETED."""
+    return (
+        recovery.get("watchdog_status") == "COMPLETED"
+        and recovery.get("child_result_valid") is True
+        and recovery.get("child_status") == "PASS"
+        and recovery.get("child_verdict") is True
+        and recovery.get("runtime_child_quiescent") is True
+        and recovery.get("exact_effect_gate") is True
+        and recovery.get("owned_group_active") == 0
+        and recovery.get("owned_group_zombies") == 0
+        and recovery.get("group_scan_errors") == 0
+        and recovery.get("child_count") == 1
+        and recovery.get("retry_count") == 0
+    )
+
+
 def _p7c15_child_result_payload(
     boot: Mapping[str, Any], result: Mapping[str, Any], pre_child_budget: EffectBudget,
     child: Any | None = None,
@@ -692,15 +753,14 @@ class _LiveChild:
 async def _observe_turn3_request_after_response(
     *, client: Any, turn_lifecycle: Any, binding: Any,
     timeout: float, join_timeout: float,
-) -> tuple[Any | None, bool, bool]:
+) -> "P7C15Turn3ObserverOutcome":
     """Own the post-response request observer through Turn-3 convergence."""
     terminal_task = asyncio.create_task(turn_lifecycle.wait_turn(binding))
     request_task = asyncio.create_task(client.next_server_request())
     terminal: Any | None = None
-    second_request = False
-    same_slice = False
     fault = False
-    cancel_request = False
+    preliminary_request_done = False
+    harness_cancel_requested = False
     try:
         done, _ = await asyncio.wait(
             (terminal_task, request_task), timeout=timeout,
@@ -708,50 +768,90 @@ async def _observe_turn3_request_after_response(
         )
         if not done:
             raise P7C15PreparationError("Turn-3 terminal/request convergence timeout")
+        preliminary_request_done = request_task.done()
+        # Let a request that became ready in the same scheduling slice become
+        # visible before the terminal branch takes ownership of cancellation.
         await asyncio.sleep(0)
-        if request_task.done():
-            if not request_task.cancelled():
-                try:
-                    request_task.result()
-                    second_request = True
-                except Exception:
-                    fault = True
-            if terminal_task.done():
-                same_slice = True
-            else:
-                try:
-                    terminal = await asyncio.wait_for(asyncio.shield(terminal_task), timeout=timeout)
-                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-                    fault = True
-        elif terminal_task.done():
+        if terminal_task.done():
             try:
                 terminal = terminal_task.result()
-            except (asyncio.CancelledError, Exception):
+            except BaseException:
                 fault = True
-            await asyncio.sleep(0)
-            if request_task.done() and not request_task.cancelled():
-                try:
-                    request_task.result()
-                    second_request = True
-                    same_slice = True
-                except Exception:
-                    fault = True
+        elif request_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(terminal_task), timeout=timeout)
+                terminal = terminal_task.result()
+            except BaseException:
+                fault = True
     finally:
         if not terminal_task.done():
             terminal_task.cancel()
         if not request_task.done():
-            cancel_request = True
+            harness_cancel_requested = True
             request_task.cancel()
+        # This scheduling barrier is part of the owned observer boundary.  It
+        # permits a request already released by the server before/during final
+        # join to terminalize and be classified rather than being lost behind
+        # a preliminary task.done() snapshot.
+        await asyncio.sleep(0)
         for task in (terminal_task, request_task):
             try:
                 await asyncio.wait_for(task, timeout=join_timeout)
             except asyncio.CancelledError:
+                # Harness-owned request cancellation is a clean terminal
+                # observer class, not an observer fault.
                 pass
-            except (asyncio.TimeoutError, Exception):
+            except BaseException:
                 fault = True
-    if not request_task.done() or (request_task.cancelled() and not cancel_request):
+    request_class, second_request = _classify_turn3_request_observer(
+        request_task, harness_cancel_requested=harness_cancel_requested,
+    )
+    if request_class == P7C15Turn3RequestObserverClass.OBSERVER_ERROR:
         fault = True
-    return terminal, second_request or same_slice, fault
+    return P7C15Turn3ObserverOutcome(
+        terminal=terminal, second_request=second_request, observer_fault=fault,
+        request_observer_class=request_class, preliminary_request_done=preliminary_request_done,
+        terminal_waiter_joined=terminal_task.done(), request_observer_joined=request_task.done(),
+    )
+
+
+class P7C15Turn3RequestObserverClass:
+    REQUEST_OBSERVED = "REQUEST_OBSERVED"
+    CANCELLED_BY_HARNESS_WITHOUT_REQUEST = "CANCELLED_BY_HARNESS_WITHOUT_REQUEST"
+    OBSERVER_ERROR = "OBSERVER_ERROR"
+
+
+@dataclass(frozen=True)
+class P7C15Turn3ObserverOutcome:
+    terminal: Any | None
+    second_request: bool
+    observer_fault: bool
+    request_observer_class: str
+    preliminary_request_done: bool
+    terminal_waiter_joined: bool
+    request_observer_joined: bool
+
+    def __iter__(self):
+        # Keep the accepted internal three-value call shape while exposing the
+        # final post-join classification as explicit evidence for tests.
+        return iter((self.terminal, self.second_request, self.observer_fault))
+
+
+def _classify_turn3_request_observer(
+    task: asyncio.Task[Any], *, harness_cancel_requested: bool,
+) -> tuple[str, bool]:
+    """Classify only after final ownership/join; preliminary snapshots do not decide."""
+    if not task.done():
+        return P7C15Turn3RequestObserverClass.OBSERVER_ERROR, False
+    if task.cancelled():
+        if harness_cancel_requested:
+            return P7C15Turn3RequestObserverClass.CANCELLED_BY_HARNESS_WITHOUT_REQUEST, False
+        return P7C15Turn3RequestObserverClass.OBSERVER_ERROR, False
+    try:
+        task.result()
+    except BaseException:
+        return P7C15Turn3RequestObserverClass.OBSERVER_ERROR, False
+    return P7C15Turn3RequestObserverClass.REQUEST_OBSERVED, True
 
 
 class P7C15ProductionChildOrchestrator:
@@ -1015,79 +1115,86 @@ class P7C15ProductionChildOrchestrator:
             p7c13.SqliteStorage.open(self.boot["controller_db"]),
             timeout=self.stage_timeouts["controller_open_binding"], stage="controller open",
         )
-        schema_version = await p7c13._await_owned(
-            storage.read(lambda connection: int(connection.execute("PRAGMA user_version").fetchone()[0])),
-            timeout=self.stage_timeouts["controller_open_binding"], stage="schema read",
-        )
-        if schema_version != 4:
-            await storage.close()
-            raise P7C15PreparationError("controller schema is not v4")
-        repository = p7c13.DialogueRepository(storage)
-        dialogue = await p7c13._await_owned(
-            repository.create_intent(dialogue_id=f"p7c15-{self.boot['run_id_hash'][:24]}", server_id="server-80", profile_id=P7C15_PROFILE_ID),
-            timeout=self.stage_timeouts["controller_open_binding"], stage="dialogue create",
-        )
-        idle = await p7c13._await_owned(
-            repository.confirm_created(dialogue_id=dialogue.dialogue_id, expected_version=dialogue.version, thread_id=binding.thread_id),
-            timeout=self.stage_timeouts["controller_open_binding"], stage="dialogue confirm",
-        )
-        durable = await p7c13._await_owned(
-            repository.get_live(), timeout=self.stage_timeouts["controller_open_binding"], stage="durable binding read",
-        )
-        if durable is None or durable.state is not p7c13.DialogueState.IDLE or durable.thread_id != binding.thread_id or durable.profile_id != P7C15_PROFILE_ID:
-            await storage.close()
-            raise P7C15PreparationError("schema-v4 durable binding invalid")
-        if getattr(manager, "scenario", "") == "controller_mismatch":
-            await storage.close()
-            raise P7C15PreparationError("durable controller binding mismatch")
-        self._mark("CONTROLLER_BINDING", effect_class="controller")
-
-        official = p7c13.OfficialDeleteObservation(CodexThreadLifecycleAdapter(tracker, rebound))
-        service = p7c13.DialogueDeleteService(
-            storage, server_id="server-80", thread_lifecycle=official,
-            local_cleanup=(
-                _P7C15FakeStorageCleanup(
-                    storage, pending=getattr(manager, "scenario", "") == "confirmed_pending",
-                    missing_tombstone=getattr(manager, "scenario", "") == "missing_tombstone",
-                )
-                if isinstance(manager, _FakeRuntimeManager)
-                else p7c13.DeleteStorageCleanupCoordinator(storage, tracker)
-            ),
-        )
-        self._mark("THREAD_DELETE_DISPATCH", "DISPATCHED", "thread/delete")
-        self.budget.record("thread/delete")
-        application = await p7c13._await_owned(
-            service.delete(p7c13.DialogueDeleteRequest(idle.dialogue_id, idle.version)),
-            timeout=self.stage_timeouts["canonical_application_delete"], stage="canonical application delete",
-        )
-        if official.calls != 1 or official.status is None:
-            await storage.close()
-            raise P7C15PreparationError("official delete observation missing")
-        self._mark("THREAD_DELETE_RESULT", effect_class="thread/delete")
-        application_status = getattr(application.status, "value", None)
-        self._mark("APPLICATION_DELETE_RESULT", effect_class="application")
-        if getattr(manager, "scenario", "") == "postdelete_schema_drift":
-            await p7c13._await_owned(
-                storage.read(lambda connection: connection.execute("PRAGMA user_version = 3").fetchone()),
-                timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="test schema drift",
+        # Once open succeeds, every exit—including schema, binding, official
+        # observation, delete and post-delete failures—passes through exactly
+        # one bounded owner close.
+        try:
+            schema_version = await p7c13._await_owned(
+                storage.read(lambda connection: int(connection.execute("PRAGMA user_version").fetchone()[0])),
+                timeout=self.stage_timeouts["controller_open_binding"], stage="schema read",
             )
-        await p7c13._await_owned(
-            tracker.shutdown_profile(P7C15_PROFILE_ID),
-            timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="final runtime shutdown",
-        )
-        self._mark("RUNTIME_SHUTDOWN_FINAL", effect_class="runtime")
-        tombstone = await p7c13._await_owned(
-            p7c13.DeletionRepository(storage).get_tombstone(idle.dialogue_id),
-            timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="tombstone read",
-        )
-        live_after = await p7c13._await_owned(
-            repository.get_live(), timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="post-delete live-binding read",
-        )
-        post_schema_version = await p7c13._await_owned(
-            storage.read(lambda connection: int(connection.execute("PRAGMA user_version").fetchone()[0])),
-            timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="post-delete schema read",
-        )
-        await p7c13._await_owned(storage.close(), timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="storage close")
+            if getattr(manager, "scenario", "") == "schema_mismatch":
+                schema_version = 3
+            if schema_version != 4:
+                raise P7C15PreparationError("controller schema is not v4")
+            repository = p7c13.DialogueRepository(storage)
+            dialogue = await p7c13._await_owned(
+                repository.create_intent(dialogue_id=f"p7c15-{self.boot['run_id_hash'][:24]}", server_id="server-80", profile_id=P7C15_PROFILE_ID),
+                timeout=self.stage_timeouts["controller_open_binding"], stage="dialogue create",
+            )
+            idle = await p7c13._await_owned(
+                repository.confirm_created(dialogue_id=dialogue.dialogue_id, expected_version=dialogue.version, thread_id=binding.thread_id),
+                timeout=self.stage_timeouts["controller_open_binding"], stage="dialogue confirm",
+            )
+            durable = await p7c13._await_owned(
+                repository.get_live(), timeout=self.stage_timeouts["controller_open_binding"], stage="durable binding read",
+            )
+            if durable is None or durable.state is not p7c13.DialogueState.IDLE or durable.thread_id != binding.thread_id or durable.profile_id != P7C15_PROFILE_ID:
+                raise P7C15PreparationError("schema-v4 durable binding invalid")
+            if getattr(manager, "scenario", "") == "controller_mismatch":
+                raise P7C15PreparationError("durable controller binding mismatch")
+            self._mark("CONTROLLER_BINDING", effect_class="controller")
+
+            official = p7c13.OfficialDeleteObservation(CodexThreadLifecycleAdapter(tracker, rebound))
+            service = p7c13.DialogueDeleteService(
+                storage, server_id="server-80", thread_lifecycle=official,
+                local_cleanup=(
+                    _P7C15FakeStorageCleanup(
+                        storage, pending=getattr(manager, "scenario", "") == "confirmed_pending",
+                        missing_tombstone=getattr(manager, "scenario", "") == "missing_tombstone",
+                    )
+                    if isinstance(manager, _FakeRuntimeManager)
+                    else p7c13.DeleteStorageCleanupCoordinator(storage, tracker)
+                ),
+            )
+            self._mark("THREAD_DELETE_DISPATCH", "DISPATCHED", "thread/delete")
+            self.budget.record("thread/delete")
+            application = await p7c13._await_owned(
+                service.delete(p7c13.DialogueDeleteRequest(idle.dialogue_id, idle.version)),
+                timeout=self.stage_timeouts["canonical_application_delete"], stage="canonical application delete",
+            )
+            if getattr(manager, "scenario", "") == "official_missing":
+                official.status = None
+            if official.calls != 1 or official.status is None:
+                raise P7C15PreparationError("official delete observation missing")
+            self._mark("THREAD_DELETE_RESULT", effect_class="thread/delete")
+            application_status = getattr(application.status, "value", None)
+            self._mark("APPLICATION_DELETE_RESULT", effect_class="application")
+            if getattr(manager, "scenario", "") == "postdelete_schema_drift":
+                await p7c13._await_owned(
+                    storage.read(lambda connection: connection.execute("PRAGMA user_version = 3").fetchone()),
+                    timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="test schema drift",
+                )
+            await p7c13._await_owned(
+                tracker.shutdown_profile(P7C15_PROFILE_ID),
+                timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="final runtime shutdown",
+            )
+            self._mark("RUNTIME_SHUTDOWN_FINAL", effect_class="runtime")
+            tombstone = await p7c13._await_owned(
+                p7c13.DeletionRepository(storage).get_tombstone(idle.dialogue_id),
+                timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="tombstone read",
+            )
+            live_after = await p7c13._await_owned(
+                repository.get_live(), timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="post-delete live-binding read",
+            )
+            post_schema_version = await p7c13._await_owned(
+                storage.read(lambda connection: int(connection.execute("PRAGMA user_version").fetchone()[0])),
+                timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="post-delete schema read",
+            )
+        finally:
+            await p7c13._await_owned(
+                storage.close(), timeout=self.stage_timeouts["final_runtime_local_convergence"], stage="controller close",
+            )
 
         after_persistent = p7c13.BoundedTargetOracle(
             profile, binding.thread_id, markers, families=("persistent_sessions", "persistent_history"),
@@ -1311,6 +1418,8 @@ class _FakeClient:
         if method == "thread/delete":
             if self.scenario == "delete_unknown":
                 return None  # type: ignore[return-value]
+            if self.scenario == "delete_failure":
+                raise RuntimeError("synthetic delete failure")
             if self.scenario not in {"postdelete_residual", "isolated_residual"} and self.isolated_root is not None:
                 for path in tuple(self.isolated_root.rglob("*")):
                     if path.name != ".codexcontrol-state-root-v1" and (path.is_file() or path.is_symlink()):
@@ -1564,6 +1673,91 @@ class P7C15AccountingJournalTests(unittest.TestCase):
             st = path.lstat(); self.assertEqual(0o600, stat.S_IMODE(st.st_mode)); self.assertFalse(stat.S_ISLNK(st.st_mode)); self.assertEqual(1, st.st_nlink)
 
 
+class P7C15Turn3ObserverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_late_window_request_is_classified_after_join(self) -> None:
+        class LateClient:
+            def __init__(self) -> None:
+                self.preliminary = asyncio.Event()
+                self.release = asyncio.Event()
+                self.responses = 1
+
+            async def next_server_request(self) -> object:
+                self.preliminary.set()
+                await self.release.wait()
+                return object()
+
+        class ImmediateTerminal:
+            async def wait_turn(self, _binding: object) -> Any:
+                return type("Terminal", (), {"status": TurnTerminalStatus.COMPLETED})()
+
+        client = LateClient()
+
+        async def release_late_request() -> None:
+            await client.preliminary.wait()
+            client.release.set()
+
+        releaser = asyncio.create_task(release_late_request())
+        outcome = await _observe_turn3_request_after_response(
+            client=client, turn_lifecycle=ImmediateTerminal(), binding=object(),
+            timeout=1.0, join_timeout=1.0,
+        )
+        await releaser
+        self.assertFalse(outcome.preliminary_request_done)
+        self.assertEqual(P7C15Turn3RequestObserverClass.REQUEST_OBSERVED, outcome.request_observer_class)
+        self.assertTrue(outcome.second_request)
+        self.assertFalse(outcome.observer_fault)
+        self.assertTrue(outcome.terminal_waiter_joined and outcome.request_observer_joined)
+        self.assertEqual(1, client.responses)
+        self.assertNotIn("turn4", vars(client))
+        self.assertNotIn("controller", vars(client))
+        self.assertNotIn("delete", vars(client))
+
+    async def test_clean_terminal_cancellation_is_distinct_from_observer_error(self) -> None:
+        class PendingClient:
+            async def next_server_request(self) -> object:
+                await asyncio.Event().wait()
+                return object()
+
+        class ImmediateTerminal:
+            async def wait_turn(self, _binding: object) -> Any:
+                return type("Terminal", (), {"status": TurnTerminalStatus.COMPLETED})()
+
+        clean = await _observe_turn3_request_after_response(
+            client=PendingClient(), turn_lifecycle=ImmediateTerminal(), binding=object(),
+            timeout=1.0, join_timeout=1.0,
+        )
+        self.assertEqual(P7C15Turn3RequestObserverClass.CANCELLED_BY_HARNESS_WITHOUT_REQUEST, clean.request_observer_class)
+        self.assertFalse(clean.second_request or clean.observer_fault)
+
+        class ErrorClient:
+            async def next_server_request(self) -> object:
+                raise RuntimeError("observer failure")
+
+        error = await _observe_turn3_request_after_response(
+            client=ErrorClient(), turn_lifecycle=ImmediateTerminal(), binding=object(),
+            timeout=1.0, join_timeout=1.0,
+        )
+        self.assertEqual(P7C15Turn3RequestObserverClass.OBSERVER_ERROR, error.request_observer_class)
+        self.assertTrue(error.observer_fault)
+
+    async def test_request_and_terminal_same_slice_is_non_pass_without_second_response(self) -> None:
+        class SameSliceClient:
+            async def next_server_request(self) -> object:
+                return object()
+
+        class SameSliceTerminal:
+            async def wait_turn(self, _binding: object) -> Any:
+                return type("Terminal", (), {"status": TurnTerminalStatus.COMPLETED})()
+
+        outcome = await _observe_turn3_request_after_response(
+            client=SameSliceClient(), turn_lifecycle=SameSliceTerminal(), binding=object(),
+            timeout=1.0, join_timeout=1.0,
+        )
+        self.assertEqual(P7C15Turn3RequestObserverClass.REQUEST_OBSERVED, outcome.request_observer_class)
+        self.assertTrue(outcome.second_request)
+        self.assertFalse(outcome.observer_fault)
+
+
 class P7C15GateLedgerTests(unittest.TestCase):
     def test_parent_exact_effect_gate_rejects_missing_positive_effect(self) -> None:
         counts = dict(P7C15_FROZEN_EFFECT_BUDGET)
@@ -1576,12 +1770,90 @@ class P7C15GateLedgerTests(unittest.TestCase):
 
     def test_production_watchdog_uses_real_deadline_authority(self) -> None:
         source = inspect.getsource(P7C15PreparedFutureExecutor._run_production)
-        for name in ("REAL_WATCHDOG_HARD_DEADLINE", "REAL_WATCHDOG_TERM_GRACE", "REAL_WATCHDOG_KILL_GRACE"):
+        self.assertIn("P7C15_REAL_WATCHDOG_HARD_DEADLINE", source)
+        for name in ("REAL_WATCHDOG_TERM_GRACE", "REAL_WATCHDOG_KILL_GRACE"):
             self.assertIn(name, source)
         self.assertNotIn("timeout_seconds=" + "5.0", source)
         self.assertNotIn("term_grace_seconds=" + "0.2", source)
         self.assertNotIn("kill_grace_seconds=" + "0.2", source)
-        self.assertGreater(p7c13.REAL_WATCHDOG_HARD_DEADLINE, sum(p7c13.REAL_STAGE_TIMEOUTS.values()))
+        keys = [key for _, key, _ in P7C15_REAL_TIMEOUT_INVOCATION_PLAN]
+        self.assertGreater(len(keys), len(set(keys)))
+        self.assertEqual(P7C15_REAL_INTERNAL_TIMEOUT_BUDGET, sum(value for _, _, value in P7C15_REAL_TIMEOUT_INVOCATION_PLAN))
+        self.assertGreater(P7C15_REAL_WATCHDOG_HARD_DEADLINE, P7C15_REAL_INTERNAL_TIMEOUT_BUDGET)
+        self.assertGreater(P7C15_REAL_WATCHDOG_HARD_DEADLINE, p7c13.REAL_WATCHDOG_HARD_DEADLINE)
+        self.assertNotIn("p7c13.REAL_WATCHDOG_HARD_DEADLINE", source)
+
+    def test_ledger_reservation_precedes_run_parent_mutations_and_failures_consume(self) -> None:
+        contract = _synthetic_contract()
+        with tempfile.TemporaryDirectory(prefix="p7c15-order-") as directory:
+            root = Path(directory)
+
+            events: list[str] = []
+            executor = P7C15PreparedFutureExecutor._production_with_authority(
+                contract, ledger_path=root / "p7c15-one-shot.json", mutation_events=events,
+                child_dispatch=lambda _boot: 0,
+            )
+            executor.run(contract)
+            self.assertEqual(
+                ["LEDGER_RESERVED", "RUN_STATE_PARENT_CREATED", "RUN_WORK_PARENT_CREATED", "BOOT_CREATED", "CHILD_DISPATCHED"],
+                events[:5],
+            )
+
+        def run_failure(name: str) -> tuple[list[str], Path, P7C15PreparedFutureExecutor]:
+            directory = tempfile.TemporaryDirectory(prefix=f"p7c15-order-{name}-")
+            root = Path(directory.name)
+            events: list[str] = []
+            def mkdir(path: Path) -> None:
+                if path.name.endswith(f"{name}-parent-" + path.name.split(f"{name}-parent-")[-1]):
+                    raise OSError(f"{name} parent failure")
+                path.mkdir(mode=0o700, exist_ok=False)
+            executor = P7C15PreparedFutureExecutor._production_with_authority(
+                contract, ledger_path=root / "p7c15-one-shot.json", mutation_events=events,
+                child_dispatch=lambda _boot: 0, run_parent_mkdir=mkdir,
+            )
+            return events, root, executor
+
+        events, root, executor = run_failure("state")
+        with self.assertRaises(OSError):
+            executor.run(contract)
+        self.assertEqual(["LEDGER_RESERVED"], events)
+        self.assertEqual("RESERVED", P7C15DurableOneShotLedger(root / "p7c15-one-shot.json").read()["state"])
+
+        events, root, executor = run_failure("work")
+        calls = {"count": 0}
+        def fail_work(path: Path) -> None:
+            calls["count"] += 1
+            if calls["count"] == 2:
+                raise OSError("work parent failure")
+            path.mkdir(mode=0o700, exist_ok=False)
+        executor._run_parent_mkdir = fail_work
+        with self.assertRaises(OSError):
+            executor.run(contract)
+        self.assertEqual(["LEDGER_RESERVED", "RUN_STATE_PARENT_CREATED"], events)
+        self.assertEqual("RESERVED", P7C15DurableOneShotLedger(root / "p7c15-one-shot.json").read()["state"])
+
+        with tempfile.TemporaryDirectory(prefix="p7c15-order-consumed-") as directory:
+            root = Path(directory); ledger_path = root / "p7c15-one-shot.json"; events: list[str] = []
+            executor = P7C15PreparedFutureExecutor._production_with_authority(
+                contract, ledger_path=ledger_path, mutation_events=events, child_dispatch=lambda _boot: 0,
+            )
+            self.assertTrue(executor.ledger.reserve(executor._record))
+            with self.assertRaises(P7C15PreparationError):
+                executor.run(contract)
+            self.assertEqual([], events)
+            self.assertEqual(0, executor.watchdog.child_count)
+
+        with tempfile.TemporaryDirectory(prefix="p7c15-order-boot-") as directory:
+            root = Path(directory); events: list[str] = []
+            executor = P7C15PreparedFutureExecutor._production_with_authority(
+                contract, ledger_path=root / "p7c15-one-shot.json", mutation_events=events,
+                child_dispatch=lambda _boot: 0,
+            )
+            with patch.object(P7C15RootOnlyBootAuthority, "create", side_effect=P7C15PreparationError("boot failure")):
+                with self.assertRaises(P7C15PreparationError):
+                    executor.run(contract)
+            self.assertEqual(["LEDGER_RESERVED", "RUN_STATE_PARENT_CREATED", "RUN_WORK_PARENT_CREATED"], events)
+            self.assertEqual(0, executor.watchdog.child_count)
 
     def test_production_child_has_no_fake_approval_accounting_dependency(self) -> None:
         source = inspect.getsource(P7C15ProductionChildOrchestrator) + inspect.getsource(_observe_turn3_request_after_response)
@@ -1590,6 +1862,27 @@ class P7C15GateLedgerTests(unittest.TestCase):
         self.assertNotIn('reasoning_effort="medium"', source)
         self.assertNotIn("now_ms=lambda", source)
         self.assertIn("next_server_request", source)
+        self.assertNotIn("await storage.close()", inspect.getsource(P7C15ProductionChildOrchestrator))
+        self.assertIn("_await_owned", inspect.getsource(P7C15ProductionChildOrchestrator))
+
+    def test_completed_recovery_requires_every_safe_parent_fact(self) -> None:
+        recovery: dict[str, Any] = {
+            "watchdog_status": "COMPLETED", "child_result_valid": True,
+            "child_status": "PASS", "child_verdict": True,
+            "runtime_child_quiescent": True, "exact_effect_gate": True,
+            "owned_group_active": 0, "owned_group_zombies": 0,
+            "group_scan_errors": 0, "child_count": 1, "retry_count": 0,
+        }
+        self.assertTrue(p7c15_completed_recovery_consistent(recovery))
+        for field, value in (
+            ("watchdog_status", "TIMEOUT"), ("child_result_valid", False),
+            ("child_status", "FAILED"), ("child_verdict", False),
+            ("runtime_child_quiescent", False), ("exact_effect_gate", False),
+            ("owned_group_active", 1), ("owned_group_zombies", 1),
+            ("group_scan_errors", 1), ("child_count", 2), ("retry_count", 1),
+        ):
+            mutated = dict(recovery); mutated[field] = value
+            self.assertFalse(p7c15_completed_recovery_consistent(mutated), field)
 
     def test_parent_exit_projection_never_maps_failures_to_zero(self) -> None:
         self.assertEqual(2, p7c15_parent_exit_projection(P7C15WatchdogResult("DISABLED"), gate_enabled=False))
@@ -1694,6 +1987,10 @@ class P7C15Repair1ProductionPathTests(unittest.TestCase):
             self.assertEqual(4, child["effect_counts"]["turn/start"])
             self.assertEqual("COMPLETED", P7C15DurableOneShotLedger(ledger_path).read()["state"])
             self.assertEqual(0, executor.watchdog.retry_count)
+            recovery = P7C15DurableOneShotLedger(ledger_path).read()["recovery"]
+            self.assertTrue(p7c15_completed_recovery_consistent(recovery))
+            self.assertEqual("COMPLETED", recovery["watchdog_status"])
+            self.assertEqual(0, recovery["signals_sent_count"])
 
     def test_actual_child_failure_persists_live_budget_and_safe_stage(self) -> None:
         contract = _synthetic_contract(); authority = _synthetic_authority(contract)
@@ -1715,6 +2012,21 @@ class P7C15Repair1ProductionPathTests(unittest.TestCase):
             self.assertEqual("TURN2_TERMINAL", child["last_confirmed_stage"])
             self.assertEqual(journal_digest, child["stage_journal_sha256"])
             self.assertEqual(1, executor.watchdog.child_count); self.assertEqual(0, executor.watchdog.retry_count)
+            recovery = P7C15DurableOneShotLedger(ledger_path).read()["recovery"]
+            self.assertEqual("CHILD_FAILURE", recovery["watchdog_status"])
+            self.assertTrue(recovery["child_result_valid"])
+            self.assertEqual("FAILED", recovery["child_status"])
+            self.assertFalse(recovery["child_verdict"])
+            self.assertFalse(recovery["runtime_child_quiescent"])
+            self.assertFalse(recovery["exact_effect_gate"])
+            self.assertEqual(0, recovery["owned_group_active"])
+            self.assertEqual(0, recovery["owned_group_zombies"])
+            self.assertEqual(0, recovery["group_scan_errors"])
+            self.assertEqual(1, recovery["child_count"])
+            self.assertEqual(0, recovery["retry_count"])
+            self.assertEqual("FAILED", recovery["child_result_authority_class"])
+            self.assertNotIn("thread_id", json.dumps(recovery))
+            self.assertNotIn("turn_id", json.dumps(recovery))
 
     def test_production_child_source_contains_accepted_generation_and_authorities(self) -> None:
         source = inspect.getsource(P7C15ProductionChildOrchestrator) + inspect.getsource(p7c15_future_child_main)
@@ -1835,15 +2147,14 @@ class P7C15PreparedFutureExecutor:
         group_scan_error_probe: Callable[[int], int] | None = None,
         child_dispatch: Callable[[Path], int] | None = None,
         test_only_watchdog_bounds: tuple[float, float, float] | None = None,
+        mutation_events: list[str] | None = None,
+        run_parent_mkdir: Callable[[Path], None] | None = None,
     ) -> "P7C15PreparedFutureExecutor":
         run_hash = _sha256(os.urandom(32))
-        # Keep each mutable boundary on its own private parent.  This is
-        # required by the inherited topology preflight and prevents a state
-        # root from aliasing the controller/work authority directory.
+        # Keep each mutable boundary on its own private parent.  These are
+        # path strings only until the durable replay barrier is reserved.
         state_parent = ledger_path.parent.parent / f"p7c15-state-parent-{run_hash[:12]}"
         work_parent = ledger_path.parent.parent / f"p7c15-work-parent-{run_hash[:12]}"
-        state_parent.mkdir(mode=0o700, exist_ok=False)
-        work_parent.mkdir(mode=0o700, exist_ok=False)
         paths = p7c15_fresh_run_paths(run_hash[:32], root=state_parent, authority=ledger_path.parent)
         paths["workdir"] = str(work_parent / f"p7c15-work-{run_hash[:32]}")
         boot_path = Path(paths["boot"])
@@ -1872,9 +2183,16 @@ class P7C15PreparedFutureExecutor:
         executor = cls(P7C15DurableOneShotLedger(ledger_path), watchdog=watchdog,
                        child_command_factory=command_factory, run_paths=paths, boot_path=boot_path,
                        test_only_watchdog_bounds=test_only_watchdog_bounds)
+        executor._mutation_events = mutation_events if mutation_events is not None else []
+        executor._run_parent_mkdir = run_parent_mkdir or (lambda path: path.mkdir(mode=0o700, exist_ok=False))
         executor._offline_child_dispatch = child_dispatch
         executor._record = record
         return executor
+
+    def _event(self, name: str) -> None:
+        events = getattr(self, "_mutation_events", None)
+        if events is not None:
+            events.append(name)
 
     def _production_boot(self, contract: P7C15ArchitectContract, record: Mapping[str, Any]) -> dict[str, Any]:
         if not self.run_paths or self.boot_path is None:
@@ -1894,9 +2212,17 @@ class P7C15PreparedFutureExecutor:
             raise P7C15PreparationError("P7.C15 production record missing")
         if not self.ledger.reserve(record):
             raise P7C15PreparationError("P7.C15 reservation consumed")
+        self._event("LEDGER_RESERVED")
         paths = dict(self.run_paths or {})
+        state_parent = Path(paths["isolated_root"]).parent
+        work_parent = Path(paths["workdir"]).parent
+        self._run_parent_mkdir(state_parent)
+        self._event("RUN_STATE_PARENT_CREATED")
+        self._run_parent_mkdir(work_parent)
+        self._event("RUN_WORK_PARENT_CREATED")
         boot = self._production_boot(contract, record)
         P7C15RootOnlyBootAuthority(self.boot_path).create(boot)
+        self._event("BOOT_CREATED")
         P7C15RootOnlyBootAuthority(self.boot_path).read()
         command = tuple(self.child_command_factory(self.boot_path))
         child_dispatch = getattr(self, "_offline_child_dispatch", None)
@@ -1908,9 +2234,10 @@ class P7C15PreparedFutureExecutor:
                     return self.returncode
             self.watchdog.process_factory = lambda *_args, **_kwargs: _OfflineProcess()
         hard_deadline, term_grace, kill_grace = self.test_only_watchdog_bounds or (
-            p7c13.REAL_WATCHDOG_HARD_DEADLINE, p7c13.REAL_WATCHDOG_TERM_GRACE,
+            P7C15_REAL_WATCHDOG_HARD_DEADLINE, p7c13.REAL_WATCHDOG_TERM_GRACE,
             p7c13.REAL_WATCHDOG_KILL_GRACE,
         )
+        self._event("CHILD_DISPATCHED")
         observed = self.watchdog.run(
             command, result_path=boot["child_result_path"], timeout_seconds=hard_deadline,
             term_grace_seconds=term_grace, kill_grace_seconds=kill_grace,
@@ -1924,6 +2251,9 @@ class P7C15PreparedFutureExecutor:
             child_result_valid = True
         except (OSError, UnicodeError, json.JSONDecodeError, P7C15PreparationError):
             child_result = None
+        exact_effect_gate = False
+        if child_result is not None:
+            exact_effect_gate = p7c15_exact_effect_pass_gate(child_result["effect_counts"])
         if observed.status == "TIMEOUT":
             state = "TIMEOUT"
         elif child_status in {"UNKNOWN", "CONFIRMED_PENDING"}:
@@ -1941,8 +2271,23 @@ class P7C15PreparedFutureExecutor:
         recovery = {
             "child_result": _sha256(str(boot["child_result_path"])),
             "last_confirmed_stage": child_result.get("last_confirmed_stage") if child_result else "PARENT_VALIDATION",
+            "watchdog_status": observed.status,
+            "child_result_valid": child_result_valid,
+            "child_status": child_status,
+            "child_verdict": child_result.get("verdict") if child_result else None,
+            "runtime_child_quiescent": child_result.get("runtime_child_quiescent") if child_result else None,
+            "exact_effect_gate": exact_effect_gate if child_result else None,
+            "owned_group_active": observed.owned_group_active,
+            "owned_group_zombies": observed.owned_group_zombies,
+            "group_scan_errors": observed.group_scan_errors,
+            "signals_sent_count": len(observed.signals_sent),
+            "signals_sent_classes": list(observed.signals_sent),
             "child_count": observed.child_count, "retry_count": getattr(self.watchdog, "retry_count", 0),
+            "child_result_authority_hash": _sha256(Path(boot["child_result_path"]).read_bytes()) if child_result_valid else None,
+            "child_result_authority_class": child_status,
         }
+        if state == "COMPLETED" and not p7c15_completed_recovery_consistent(recovery):
+            state = "FAILED"
         self.ledger.update(state=state, recovery=recovery)
         return P7C15WatchdogResult(state, child_result_valid=child_result_valid)
 
@@ -2136,6 +2481,30 @@ class P7C15Repair2ContinuationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("FAILED", result["status"])
         self.assertEqual([], manager.client.calls)
         self.assertEqual(0, result["effect_counts"]["real_retry"])
+
+    async def test_every_open_controller_negative_path_has_one_bounded_close(self) -> None:
+        original_close = p7c13.SqliteStorage.close
+        close_counts: dict[int, int] = {}
+
+        async def tracked_close(storage: Any) -> None:
+            identity = id(storage)
+            close_counts[identity] = close_counts.get(identity, 0) + 1
+            await original_close(storage)
+
+        scenarios = (
+            "schema_mismatch", "controller_mismatch", "official_missing",
+            "delete_failure", "delete_unknown", "confirmed_pending",
+            "postdelete_schema_drift", "persistent_residual",
+        )
+        with patch.object(p7c13.SqliteStorage, "close", tracked_close):
+            for scenario in scenarios:
+                with self.subTest(scenario=scenario):
+                    result, manager, _ = await self._run_continuation(scenario)
+                    self.assertIn(result["status"], {"FAILED", "UNKNOWN", "CONFIRMED_PENDING"})
+                    expected_delete = 0 if scenario in {"schema_mismatch", "controller_mismatch"} else 1
+                    self.assertEqual(expected_delete, manager.client.calls.count("thread/delete"))
+        self.assertTrue(close_counts)
+        self.assertTrue(all(count == 1 for count in close_counts.values()))
 
     async def test_physical_negative_authorities_remain_fail_closed(self) -> None:
         for scenario in ("postdelete_schema_drift", "isolation_invalid", "unrelated_removal", "persistent_residual", "isolated_residual"):
