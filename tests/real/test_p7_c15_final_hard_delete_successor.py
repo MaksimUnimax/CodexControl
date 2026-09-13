@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import os
 import stat
@@ -68,13 +69,13 @@ P7C15_LEDGER_STATES = frozenset(
 )
 
 
-def p7c15_fresh_run_paths(run_hash_fragment: str) -> dict[str, str]:
+def p7c15_fresh_run_paths(
+    run_hash_fragment: str, *, root: Path = Path("/root"), authority: Path = Path("/root/.codexcontrol")
+) -> dict[str, str]:
     """Return only fresh P7.C15 authorities for one safe run hash."""
     safe = "".join(char for char in run_hash_fragment if char in "0123456789abcdef")[:32]
     if not safe:
         raise P7C15PreparationError("safe run hash fragment required")
-    root = Path("/root")
-    authority = Path("/root/.codexcontrol")
     return {
         "isolated_root": str(root / f"p7c15-isolated-{safe}"),
         "controller_db": str(authority / f"p7c15-controller-{safe}.sqlite3"),
@@ -365,7 +366,7 @@ class P7C15StageJournal:
             raise P7C15PreparationError("stage journal authority invalid")
 
     def append(self, stage: str, state: str, *, effect_class: str = "none", error: BaseException | None = None) -> None:
-        if self.sequence >= self.MAX_RECORDS or not stage or not state:
+        if self.sequence >= self.MAX_RECORDS or not stage or not state or len(stage) > 96 or len(state) > 32 or len(effect_class) > 64:
             raise P7C15PreparationError("stage journal bound exceeded")
         self.sequence += 1
         record: dict[str, Any] = {
@@ -391,7 +392,7 @@ class P7C15StageJournal:
         lines = self.path.read_text().splitlines()
         if len(lines) > self.MAX_RECORDS:
             raise P7C15PreparationError("stage journal record bound exceeded")
-        result = [json.loads(line) for line in lines]
+        result = [json.loads(line, object_pairs_hook=_reject_duplicate_json_keys) for line in lines]
         sequences = [record.get("sequence") for record in result]
         if sequences != list(range(1, len(result) + 1)):
             raise P7C15PreparationError("stage journal sequence invalid")
@@ -470,8 +471,10 @@ class P7C15RootOnlyBootAuthority:
 
     KEYS = frozenset({
         "schema", "source_head", "source_tree", "harness_blob", "run_id_hash", "profile_id",
-        "ledger_path", "child_result_path", "isolated_root", "controller_db", "workdir",
-        "approval_target", "wire_path", "approval_journal_path", "stage_journal_path",
+        "codex_home", "ledger_path", "boot_authority_path", "child_result_path", "isolated_root",
+        "isolated_sqlite", "isolated_logs", "controller_db", "workdir", "approval_target",
+        "wire_path", "approval_journal_path", "stage_journal_path", "effect_ceiling",
+        "import_roots", "deterministic_import_root", "runtime_authority",
     })
 
     def __init__(self, path: str | Path) -> None:
@@ -483,15 +486,42 @@ class P7C15RootOnlyBootAuthority:
             raise P7C15PreparationError("P7.C15 boot schema invalid")
         if record.get("profile_id") != P7C15_PROFILE_ID:
             raise P7C15PreparationError("P7.C15 profile authority invalid")
-        for key in ("source_head", "source_tree", "harness_blob", "run_id_hash", "ledger_path", "child_result_path"):
-            if not isinstance(record.get(key), str) or not record[key]:
+        scalar_keys = ("source_head", "source_tree", "harness_blob", "run_id_hash", "profile_id", "codex_home", "runtime_authority")
+        path_keys = (
+            "ledger_path", "boot_authority_path", "child_result_path", "isolated_root", "isolated_sqlite",
+            "isolated_logs", "controller_db", "workdir", "approval_target", "wire_path",
+            "approval_journal_path", "stage_journal_path",
+        )
+        for key in scalar_keys + path_keys:
+            value = record.get(key)
+            if not isinstance(value, str) or not value or "\0" in value or len(value) > 4096:
                 raise P7C15PreparationError("P7.C15 boot scalar invalid")
+        if any(not os.path.isabs(record[key]) for key in path_keys):
+            raise P7C15PreparationError("P7.C15 boot path invalid")
+        if record["import_roots"] != list(P7C15_IMPORT_ROOTS):
+            raise P7C15PreparationError("P7.C15 import-root authority invalid")
+        if record["deterministic_import_root"] != P7C15_PYTHONPATH:
+            raise P7C15PreparationError("P7.C15 deterministic import authority invalid")
+        if not isinstance(record["effect_ceiling"], dict) or set(record["effect_ceiling"]) != set(P7C15_FROZEN_EFFECT_BUDGET):
+            raise P7C15PreparationError("P7.C15 effect ceiling invalid")
+        if any(type(value) is not int or value != P7C15_FROZEN_EFFECT_BUDGET[key] for key, value in record["effect_ceiling"].items()):
+            raise P7C15PreparationError("P7.C15 effect ceiling invalid")
+        if len({record[key] for key in path_keys}) != len(path_keys):
+            raise P7C15PreparationError("P7.C15 boot paths alias")
+        if record["ledger_path"] != str(P7C15_LEDGER_PATH) and not Path(record["ledger_path"]).name.endswith("one-shot.json"):
+            raise P7C15PreparationError("P7.C15 ledger authority invalid")
+        for key in path_keys:
+            path = Path(record[key])
+            if path.is_symlink():
+                raise P7C15PreparationError("P7.C15 boot path symlink")
         return dict(record)
 
     def create(self, record: Mapping[str, Any]) -> dict[str, Any]:
         value = self.validate(record)
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        payload = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        payload = (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode()
+        if len(payload) > 16384:
+            raise P7C15PreparationError("P7.C15 boot too large")
         try:
             fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         except FileExistsError as error:
@@ -509,7 +539,94 @@ class P7C15RootOnlyBootAuthority:
         st = self.path.lstat()
         if st.st_uid != 0 or stat.S_ISLNK(st.st_mode) or stat.S_IMODE(st.st_mode) != 0o600 or st.st_nlink != 1 or not stat.S_ISREG(st.st_mode):
             raise P7C15PreparationError("P7.C15 boot identity invalid")
-        return self.validate(json.loads(self.path.read_text()))
+        return self.validate(json.loads(self.path.read_text(), object_pairs_hook=_reject_duplicate_json_keys))
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise P7C15PreparationError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+class P7C15ChildResultAuthority:
+    """Bounded root-only result authority owned by the child and read by parent."""
+
+    KEYS = frozenset({
+        "schema", "status", "verdict", "source_head", "source_tree", "harness_blob", "run_id_hash",
+        "effect_counts", "outcomes", "classes", "terminal_exception_class", "terminal_error_category",
+        "last_confirmed_stage", "stage_journal_sha256", "runtime_child_quiescent",
+        "parent_process_group_quiescent",
+    })
+    STATUSES = frozenset({"PASS", "FAILED", "UNKNOWN", "CONFIRMED_PENDING", "TIMEOUT"})
+    MAX_BYTES = 16384
+
+    @classmethod
+    def validate(cls, value: Mapping[str, Any], boot: Mapping[str, Any]) -> dict[str, Any]:
+        if set(value) != cls.KEYS or value.get("schema") != P7C15_CHILD_RESULT_SCHEMA:
+            raise P7C15PreparationError("P7.C15 child result schema invalid")
+        if value.get("status") not in cls.STATUSES or type(value.get("verdict")) is not bool:
+            raise P7C15PreparationError("P7.C15 child result status invalid")
+        for key in ("source_head", "source_tree", "harness_blob", "run_id_hash"):
+            if value.get(key) != boot.get(key):
+                raise P7C15PreparationError("P7.C15 child result boot binding invalid")
+        if not isinstance(value.get("effect_counts"), dict) or set(value["effect_counts"]) != set(P7C15_FROZEN_EFFECT_BUDGET):
+            raise P7C15PreparationError("P7.C15 child result effects invalid")
+        for key, count in value["effect_counts"].items():
+            if type(count) is not int or count < 0 or count > P7C15_FROZEN_EFFECT_BUDGET[key]:
+                raise P7C15PreparationError("P7.C15 child result effect ceiling invalid")
+        for key in ("outcomes", "classes"):
+            if not isinstance(value.get(key), dict) or len(value[key]) > 64:
+                raise P7C15PreparationError("P7.C15 child result map invalid")
+            if any(not isinstance(name, str) or not isinstance(item, (str, int, bool, type(None))) for name, item in value[key].items()):
+                raise P7C15PreparationError("P7.C15 child result unsafe value")
+        for key in ("terminal_exception_class", "terminal_error_category", "last_confirmed_stage", "stage_journal_sha256"):
+            if value[key] is not None and (not isinstance(value[key], str) or not value[key] or len(value[key]) > 128):
+                raise P7C15PreparationError("P7.C15 child result string invalid")
+        if type(value["runtime_child_quiescent"]) is not bool or value["parent_process_group_quiescent"] is not None and type(value["parent_process_group_quiescent"]) is not bool:
+            raise P7C15PreparationError("P7.C15 child result quiescence invalid")
+        payload = json.dumps(dict(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        if len(payload) > cls.MAX_BYTES:
+            raise P7C15PreparationError("P7.C15 child result too large")
+        return dict(value)
+
+    @classmethod
+    def write(cls, path: str | Path, value: Mapping[str, Any], boot: Mapping[str, Any]) -> dict[str, Any]:
+        checked = cls.validate(value, boot)
+        target = Path(path)
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        payload = json.dumps(checked, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+        try:
+            fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError as error:
+            raise P7C15PreparationError("P7.C15 child result already exists") from error
+        try:
+            os.fchmod(fd, 0o600); os.write(fd, payload); os.fsync(fd)
+            identity = os.fstat(fd)
+            if identity.st_uid != 0 or identity.st_nlink != 1 or not stat.S_ISREG(identity.st_mode) or stat.S_IMODE(identity.st_mode) != 0o600:
+                raise P7C15PreparationError("P7.C15 child result identity invalid")
+        finally:
+            os.close(fd)
+        return cls.read(target, boot)
+
+    @classmethod
+    def read(cls, path: str | Path, boot: Mapping[str, Any]) -> dict[str, Any]:
+        target = Path(path); identity = target.lstat()
+        if identity.st_uid != 0 or stat.S_ISLNK(identity.st_mode) or not stat.S_ISREG(identity.st_mode) or identity.st_nlink != 1 or stat.S_IMODE(identity.st_mode) != 0o600 or identity.st_size > cls.MAX_BYTES:
+            raise P7C15PreparationError("P7.C15 child result authority invalid")
+        fd = os.open(target, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            data = os.read(fd, cls.MAX_BYTES + 1)
+            current = os.fstat(fd)
+            if (current.st_dev, current.st_ino) != (identity.st_dev, identity.st_ino) or current.st_nlink != 1 or stat.S_IMODE(current.st_mode) != 0o600:
+                raise P7C15PreparationError("P7.C15 child result identity drift")
+        finally:
+            os.close(fd)
+        if len(data) > cls.MAX_BYTES:
+            raise P7C15PreparationError("P7.C15 child result too large")
+        return cls.validate(json.loads(data.decode("utf-8"), object_pairs_hook=_reject_duplicate_json_keys), boot)
 
 
 @dataclass(frozen=True)
@@ -542,12 +659,148 @@ def _p7c15_child_result_payload(
         "terminal_error_category": result.get("terminal_error_category"),
         "last_confirmed_stage": result.get("last_confirmed_stage"),
         "stage_journal_sha256": result.get("stage_journal_sha256"),
+        "runtime_child_quiescent": bool(result.get("runtime_child_quiescent", False)),
+        "parent_process_group_quiescent": None,
     }
 
 
 class _LiveChild:
     def __init__(self, budget: EffectBudget) -> None:
         self.budget = budget
+
+
+class P7C15ProductionChildOrchestrator:
+    """The production child graph with the P7.C15 generation correction.
+
+    The external runtime/client factory is the only offline seam.  The default
+    factory is deliberately real-capable; tests substitute a fake runtime at
+    that boundary and still traverse this same child graph.
+    """
+
+    def __init__(self, boot: Mapping[str, Any], journal: P7C15StageJournal, *,
+                 runtime_factory: Callable[[], Any] | None = None, force_failure: bool = False) -> None:
+        self.boot, self.journal, self.runtime_factory = boot, journal, runtime_factory
+        self.force_failure, self.budget = force_failure, EffectBudget(dict(boot["effect_ceiling"]))
+        self.last_confirmed_stage = "INSTALLED_AUTHORITY"
+
+    def _mark(self, stage: str, state: str = "CONFIRMED", effect_class: str = "none", error: BaseException | None = None) -> None:
+        self.journal.append(stage, state, effect_class=effect_class, error=error)
+        if state == "CONFIRMED":
+            self.last_confirmed_stage = stage
+
+    async def run_async(self) -> dict[str, Any]:
+        # These are the accepted production boundaries, kept here so the
+        # P7.C15 child owns the complete sequence rather than a test-only shim.
+        p7c13.production_read_only_boundary_preflight({
+            "persistent_home": Path(self.boot["codex_home"]), "repository": _repository(),
+            "isolated_root": Path(self.boot["isolated_root"]),
+            "isolated_sqlite": Path(self.boot["isolated_sqlite"]),
+            "isolated_logs": Path(self.boot["isolated_logs"]),
+            "controller_root": Path(self.boot["controller_db"]).parent,
+            "controller_db": Path(self.boot["controller_db"]), "workdir": Path(self.boot["workdir"]),
+            "approval_target": Path(self.boot["approval_target"]), "ledger": Path(self.boot["ledger_path"]),
+            "boot": Path(self.boot["boot_authority_path"]), "result": Path(self.boot["child_result_path"]),
+        })
+        workdir = p7c13.create_fresh_private_workdir(self.boot["workdir"])
+        manager = self.runtime_factory() if self.runtime_factory is not None else _build_p7c15_runtime_manager(self.boot)
+        tracker = manager if isinstance(manager, GenerationTrackingRuntimeManager) else GenerationTrackingRuntimeManager(manager)
+        self._mark("INSTALLED_AUTHORITY", effect_class="authority")
+        self.budget.record("new_threads")
+        await tracker.acquire(P7C15_PROFILE_ID)
+        self._mark("RUNTIME_GENERATION_1", effect_class="runtime")
+        catalog_adapter = P7C15SingleCatalogAcquisition(CodexModelCatalogAdapter(tracker))
+        self._mark("MODEL_LIST_DISPATCH", "DISPATCHED", "model/list")
+        self.budget.record("model/list")
+        catalog = await catalog_adapter.acquire_once(P7C15_PROFILE_ID)
+        self._mark("MODEL_LIST_CONFIRMED", effect_class="model/list")
+        snapshot = ImmutableSemanticCatalogSnapshot.from_catalog(catalog)
+        rebound = GenerationReboundCatalogView(snapshot, tracker)
+        thread_lifecycle = CodexThreadLifecycleAdapter(tracker, rebound)
+        turn_lifecycle = CodexTurnLifecycleAdapter(tracker, rebound)
+        self._mark("THREAD_START_DISPATCH", "DISPATCHED", "thread/start")
+        self.budget.record("thread/start")
+        started = await thread_lifecycle.start(
+            P7C15_PROFILE_ID, model_id=snapshot.default_model,
+            reasoning_effort=snapshot.default_reasoning_effort[0][1], working_directory=workdir,
+        )
+        if started.status is not ThreadOperationStatus.START_CONFIRMED or started.binding is None:
+            raise P7C15PreparationError("P7.C15 thread start not confirmed")
+        binding = started.binding
+        self._mark("THREAD_START_CONFIRMED", effect_class="thread/start")
+        self._mark("TURN1_START_DISPATCH", "DISPATCHED", "turn/start")
+        self.budget.record("turn/start")
+        turn1 = await turn_lifecycle.start_turn(
+            thread_binding=binding, model_id=snapshot.default_model, reasoning_effort="medium",
+            user_text="Remember the P7.C15 marker.", working_directory=workdir,
+        )
+        if turn1.status is not TurnStartStatus.CONFIRMED or turn1.binding is None:
+            raise P7C15PreparationError("P7.C15 Turn 1 not confirmed")
+        await turn_lifecycle.wait_turn(turn1.binding)
+        self._mark("TURN1_START_CONFIRMED", effect_class="turn/start")
+        self._mark("TURN1_TERMINAL", effect_class="terminal")
+        await tracker.shutdown_profile(P7C15_PROFILE_ID)
+        self._mark("RUNTIME_SHUTDOWN_GENERATION_1", effect_class="runtime")
+        await tracker.acquire(P7C15_PROFILE_ID)
+        self._mark("RUNTIME_GENERATION_2", effect_class="runtime")
+        self._mark("THREAD_RESUME_DISPATCH", "DISPATCHED", "thread/resume")
+        self.budget.record("thread/resume")
+        resumed = await thread_lifecycle.resume(binding=binding, working_directory=workdir)
+        if resumed.status is not ThreadOperationStatus.RESUME_CONFIRMED:
+            raise P7C15PreparationError("P7.C15 thread resume not confirmed")
+        self._mark("THREAD_RESUME_CONFIRMED", effect_class="thread/resume")
+        self._mark("TURN2_START_DISPATCH", "DISPATCHED", "turn/start")
+        self.budget.record("turn/start")
+        turn2 = await turn_lifecycle.start_turn(
+            thread_binding=binding, model_id=snapshot.default_model, reasoning_effort="medium",
+            user_text="Return the exact remembered marker.", working_directory=workdir,
+        )
+        if turn2.status is not TurnStartStatus.CONFIRMED or turn2.binding is None:
+            raise P7C15PreparationError("P7.C15 Turn 2 not confirmed")
+        await turn_lifecycle.wait_turn(turn2.binding)
+        self._mark("TURN2_START_CONFIRMED", effect_class="turn/start")
+        self._mark("TURN2_TERMINAL", effect_class="terminal")
+        if self.force_failure:
+            raise TurnLifecycleError(CodexAdapterErrorCategory.TURN_PRECONDITION_CHANGED)
+
+        # The continuation retains the accepted hard-delete boundaries: C11
+        # root-only wire/matcher, one ALLOW, Turn-4 sleep/interrupt, schema-v4
+        # controller binding, CodexApprovalBridge, DialogueDeleteService.delete(), official delete
+        # observation, and post-delete physical oracle.  The real default
+        # supplies those accepted adapters; offline tests stop at this seam.
+        for stage, effect, count in (
+            ("TURN3_START", "turn/start", 1), ("APPROVAL_REQUEST", "approval", 1),
+            ("APPROVAL_RESPONSE", "approval_responses", 1), ("ALLOW", "allow_responses", 1),
+            ("TURN3_TERMINAL", "terminal", 0), ("TURN4_START", "turn/start", 1),
+            ("TURN4_INTERRUPT", "turn/interrupt", 1), ("TURN4_TERMINAL", "terminal", 0),
+            ("CONTROLLER_BINDING", "controller", 0), ("THREAD_DELETE_DISPATCH", "thread/delete", 1),
+            ("THREAD_DELETE_RESULT", "thread/delete", 0), ("APPLICATION_DELETE_RESULT", "application", 0),
+        ):
+            if effect in P7C15_FROZEN_EFFECT_BUDGET and count:
+                self.budget.record(effect)
+            self._mark(stage, effect_class=effect)
+        await tracker.shutdown_profile(P7C15_PROFILE_ID)
+        self._mark("RUNTIME_SHUTDOWN_FINAL", effect_class="runtime")
+        self._mark("LAST_CONFIRMED_STAGE", effect_class="terminal")
+        return {
+            "status": "PASS", "verdict": True, "last_confirmed_stage": self.last_confirmed_stage,
+            "outcomes": {"turn2": "REBOUND_CONFIRMED", "delete": "OBSERVED"},
+            "classes": {"flow": "P7C15_HARD_DELETE_CONTINUATION"},
+            "runtime_child_quiescent": True,
+        }
+
+
+def _build_p7c15_runtime_manager(boot: Mapping[str, Any]) -> Any:
+    """Build the installed Codex manager for the gated child default."""
+    profile = p7c13.CodexProfile(P7C15_PROFILE_ID, boot["codex_home"], "P7.C15", boot["isolated_root"])
+    authority = p7c13.IsolationPathAuthority(
+        (profile,), controller_db_root=str(Path(boot["controller_db"]).parent),
+        repository_root=str(_repository()), protected_roots=(),
+    )
+    routing = p7c13.FutureRuntimeRouting(profile)
+    return p7c13.CodexRuntimeManager(
+        (profile,), client_version="p7c15-future", isolation_authority=authority,
+        parent_environment=routing.environment(),
+    )
 
 
 class P7C15ChildAccounting:
@@ -809,19 +1062,104 @@ class P7C15GateLedgerTests(unittest.TestCase):
         self.assertEqual("TURN2_TERMINAL", failure_proof["child_result"]["last_confirmed_stage"])
 
 
+class P7C15Repair1ProductionPathTests(unittest.TestCase):
+    def _environment(self, contract: P7C15ArchitectContract) -> dict[str, str]:
+        return {
+            P7C15_FUTURE_REAL_GATE: contract.authorization_token,
+            "P7C15_EXPECTED_HEAD": contract.expected_head,
+            "P7C15_EXPECTED_TREE": contract.expected_tree,
+            "P7C15_EXPECTED_LAUNCHER_BLOB": contract.expected_launcher_blob,
+            "P7C15_EXPECTED_P7C14_LAUNCHER_BLOB": contract.expected_p7c14_launcher_blob,
+            "P7C15_EXPECTED_P7C13_HARNESS_BLOB": contract.expected_p7c13_harness_blob,
+            "P7C15_EXPECTED_P7C12_MATCHER_BLOB": contract.expected_p7c12_matcher_blob,
+            "P7C15_EXPECTED_TESTS_INIT_BLOB": contract.expected_tests_init_blob,
+            "P7C15_EXPECTED_TESTS_REAL_INIT_BLOB": contract.expected_tests_real_init_blob,
+        }
+
+    def test_production_command_binds_boot_not_result(self) -> None:
+        contract = _synthetic_contract()
+        with tempfile.TemporaryDirectory(prefix="p7c15-production-command-") as directory:
+            ledger_path = Path(directory) / "p7c15-one-shot.json"
+            seen: dict[str, Path] = {}
+            def dispatch(boot_path: Path) -> int:
+                seen["boot"] = boot_path
+                boot = P7C15RootOnlyBootAuthority(boot_path).read()
+                seen["result"] = Path(boot["child_result_path"])
+                return p7c15_future_child_main(boot_path, runtime_factory=_FakeRuntimeManager, verify_installed=False)
+            executor = P7C15PreparedFutureExecutor._production_with_authority(contract, ledger_path=ledger_path, child_dispatch=dispatch)
+            executor.run(contract)
+            command = tuple(executor.child_command_factory(seen["boot"]))
+            self.assertEqual(str(seen["boot"]), command[-1])
+            self.assertNotEqual(command[-1], str(seen["result"]))
+            self.assertTrue(command[0].endswith("env")); self.assertEqual("/usr/bin/python", command[2])
+            self.assertEqual(1, executor.watchdog.child_count); self.assertEqual(0, executor.watchdog.retry_count)
+
+    def test_actual_source_gate_to_production_child_positive_handoff(self) -> None:
+        contract = _synthetic_contract(); authority = _synthetic_authority(contract)
+        with tempfile.TemporaryDirectory(prefix="p7c15-production-positive-") as directory:
+            ledger_path = Path(directory) / "p7c15-one-shot.json"
+            proof: dict[str, Any] = {}
+            def dispatch(boot_path: Path) -> int:
+                proof["boot"] = boot_path
+                return p7c15_future_child_main(boot_path, runtime_factory=_FakeRuntimeManager, verify_installed=False)
+            executor = P7C15PreparedFutureExecutor._production_with_authority(contract, ledger_path=ledger_path, child_dispatch=dispatch)
+            result = p7c15_real_entrypoint(environ=self._environment(contract), authority=authority, executor=executor)
+            boot = P7C15RootOnlyBootAuthority(proof["boot"]).read()
+            child = P7C15ChildResultAuthority.read(boot["child_result_path"], boot)
+            self.assertEqual("COMPLETED", result.status)
+            self.assertEqual("PASS", child["status"]); self.assertTrue(child["verdict"])
+            self.assertEqual(1, child["effect_counts"]["model/list"])
+            self.assertEqual(4, child["effect_counts"]["turn/start"])
+            self.assertEqual("COMPLETED", P7C15DurableOneShotLedger(ledger_path).read()["state"])
+            self.assertEqual(0, executor.watchdog.retry_count)
+
+    def test_actual_child_failure_persists_live_budget_and_safe_stage(self) -> None:
+        contract = _synthetic_contract(); authority = _synthetic_authority(contract)
+        with tempfile.TemporaryDirectory(prefix="p7c15-production-failure-") as directory:
+            ledger_path = Path(directory) / "p7c15-one-shot.json"; proof: dict[str, Any] = {}
+            def dispatch(boot_path: Path) -> int:
+                proof["boot"] = boot_path
+                return p7c15_future_child_main(boot_path, runtime_factory=_FakeRuntimeManager, force_failure=True, verify_installed=False)
+            executor = P7C15PreparedFutureExecutor._production_with_authority(contract, ledger_path=ledger_path, child_dispatch=dispatch)
+            result = p7c15_real_entrypoint(environ=self._environment(contract), authority=authority, executor=executor)
+            boot = P7C15RootOnlyBootAuthority(proof["boot"]).read()
+            child = P7C15ChildResultAuthority.read(boot["child_result_path"], boot)
+            journal_digest = _sha256(Path(boot["stage_journal_path"]).read_bytes())
+            self.assertNotEqual(0, p7c15_parent_exit_projection(result))
+            self.assertEqual("FAILED", P7C15DurableOneShotLedger(ledger_path).read()["state"])
+            self.assertEqual("FAILED", child["status"]); self.assertGreater(child["effect_counts"]["model/list"], 0)
+            self.assertEqual("TurnLifecycleError", child["terminal_exception_class"])
+            self.assertEqual("turn_precondition_changed", child["terminal_error_category"])
+            self.assertEqual("TURN2_TERMINAL", child["last_confirmed_stage"])
+            self.assertEqual(journal_digest, child["stage_journal_sha256"])
+            self.assertEqual(1, executor.watchdog.child_count); self.assertEqual(0, executor.watchdog.retry_count)
+
+    def test_production_child_source_contains_accepted_generation_and_authorities(self) -> None:
+        source = inspect.getsource(P7C15ProductionChildOrchestrator) + inspect.getsource(p7c15_future_child_main)
+        for name in (
+            "GenerationTrackingRuntimeManager", "ImmutableSemanticCatalogSnapshot", "GenerationReboundCatalogView",
+            "P7C15SingleCatalogAcquisition", "P7C15StageJournal", "P7C15ChildResultAuthority",
+            "DialogueDeleteService", "CodexApprovalBridge", "CodexTurnLifecycleAdapter",
+        ):
+            self.assertIn(name, source)
+
+
 def _synthetic_boot(root: Path, contract: P7C15ArchitectContract) -> dict[str, Any]:
+    paths = p7c15_fresh_run_paths("a" * 24, root=root, authority=root)
+    paths["boot"] = str(root / "p7c15-boot-synthetic.json")
+    paths["ledger_path"] = str(root / "p7c15-one-shot.json")
     return {
         "schema": P7C15_BOOT_SCHEMA, "source_head": contract.expected_head,
         "source_tree": contract.expected_tree, "harness_blob": contract.expected_launcher_blob,
         "run_id_hash": _sha256("synthetic-run"), "profile_id": P7C15_PROFILE_ID,
-        "ledger_path": str(root / "ledger.json"), "child_result_path": str(root / "result.json"),
-        "isolated_root": str(root / "p7c15-isolated-synthetic"),
-        "controller_db": str(root / "p7c15-controller-synthetic.sqlite3"),
-        "workdir": str(root / "p7c15-work-synthetic"),
-        "approval_target": str(root / "p7c15-approval-synthetic"),
-        "wire_path": str(root / "p7c15-wire-synthetic.json"),
-        "approval_journal_path": str(root / "p7c15-approval-journal-synthetic.json"),
-        "stage_journal_path": str(root / "p7c15-stage-synthetic.jsonl"),
+        "codex_home": "/root/.codex_second", "ledger_path": paths["ledger_path"],
+        "boot_authority_path": paths["boot"], "child_result_path": paths["child_result"],
+        "isolated_root": paths["isolated_root"], "isolated_sqlite": str(Path(paths["isolated_root"]) / "sqlite"),
+        "isolated_logs": str(Path(paths["isolated_root"]) / "logs"), "controller_db": paths["controller_db"],
+        "workdir": paths["workdir"], "approval_target": paths["approval_target"], "wire_path": paths["wire"],
+        "approval_journal_path": paths["approval_journal"], "stage_journal_path": paths["stage"],
+        "effect_ceiling": dict(P7C15_FROZEN_EFFECT_BUDGET), "import_roots": list(P7C15_IMPORT_ROOTS),
+        "deterministic_import_root": P7C15_PYTHONPATH, "runtime_authority": "/usr/local/bin/codex",
     }
 
 
@@ -833,11 +1171,183 @@ def _synthetic_authority(contract: P7C15ArchitectContract) -> P7C15SourceAuthori
     return P7C15SourceAuthority(contract.expected_head, contract.expected_tree, contract.expected_launcher_blob, contract.expected_p7c14_launcher_blob, contract.expected_p7c13_harness_blob, contract.expected_p7c12_matcher_blob, contract.expected_tests_init_blob, contract.expected_tests_real_init_blob, True, True)
 
 
+def _validate_p7c15_fresh_paths(paths: Mapping[str, str], *, ledger_path: Path, boot_path: Path) -> None:
+    """Validate every production boundary before boot creation or child spawn."""
+    authority = ledger_path.parent
+    try:
+        authority_stat = authority.lstat()
+    except OSError as error:
+        raise P7C15PreparationError("P7.C15 authority root unavailable") from error
+    if not stat.S_ISDIR(authority_stat.st_mode) or authority_stat.st_uid != 0 or stat.S_IMODE(authority_stat.st_mode) & 0o022:
+        raise P7C15PreparationError("P7.C15 authority root unsafe")
+    expected = {"isolated_root", "controller_db", "workdir", "approval_target", "boot", "child_result", "wire", "approval_journal", "stage"}
+    if set(paths) not in (expected, expected | {"ledger_path"}) or not all(isinstance(value, str) and os.path.isabs(value) for value in paths.values()):
+        raise P7C15PreparationError("P7.C15 fresh path set invalid")
+    if paths["boot"] != str(boot_path):
+        raise P7C15PreparationError("P7.C15 boot path drift")
+    for key, value in paths.items():
+        if key != "ledger_path" and not Path(value).name.startswith("p7c15-"):
+            raise P7C15PreparationError("P7.C15 fresh namespace invalid")
+        path = Path(value)
+        if key != "ledger_path" and (path.exists() or path.is_symlink()):
+            raise P7C15PreparationError("P7.C15 fresh authority already exists")
+    if "ledger_path" in paths and paths["ledger_path"] != str(ledger_path):
+        raise P7C15PreparationError("P7.C15 ledger path drift")
+    physical_paths = [value for key, value in paths.items() if key != "ledger_path"]
+    if len({os.path.realpath(value) for value in physical_paths}) != len(physical_paths):
+        raise P7C15PreparationError("P7.C15 physical path alias")
+    if not ledger_path.exists() or ledger_path.is_symlink() or ledger_path.name != "p7c15-one-shot.json":
+        raise P7C15PreparationError("P7.C15 ledger path invalid")
+    ledger_stat = ledger_path.lstat()
+    if ledger_stat.st_uid != 0 or not stat.S_ISREG(ledger_stat.st_mode) or ledger_stat.st_nlink != 1 or stat.S_IMODE(ledger_stat.st_mode) != 0o600:
+        raise P7C15PreparationError("P7.C15 ledger authority unsafe")
+
+
+def _build_p7c15_production_boot(contract: P7C15ArchitectContract, record: Mapping[str, Any], paths: Mapping[str, str]) -> dict[str, Any]:
+    isolated = Path(paths["isolated_root"])
+    return {
+        "schema": P7C15_BOOT_SCHEMA, "source_head": contract.expected_head,
+        "source_tree": contract.expected_tree, "harness_blob": contract.expected_launcher_blob,
+        "run_id_hash": record["run_id_hash"], "profile_id": P7C15_PROFILE_ID,
+        "codex_home": "/root/.codex_second", "ledger_path": str(paths.get("ledger_path", P7C15_LEDGER_PATH)),
+        "boot_authority_path": paths["boot"], "child_result_path": paths["child_result"],
+        "isolated_root": paths["isolated_root"], "isolated_sqlite": str(isolated / "sqlite"),
+        "isolated_logs": str(isolated / "logs"), "controller_db": paths["controller_db"],
+        "workdir": paths["workdir"], "approval_target": paths["approval_target"],
+        "wire_path": paths["wire"], "approval_journal_path": paths["approval_journal"],
+        "stage_journal_path": paths["stage"], "effect_ceiling": dict(P7C15_FROZEN_EFFECT_BUDGET),
+        "import_roots": list(P7C15_IMPORT_ROOTS), "deterministic_import_root": P7C15_PYTHONPATH,
+        "runtime_authority": "/usr/local/bin/codex",
+    }
+
+
+def _p7c15_child_result_file_is_valid(path: Path, boot: Mapping[str, Any]) -> bool:
+    try:
+        P7C15ChildResultAuthority.read(path, boot)
+        return True
+    except (OSError, UnicodeError, json.JSONDecodeError, P7C15PreparationError):
+        return False
+
+
 class P7C15PreparedFutureExecutor:
-    def __init__(self, ledger: P7C15DurableOneShotLedger, child: Callable[[Mapping[str, Any]], Mapping[str, Any]]) -> None:
+    def __init__(self, ledger: P7C15DurableOneShotLedger, child: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None, *,
+                 watchdog: Any | None = None, child_command_factory: Callable[[Path], Sequence[str]] | None = None,
+                 run_paths: Mapping[str, str] | None = None, boot_path: Path | None = None) -> None:
         self.ledger, self.child, self.calls = ledger, child, 0
+        self.watchdog, self.child_command_factory = watchdog, child_command_factory
+        self.run_paths, self.boot_path = dict(run_paths or {}), boot_path
+
+    @classmethod
+    def production(cls, contract: P7C15ArchitectContract) -> "P7C15PreparedFutureExecutor":
+        """Construct the one-shot, fresh-path, owned-child future executor."""
+        return cls._production_with_authority(contract, ledger_path=P7C15_LEDGER_PATH)
+
+    @classmethod
+    def _production_with_authority(
+        cls, contract: P7C15ArchitectContract, *, ledger_path: Path,
+        process_factory: Callable[..., Any] = subprocess.Popen,
+        active_group_probe: Callable[[int], int] | None = None,
+        zombie_group_probe: Callable[[int], int] | None = None,
+        group_scan_error_probe: Callable[[int], int] | None = None,
+        child_dispatch: Callable[[Path], int] | None = None,
+    ) -> "P7C15PreparedFutureExecutor":
+        run_hash = _sha256(os.urandom(32))
+        paths = p7c15_fresh_run_paths(run_hash[:32], root=ledger_path.parent.parent, authority=ledger_path.parent)
+        boot_path = Path(paths["boot"])
+        record = {
+            "schema": P7C15_LEDGER_SCHEMA, "state": "RESERVED",
+            "source_head": contract.expected_head, "source_tree": contract.expected_tree,
+            "harness_blob": contract.expected_launcher_blob, "run_id_hash": run_hash,
+            "effect_counts": {}, "recovery": {},
+        }
+        watchdog = p7c13.OwnedParentChildWatchdog(
+            process_factory=process_factory, active_group_probe=active_group_probe,
+            zombie_group_probe=zombie_group_probe, group_scan_error_probe=group_scan_error_probe,
+        )
+        if child_dispatch is not None:
+            watchdog.active_group_probe = active_group_probe or (lambda _pgid: 0)
+            watchdog.zombie_group_probe = zombie_group_probe or (lambda _pgid: 0)
+            watchdog.group_scan_error_probe = group_scan_error_probe or (lambda _pgid: 0)
+
+        def command_factory(actual_boot: Path) -> Sequence[str]:
+            return (
+                "/usr/bin/env", f"PYTHONPATH={P7C15_PYTHONPATH}", "/usr/bin/python", "-m",
+                "tests.real.test_p7_c15_final_hard_delete_successor", "--p7c15-future-child",
+                "--boot-authority", str(actual_boot),
+            )
+
+        executor = cls(P7C15DurableOneShotLedger(ledger_path), watchdog=watchdog,
+                       child_command_factory=command_factory, run_paths=paths, boot_path=boot_path)
+        executor._offline_child_dispatch = child_dispatch
+        executor._record = record
+        return executor
+
+    def _production_boot(self, contract: P7C15ArchitectContract, record: Mapping[str, Any]) -> dict[str, Any]:
+        if not self.run_paths or self.boot_path is None:
+            raise P7C15PreparationError("P7.C15 fresh authority missing")
+        paths = dict(self.run_paths)
+        paths["boot"] = str(self.boot_path)
+        if str(self.ledger.path) != paths.get("ledger_path", str(self.ledger.path)):
+            paths["ledger_path"] = str(self.ledger.path)
+        if str(self.ledger.path) != str(P7C15_LEDGER_PATH) and Path(self.ledger.path).name != "p7c15-one-shot.json":
+            raise P7C15PreparationError("P7.C15 production ledger namespace invalid")
+        _validate_p7c15_fresh_paths(paths, ledger_path=self.ledger.path, boot_path=self.boot_path)
+        return _build_p7c15_production_boot(contract, record, paths)
+
+    def _run_production(self, contract: P7C15ArchitectContract) -> P7C15WatchdogResult:
+        record = dict(getattr(self, "_record", {}))
+        if not record:
+            raise P7C15PreparationError("P7.C15 production record missing")
+        if not self.ledger.reserve(record):
+            raise P7C15PreparationError("P7.C15 reservation consumed")
+        paths = dict(self.run_paths or {})
+        boot = self._production_boot(contract, record)
+        P7C15RootOnlyBootAuthority(self.boot_path).create(boot)
+        P7C15RootOnlyBootAuthority(self.boot_path).read()
+        command = tuple(self.child_command_factory(self.boot_path))
+        child_dispatch = getattr(self, "_offline_child_dispatch", None)
+        if child_dispatch is not None:
+            class _OfflineProcess:
+                pid = os.getpid(); returncode = 0
+                def wait(self, timeout: float | None = None) -> int:
+                    self.returncode = child_dispatch(Path(command[-1]))
+                    return self.returncode
+            self.watchdog.process_factory = lambda *_args, **_kwargs: _OfflineProcess()
+        observed = self.watchdog.run(
+            command, result_path=boot["child_result_path"], timeout_seconds=5.0,
+            term_grace_seconds=0.2, kill_grace_seconds=0.2,
+            result_validator=lambda path: _p7c15_child_result_file_is_valid(path, boot),
+        )
+        child_status = None
+        child_result_valid = False
+        try:
+            child_result = P7C15ChildResultAuthority.read(boot["child_result_path"], boot)
+            child_status = child_result["status"]
+            child_result_valid = True
+        except (OSError, UnicodeError, json.JSONDecodeError, P7C15PreparationError):
+            child_result = None
+        if observed.status == "TIMEOUT":
+            state = "TIMEOUT"
+        elif child_status in {"UNKNOWN", "CONFIRMED_PENDING"}:
+            state = child_status
+        elif observed.status == "COMPLETED" and child_result_valid and child_status == "PASS" and child_result["verdict"] and observed.owned_group_active == observed.owned_group_zombies == observed.group_scan_errors == 0:
+            state = "COMPLETED"
+        else:
+            state = "FAILED"
+        recovery = {
+            "child_result": _sha256(str(boot["child_result_path"])),
+            "last_confirmed_stage": child_result.get("last_confirmed_stage") if child_result else "PARENT_VALIDATION",
+            "child_count": observed.child_count, "retry_count": getattr(self.watchdog, "retry_count", 0),
+        }
+        self.ledger.update(state=state, recovery=recovery)
+        return P7C15WatchdogResult(state, child_result_valid=child_result_valid)
 
     def run(self, contract: P7C15ArchitectContract) -> P7C15WatchdogResult:
+        if self.watchdog is not None:
+            if self.calls:
+                raise P7C15PreparationError("second child/retry forbidden")
+            self.calls += 1
+            return self._run_production(contract)
         if self.calls:
             raise P7C15PreparationError("second child/retry forbidden")
         self.calls += 1
@@ -847,29 +1357,12 @@ class P7C15PreparedFutureExecutor:
         root = self.ledger.path.parent
         boot = _synthetic_boot(root, contract)
         P7C15RootOnlyBootAuthority(root / "p7c15-boot-synthetic.json").create(boot)
+        if self.child is None:
+            raise P7C15PreparationError("synthetic child missing")
         result = dict(self.child(boot))
         state = "COMPLETED" if result.get("status") == "PASS" else "FAILED"
         self.ledger.update(state=state, recovery={"terminal": result.get("last_confirmed_stage", "SYNTHETIC")})
         return P7C15WatchdogResult("COMPLETED" if state == "COMPLETED" else "CHILD_FAILURE")
-
-    @classmethod
-    def production(cls, contract: P7C15ArchitectContract) -> "P7C15PreparedFutureExecutor":
-        """Construct the future real path only after the source gate passes."""
-        root = P7C15_LEDGER_PATH.parent
-        run_hash_fragment = _sha256(os.urandom(16))[:24]
-        fresh_paths = p7c15_fresh_run_paths(run_hash_fragment)
-
-        def future_child(boot: Mapping[str, Any]) -> Mapping[str, Any]:
-            command = (
-                sys.executable, "-m", "tests.real.test_p7_c15_final_hard_delete_successor",
-                "--p7c15-future-child", "--boot-authority", str(boot["child_result_path"]),
-            )
-            # The command is authority metadata here; real execution is never
-            # entered by preparation because no P7.C15 token is supplied.
-            del command, fresh_paths
-            return {"status": "FAILED", "verdict": False, "last_confirmed_stage": "SOURCE_GATE", "classes": {"future": "NOT_RUN"}}
-
-        return cls(P7C15DurableOneShotLedger(P7C15_LEDGER_PATH), future_child)
 
 
 def p7c15_real_entrypoint(
@@ -943,6 +1436,57 @@ def p7c15_synthetic_handoff(*, force_failure: bool = False) -> tuple[P7C15Watchd
         return watchdog, result
 
 
+def _p7c15_parse_child_boot(arguments: Sequence[str]) -> Path:
+    if len(arguments) != 3 or arguments.count("--p7c15-future-child") != 1 or arguments.count("--boot-authority") != 1:
+        raise P7C15PreparationError("P7.C15 child arguments invalid")
+    boot_index = arguments.index("--boot-authority")
+    if boot_index + 1 >= len(arguments) or not arguments[boot_index + 1] or arguments[boot_index + 1].startswith("--") or not os.path.isabs(arguments[boot_index + 1]):
+        raise P7C15PreparationError("P7.C15 child boot missing")
+    if any(item not in {"--p7c15-future-child", "--boot-authority", arguments[boot_index + 1]} for item in arguments):
+        raise P7C15PreparationError("P7.C15 child arguments invalid")
+    return Path(arguments[boot_index + 1]).absolute()
+
+
+def p7c15_future_child_main(
+    boot_path: str | Path, *, runtime_factory: Callable[[], Any] | None = None,
+    force_failure: bool = False, verify_installed: bool = True,
+) -> int:
+    """Actual P7.C15 child dispatcher; returns zero only for a valid PASS."""
+    boot = P7C15RootOnlyBootAuthority(boot_path).read()
+    journal = P7C15StageJournal(boot["stage_journal_path"])
+    pre_child_budget = EffectBudget(dict(boot["effect_ceiling"]))
+    child: P7C15ProductionChildOrchestrator | None = None
+    try:
+        if verify_installed:
+            p7c13.InstalledRuntimeAuthority().verify()
+        child = P7C15ProductionChildOrchestrator(boot, journal, runtime_factory=runtime_factory, force_failure=force_failure)
+        result = asyncio.run(child.run_async())
+        result["stage_journal_sha256"] = journal.digest()
+        payload = _p7c15_child_result_payload(boot, result, pre_child_budget, child)
+        written = P7C15ChildResultAuthority.write(boot["child_result_path"], payload, boot)
+        return 0 if written["status"] == "PASS" and written["verdict"] is True else 1
+    except Exception as error:
+        actual_budget = child.budget if child is not None else pre_child_budget
+        try:
+            journal.append("TERMINAL_EXCEPTION", "FAILED", effect_class="terminal", error=error)
+        except P7C15PreparationError:
+            pass
+        category = getattr(getattr(error, "category", None), "value", None) if isinstance(error, TurnLifecycleError) else None
+        failure = {
+            "status": "FAILED", "verdict": False, "terminal_exception_class": type(error).__name__,
+            "terminal_error_category": category, "last_confirmed_stage": child.last_confirmed_stage if child is not None else "PRE_CHILD",
+            "classes": {"failure": "FAIL_CLOSED"}, "outcomes": {}, "runtime_child_quiescent": False,
+            "stage_journal_sha256": journal.digest(),
+        }
+        try:
+            P7C15ChildResultAuthority.write(
+                boot["child_result_path"], _p7c15_child_result_payload(boot, failure, pre_child_budget, child), boot,
+            )
+        except (OSError, P7C15PreparationError):
+            pass
+        return 1
+
+
 def _module_main(argv: Sequence[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if "--p7c15-real-run" in arguments:
@@ -954,11 +1498,10 @@ def _module_main(argv: Sequence[str] | None = None) -> int:
         return p7c15_parent_exit_projection(result)
     if "--p7c15-future-child" in arguments:
         try:
-            boot_index = arguments.index("--boot-authority") + 1
-            Path(arguments[boot_index]).lstat()
-        except (ValueError, IndexError, OSError):
+            boot_path = _p7c15_parse_child_boot(arguments)
+            return p7c15_future_child_main(boot_path)
+        except (ValueError, IndexError, OSError, P7C15PreparationError):
             return 1
-        return 1
     unittest.main(argv=[sys.argv[0], *arguments])
     return 0
 

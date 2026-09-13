@@ -7,11 +7,15 @@ Status: **PREPARATION ONLY / ZERO REAL EFFECT / REAL EXECUTION NOT AUTHORIZED**
 The preparation branch was fetched and checked out without merge or rebase.
 
 ```text
-branch=prep-p7-c15-hard-delete-successor-2026-09-12
-P7C15_PREP_BASE_HEAD=98e168c82f7fd9d8f50c491017323e97d3ed396f
-P7C15_PREP_BASE_TREE=cd2bff744a24019090612c5ed61c70ee11927c3a
-origin/main=7ac2bdfe2dea449f8addbff20485bd2ffc17c26f
-origin/main_tree=139e93b894f3bd0d5baf04ef5de2016b909182ba
+branch=prep-p7-c15-hard-delete-successor-repair1-2026-09-12
+P7C15_REPAIR1_BASE_HEAD=11ea49d1bf6369b27f293ff58a9ba62ad52333a1
+P7C15_REPAIR1_BASE_TREE=faa3c889860832a56ffbd2332760d4b90673b8ef
+origin/main=b74049a9bd2fd138203cb2517f70e6ef20f0dde4
+origin/main_tree=9a124525fc0c4b164951b2f75129e234d29f7f3b
+PRIOR_P7C15_LAUNCHER_BLOB=37b5926ad998fb146bba154546059d9d1439bb38
+PRIOR_P7C15_EVIDENCE_BLOB=508000c76ede6373455dec70e910becc5b0b4b6b
+FINAL_P7C15_LAUNCHER_BLOB=c129ac0820104b9860e50938a6529b3522773dbe
+FINAL_P7C15_EVIDENCE_BLOB=REPORTED_AFTER_FINAL_EDIT_READBACK
 P7C15_LAUNCHER_BLOB=37b5926ad998fb146bba154546059d9d1439bb38
 P7C14_FORENSIC_EVIDENCE_BLOB=648a149e4210ae40fdb44d1669d17f5c0e689af4
 INHERITED_P7C14_LAUNCHER_BLOB=fcce1352d581522b4c4ab0e5235d0b927d2eceb8
@@ -19,6 +23,41 @@ INHERITED_P7C13_HARNESS_BLOB=5a1fe8e32cd985b1e1845d73266211632e33950c
 INHERITED_P7C12_MATCHER_BLOB=f5ccefd00f4b3cd4c6aebaa89ec6c15132af67a1
 TESTS_INIT_BLOB=080243830be797f87d23b459dbfd12c142a9d49a
 TESTS_REAL_INIT_BLOB=23d73d7648ed14ef6857ee665784b87f57fde9f3
+```
+
+Repair-1 production integration is now materialized in the successor module.
+`P7C15PreparedFutureExecutor.production()` reserves the distinct P7.C15
+one-shot ledger, selects one high-entropy `p7c15-*` authority set, creates a
+boot-bound root-only authority, starts one owned child/watchdog, validates the
+root-only child result, and maps the terminal result into the P7.C15 ledger.
+The production command is exactly the deterministic `/usr/bin/env` form and
+passes the actual boot authority path, never the child-result path.
+
+The child CLI requires exactly one boot authority, creates the stage journal
+before business effects, enters `P7C15ProductionChildOrchestrator` once, and
+writes one bounded child result.  The production child uses generation
+tracking, one `P7C15SingleCatalogAcquisition`, an immutable semantic catalog
+snapshot, and a `GenerationReboundCatalogView`; the fake production-shaped
+handoff proves one model/list and one corrected Turn-2 dispatch after
+generation restart/resume.  The accepted C11/C12 approval, Turn-4 interrupt,
+schema-v4 controller, `DialogueDeleteService`, official observation, and
+physical-oracle continuation remain represented as the production continuation
+boundary; no real adapter or external effect was invoked during Repair-1.
+
+Repair-1 focused proof:
+
+```text
+focused P7.C15 Repair-1: 18 passed
+production-shaped positive: COMPLETED / PASS / one child / retry=0
+production-shaped failure: FAILED / TurnLifecycleError / turn_precondition_changed / retry=0
+BOOT_ARG_IS_BOOT_PATH=YES
+MODEL_LIST_DISPATCHES=1
+TURN2_START_DISPATCHES=1
+FAKE_OWNED_CHILD_DISPATCHES=1
+TEMP_LEDGER_RESERVATIONS=1
+P7C14_LEDGER_ACCESS=0
+P7C13_LEDGER_ACCESS=0
+REAL_CODEX_CALLS=0
 ```
 
 The two binding documents were read in full directly from `origin/main`:
@@ -131,11 +170,11 @@ Codex/app-server process was started and no P7.C15 real ledger was created.
 ## Validation
 
 ```text
-focused P7.C15: 14 passed
+focused P7.C15 Repair-1: 18 passed
 P7.C14/P7.C13/P7.C12 offline regression: 96 passed, 128 subtests passed
 P7.C2/P7.C3/P7.C4/P7.C5 fake/non-real: 106 passed, 54 subtests passed
-full pytest: 1873 passed, 7 skipped, 6 retained historical-latch failures
-unittest discovery: 1886 tests, 7 skipped, 5 retained historical-latch failures, 1 retained historical-authority error
+full pytest: 1877 passed, 7 skipped, 6 retained historical-latch failures
+unittest discovery: 1890 tests, 7 skipped, 5 retained historical-latch failures, 1 retained historical-authority error
 compileall: PASS
 git diff --check: PASS
 ```
@@ -179,6 +218,16 @@ P7C15_PREP_STAGE_CATEGORY_JOURNAL=PASS
 P7C15_PREP_PARENT_EXIT_PROJECTION=PASS
 P7C15_PREP_DISTINCT_GATE_LEDGER=PASS
 P7C15_PREP_EXACT_AUTHORIZED_SYNTHETIC_HANDOFF=PASS
+P7C15_PREP_READY=YES
+
+P7C15_REPAIR1_PRODUCTION_PARENT_CHILD_PATH=PASS
+P7C15_REPAIR1_REAL_CHILD_DISPATCHER_PREPARED=PASS
+P7C15_REPAIR1_FRESH_BOOT_RESULT_AUTHORITY=PASS
+P7C15_REPAIR1_PRODUCTION_GENERATION_REBOUND=PASS
+P7C15_REPAIR1_PRODUCTION_FAILURE_ACCOUNTING=PASS
+P7C15_REPAIR1_PRODUCTION_STAGE_JOURNAL=PASS
+P7C15_REPAIR1_PARENT_TERMINAL_PROJECTION=PASS
+P7C15_REPAIR1_EXACT_AUTHORIZED_PRODUCTION_SHAPED_HANDOFF=PASS
 P7C15_PREP_READY=YES
 
 P7C15_REAL_EXECUTION_AUTHORIZED=NO
