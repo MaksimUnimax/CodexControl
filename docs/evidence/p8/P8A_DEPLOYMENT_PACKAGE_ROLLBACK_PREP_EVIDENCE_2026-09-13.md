@@ -1,180 +1,177 @@
-# P8.A deployment package + rollback preparation evidence — 2026-09-13
+# P8.A deployment package + rollback preparation — Repair-2 evidence — 2026-09-13
 
-Status: implementation and offline acceptance only. No production deployment,
-real systemd mutation, live Telegram call, or real Codex acceptance was run.
+Status: offline implementation and rehearsal only. Independent architect review
+is still required. No P8.B, P9, live Telegram, real systemd, production path,
+production database, Codex app-server or real Codex RPC was used.
 
-## Authority and history
+## Authority and branch
 
-P8A_BASE_HEAD=6234a2fd8ff3cbb7f632558891065ac9d477bece
+P8A_REPAIR2_BASE_HEAD=09214a2a0a0ce92a2847dda24c3512447c822f1c
 
-P8A_BASE_TREE=4d8595c70c635122ee3764161983bd0ea0d8195a
+P8A_REPAIR2_BASE_TREE=56ac091de95ad809df9408a3da91fb4c00baa6f3
 
-The implementation checkpoint before this evidence commit is:
+P8A_REPAIR2_PRIOR_EVIDENCE_BLOB=5ee4362a1d3aa22b6e3a3b4294d689296a260a99
 
-P8A_IMPLEMENTATION_HEAD=109d9a39fc271af11c97fbd1c1d79375d6c678ab
+P8A_REPAIR2_CODE_HEAD=8bbbeb9289f03a9888a3c262e4fd60768b2868a3
 
-P8A_IMPLEMENTATION_TREE=8536361679d1fdf36baa90adce7c9f541ce2c6c1
+P8A_REPAIR2_CODE_TREE=8ad06b960d42b985b7069d4b297c28d5fb2961df
 
-The branch is linear from the required base. P8.A commits, in order:
-
-```text
-9faff36993ebafe6c10115eacdc9173a10987584 Implement P8A offline production assembly and rollback package
-fc5787e7d840924aece5e8d4c3fd1df8dd8cbe90 Record P8A offline deployment and rollback evidence
-acb1c261735a89376e5f0e522b19fce1bf192a40 Keep offline polling loop alive across empty polls
-c47a53dedb10ecd6d4494e86e1d2a8ad2f8349de Refresh P8A evidence for final offline lifecycle checks
-109d9a39fc271af11c97fbd1c1d79375d6c678ab Harden P8A offline deployment and service authorities
-```
+The implementation branch is
+`impl-p8a-deployment-package-rollback-repair2-2026-09-13`, five linear
+commits ahead of the exact Repair-2 base, with no merge or rebase. `origin/main`
+remains `ea7f45a2b703bd7b9812e107ce843e4ff6182b57` with tree
+`95a5bece8dc57b6d988d7aa86b08378d06d653be`.
 
 ## Changed paths
 
+Only these P8.A implementation/test paths changed from the Repair-2 base:
+
 ```text
-config/examples/README.md
-config/examples/server.toml
-config/server-80.example.toml
 deploy/codex_control_deploy.py
-deploy/systemd/README.md
-deploy/systemd/codex-control.service
-docs/evidence/p8/P8A_DEPLOYMENT_PACKAGE_ROLLBACK_PREP_EVIDENCE_2026-09-13.md
-pyproject.toml
-src/codex_control/__main__.py
-src/codex_control/adapters/telegram/__init__.py
 src/codex_control/adapters/telegram/bot_api.py
-src/codex_control/config.py
 src/codex_control/deployment.py
-src/codex_control/secrets.py
 src/codex_control/service.py
 tests/acceptance/test_p8a_deployment_offline.py
-tests/unit/test_p8a_configuration_transport.py
+tests/unit/test_p8a_repair2_authority.py
 ```
 
-P7 historical harnesses, ledgers, retained evidence, `docs/ROADMAP.md`, and
-`docs/CURRENT_WORK.md` are unchanged.
+No P7 files, ledgers or evidence, no `docs/ROADMAP.md`, and no
+`docs/CURRENT_WORK.md` changed. No secret was committed.
 
-## Deliverables
+## Repaired authority
 
-- `pyproject.toml` declares `codex-control = codex_control.__main__:main`.
-  `validate` is finite static preflight; `serve` owns the assembled lifecycle.
-- `config.py` strictly models the V1 server, operator, control chat, ordered
-  fleet, runtime, controller DB, repository/protected roots, and explicit
-  profile/CODEX_HOME/isolation authorities. No profile discovery is used.
-- `secrets.py` is a bounded non-shell parser. It rejects duplicates,
-  malformed/unsafe assignments, NUL/control injection and unexpected keys;
-  production files require root ownership and mode 0600. Secret repr/errors
-  are redacted.
-- `bot_api.py` provides HTTPS Bot API polling, monotonic offsets, validated
-  JSON/result shapes, send/edit/callback projection, bounded timeouts and
-  normalized safe errors. `HttpClient` is injectable; all tests use fake HTTP.
-  Ambiguous mutating failures are surfaced as UNKNOWN with no blind retry.
-- `service.py` composes schema-v4 SQLite, explicit isolation, accepted runtime,
-  model/thread/turn/approval/recovery/orchestration/delivery components and
-  group/private adapters/renderers. Startup forces effective SLEEP and awaits
-  recovery before the first poll. Private updates are routed privately.
-  Shutdown stops ingress/polling, closes owned runtimes, then SQLite.
-- `deploy/systemd/codex-control.service` is uninstalled source material with
-  root identity, current-release executable, external config/secrets/state,
-  restart-on-failure, control-group shutdown and bounded timeout. No unit
-  activation or systemd mutation occurred.
-- `deployment.py` and `deploy/codex_control_deploy.py` provide explicit-root
-  exact-SHA immutable staging, manifest authority, atomic `current` switching,
-  prechecks, health-gated upgrade, schema-gated rollback, path/symlink checks,
-  idempotent restaging and zero-effect verification.
+`service.py` now exposes one shared async preflight. It loads config and
+secrets, validates filesystem/profile/isolation authority, performs a read-only
+DB schema check, then runs `CodexVersionProbe` through
+`probe_supported_manifest`, `validate_manifest_authority`, and
+`StorageRuntimeCapabilities`. The only default process invocation is bounded
+`codex --version`; app-server/model/thread/turn/approval/delete RPCs are not
+reachable from this preflight. An explicit callback is available only through
+offline test assembly/verification seams.
 
-## Digests and manifest authority
+The retained fake `#!/bin/sh; exit 0` executable now fails because its version
+output is empty. Wrong `codex-cli 0.144.7` fails `validate` and fails assembly
+before writable SQLite open or polling. Existing DB schema mismatch is checked
+before the installed probe and before `SqliteStorage.open`; missing DB is not
+ordinary serve authority. First install has the separate explicit
+`initialize_controller_state` helper.
+
+Telegram polling freezes `POLL_HTTP_MARGIN_SECONDS=5.0`; the actual injected
+HTTP deadline for payload timeout 30 is 35.0 seconds. The default URL client
+cap is at least 35.0 and does not clamp the polling request to 30.
+
+Deployment layout accepts `/` only via explicit
+`DeploymentRootAuthority(..., allow_production_root=True)`; default
+alternate-root mode rejects it. No root authority test writes to `/`.
+
+Production `stage_release` requires a Git worktree/repository and exact full
+commit SHA. It verifies the commit and tree, exports tracked bytes with
+`git archive`, records `source_git_sha` and `source_tree_sha`, and ignores
+dirty or untracked working-tree content. The separately named
+`stage_rehearsal_release` is synthetic-test-only.
+
+Each staged release builds `.venv/bin/codex-control` privately with no-index,
+no-deps, no-build-isolation semantics where local wheel prerequisites exist;
+the dependency-free project has a deterministic source-relative launcher
+fallback when this host lacks wheel. The final executable is regular,
+non-symlink and executable. Staged validation disables bytecode writes so
+artifact digests remain immutable.
+
+Release publication is exact export -> private same-filesystem stage -> build ->
+manifest -> digest/release validation -> immutable modes -> final validation ->
+atomic rename. Export, build, manifest and validation failure hooks all leave
+the final target absent; an existing valid target is left untouched. The
+previous record is not replaced until the current symlink replacement succeeds,
+so a failure at that boundary cannot fabricate a rollback target.
+
+Production `install_upgrade`, `production_rollback`, and
+`verify_installation` require explicit root authority, config, secrets,
+service-unit, actual DB and installed-runtime authority. The old caller/default
+schema and root+SHA switch surface is not exposed by the deployment CLI; caller-
+fact primitives are clearly named `rehearsal_*`. Missing health evidence
+returns `SWITCHED_AWAITING_SERVICE_HEALTH`, never health success. Explicit fake
+PASS returns `HEALTH_CONFIRMED`; explicit fake FAIL performs schema-gated
+rollback and returns `ROLLED_BACK`.
+
+Verification reports the actual installed version/schema returned by the
+bounded probe, alongside current release SHA/tree, executable, config/secrets,
+actual DB schema, profiles/CODEX_HOME and unit/manifest digests. It never copies
+`manifest.expected_codex_version` into installed authority.
+
+## Digests
 
 ```text
-systemd unit sha256 = 7df63042b9fcf9763c33cff980c9e4c3fadb25cef3d96c6dbe97532d3ad10870
-deployment helper sha256 = 0ee75a9603fdd5d7e7f8fc162d33fb24208514e8e6ffeb66dad39b2d0a2e00ff
-deployment module sha256 = ddf0736e2e032d7ac10923d77835a552ab15f08ad59f58c795d14bac20224787
-service module sha256 = 576742af6b29be424b62dcb8237660656d9d696e1345378e21e4d059c48607b0
-Telegram transport sha256 = d0c155211542fce57200ab63d2bfe7d98c52d5a1f7df2470a9a881dbedab60e4
-secrets module sha256 = 6556a0b8e062ff479feedfb055bff1ff0839dcf81611e5ed1a951a949af29c2f
+service unit sha256 = 7df63042b9fcf9763c33cff980c9e4c3fadb25cef3d96c6dbe97532d3ad10870
+deployment helper sha256 = 0b446b72fc0d1921f9d62c777d637312f207656fd1dcfa0e015d23a515e7707b
+deployment module sha256 = 7c75c27e26138a0d5b787e5b241c544c383826d3777ed4ff9ce8af638d1f4187
+service module sha256 = da11bc09940d29266b85a4e718fce9fa414c02026ccc2a36f023b294844e4fd5
+Telegram transport sha256 = 4dec24454e871e3061990f328d11123f0b9c979a62615aa2bef6ff83531a4995
+Repair-2 focused test sha256 = 113dd78e8d7656c103e97e7759a4175264f192413c954ca98b7a4057f0e6463b
+installed capability schema sha256 = 40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466
 ```
 
-The final handoff command is the authority for all listed file digests. The
-release manifest contains product,
-package version, exact supplied Git SHA, Python requirement, Codex 0.144.6
-capability-schema SHA, controller schema 4, artifact digests, and optional
-service-unit digest. It excludes tokens, cookies, IDs, prompts and environment
-data. Manifest/source authority is deterministic; wheel-byte reproducibility
-is not claimed.
-
-## Tests and validation
+Final temporary-root release manifest digests:
 
 ```text
-PYTHONPATH=.:src pytest -q tests/unit/test_p8a_configuration_transport.py tests/acceptance/test_p8a_deployment_offline.py
-14 passed
-
-PYTHONPATH=.:src pytest -q --ignore=tests/real
-1079 passed, 647 subtests passed, 2 warnings
-
-python -m compileall -q src tests
-git diff --check
+A (09214a2a0a0ce92a2847dda24c3512447c822f1c) = faa85754d44632d784ed8dda8a86755f277b124cb11dc6814629cfdb3e217315
+B (8bbbeb9289f03a9888a3c262e4fd60768b2868a3) = e667d5d80e2674f372856fcac8c021545561918bf73c9e4ad0f9cf781da56e44
 ```
 
-The focused matrix covers complete/missing/duplicate/overlap/control-character
-configuration, secret duplicate/malformed/shell-like/unknown-key cases,
-redacted errors/repr, polling/order/offset/timeout/result errors, send/edit/
-callback projection and no retry, private-vs-group routing, SLEEP boot,
-startup recovery ordering, temporary SQLite, exact-SHA manifests, atomic
-switching, schema refusal, health failure rollback, preserved state/config/
-secrets, idempotent restage and path/symlink attacks. The broad run is the
-safe P0–P7 non-real regression set. P7 real tests were deliberately not run.
+## Tests and rehearsal
 
-## Systemd verification
-
-Deterministic assertions passed for service name, `User=root`, exact
-`/opt/codex-control/current/.venv/bin/codex-control` strategy, config path,
-root-only `EnvironmentFile`, working directory, `Restart=on-failure`, bounded
-`RestartSec=5s`/`TimeoutStopSec=30s`, `KillMode=control-group`, no token
-literal, no webhook/listener, and no unsafe shell interpolation.
-
-`systemd-analyze verify` was run read-only against the source/temp-root unit;
-the source-only invocation reports the expected absent future executable, and
-the temp-root invocation reports only the absent boot target in the isolated
-root. No `systemctl`, `service`, daemon-reload, install, enable, start, stop,
-restart or reload was called.
-
-## Temporary-root install/upgrade/rollback rehearsal
-
-The rehearsal used a newly-created temporary root and temporary A/B artifacts:
-
-1. staged A and atomically selected A;
-2. validated A's manifest and recovered its exact supplied SHA;
-3. staged B and validated its manifest;
-4. atomically selected B;
-5. returned `healthy=False` from the simulated post-switch health gate;
-6. explicitly rolled back to compatible A and verified `current=A`;
-7. preserved config, secret and v4 SQLite bytes in the pytest fixture;
-8. rejected schema mismatch, missing/invalid previous release, traversal and
-   symlink authorities, with all writes confined to the explicit temp root.
-
-The direct rehearsal recovered manifest SHA-256 values:
+Focused Repair-2 run first:
 
 ```text
-manifest A = a8dab05c93e46a09f1b57d466ea652b37cf3291ccc6816ee6d3e8106059dc8c1
-manifest B = e3da30ddac61b8d2744a1fb7a3db6f98499d6ea890893ccf0e0ea93c1405c713
-result = healthy:false, rolled_back:true, current:A
+PYTHONPATH=src python -m pytest -q tests/unit/test_p8a_repair2_authority.py tests/unit/test_p8a_configuration_transport.py tests/acceptance/test_p8a_deployment_offline.py
+28 passed, 3 subtests passed
 ```
 
-Rehearsal result: PASS.
+The focused file maps all mandatory blockers to:
 
-## Secret/leakage scan
+```text
+test_installed_codex_wrong_version_blocks_validate
+test_installed_codex_wrong_version_blocks_serve_before_storage_and_poll
+test_long_poll_http_deadline_exceeds_telegram_timeout
+test_root_requires_explicit_production_authority
+test_arbitrary_directory_cannot_claim_git_sha
+test_exact_git_commit_tree_is_exported
+test_stage_builds_release_local_codex_control_executable
+test_build_failure_never_publishes_final_release
+test_production_switch_requires_actual_db_config_secrets_runtime_preflight
+test_missing_health_evidence_is_not_success
+test_verify_probes_actual_installed_codex
+test_production_rollback_reads_actual_db_schema
+```
 
-Tracked implementation/deployment paths were scanned for Telegram-like bot
-tokens, private-key material, auth/cookie headers, shell secret evaluation,
-environment dumps and prompt/response fixture leakage. No live credential or
-private key was found. The only token assignments are explicit offline test
-fixtures. No token, cookie, conversation content or environment dump is in
-the release manifest, unit or deployment output. Secret scan: PASS.
+Additional focused coverage injects export/manifest/final-validation failures,
+tests previous/current crash safety, untracked export exclusion, executable
+regularity and exact source-tree verification.
 
-## Historical immutable blockers
+Safe non-real regression run:
 
-P7.C13, P7.C14, P7.C15, P7.C16 and P7.C17 remain consumed immutable one-shot
-authorities and permanently non-retryable. Their ledgers/evidence/retained
-material were not read for mutation, reset, deleted or rerun. This is reported
-separately from P8.A tests.
+```text
+PYTHONPATH=src python -m pytest -q tests/unit tests/integration tests/acceptance --ignore=tests/real
+1089 passed, 650 subtests passed, 2 pre-existing warnings
+```
 
-## Zero-production-effect accounting
+P7 real tests were not run. Consumed historical P7 latches/evidence were not
+reset, mutated, or retried.
+
+The complete temporary-root rehearsal used exact object A above, then exact
+committed object B: private stage/build/manifest/tree validation, atomic A,
+production-shaped B preflight, current B, explicit fake health FAIL, actual
+PRAGMA `user_version=4` rollback eligibility, and current A. Config, secrets,
+and DB bytes were unchanged. The only writes were under the generated
+temporary root; no network, systemd, live Telegram, or app-server effect was
+used.
+
+## Validation and zero-effect accounting
+
+`python -m compileall -q src tests`, `git diff --check`, exact changed-path
+scope review, and tracked secret/leakage review were run. The systemd source
+unit was inspected read-only. `systemd-analyze verify` returned 0 for a
+temporary path-substituted unit pointing at the fully staged release-local
+executable; no unit installation or systemd mutation was performed.
 
 ```text
 REAL_SYSTEMD_MUTATIONS=0
@@ -191,32 +188,21 @@ P9_STARTED=0
 P8A_PRODUCTION_EFFECTS=0
 ```
 
-P8A_PRODUCTION_ENTRYPOINT=PASS
-
-P8A_CONFIGURATION_AND_SECRETS_AUTHORITY=PASS
-
-P8A_TELEGRAM_TRANSPORT_OFFLINE=PASS
-
-P8A_PRODUCTION_ASSEMBLY_OFFLINE=PASS
-
-P8A_SYSTEMD_PACKAGE=PASS
-
-P8A_IMMUTABLE_RELEASE_LAYOUT=PASS
-
-P8A_INSTALL_UPGRADE_REHEARSAL=PASS
-
-P8A_ROLLBACK_REHEARSAL=PASS
-
-P8A_SCHEMA_COMPATIBILITY_GATE=PASS
-
-P8A_RELEASE_MANIFEST=PASS
-
-P8A_SECRET_LEAKAGE_SCAN=PASS
+P8A_REPAIR2_INSTALLED_CODEX_PREFLIGHT=PASS
+P8A_REPAIR2_SERVE_PREFLIGHT_ORDER=PASS
+P8A_REPAIR2_LONG_POLL_DEADLINE=PASS
+P8A_REPAIR2_PRODUCTION_ROOT_AUTHORITY=PASS
+P8A_REPAIR2_EXACT_GIT_SOURCE_BINDING=PASS
+P8A_REPAIR2_EXECUTABLE_RELEASE_BUILD=PASS
+P8A_REPAIR2_ATOMIC_STAGE_PUBLICATION=PASS
+P8A_REPAIR2_PRODUCTION_TRANSACTION_PREFLIGHT=PASS
+P8A_REPAIR2_HEALTH_STATE_AUTHORITY=PASS
+P8A_REPAIR2_TRUTHFUL_INSTALLED_VERIFY=PASS
+P8A_REPAIR2_ROLLBACK_ACTUAL_SCHEMA=PASS
+P8A_REPAIR2_BRANCH_AUTHORITY=PASS
 
 P8A_PRODUCTION_EFFECTS=0
-
 P8A_PREP_READY=YES
 
 P8_REAL_DEPLOYMENT_AUTHORIZED=NO
-
 P9_STARTED=NO
