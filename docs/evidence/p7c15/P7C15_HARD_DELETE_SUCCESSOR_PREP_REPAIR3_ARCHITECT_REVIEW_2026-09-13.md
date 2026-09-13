@@ -5,7 +5,7 @@ Status: **REWORK_REQUIRED / REAL HARD-DELETE SEMANTICS ACCEPTED / ONE-SHOT CONTA
 ## Candidate reviewed
 
 - candidate HEAD: `84b901f7af208ecde240b0ba0ed13188376b4104`;
-- candidate tree reported/verified on branch: `094?` is historical; final Repair-3 remote authority is the exact branch HEAD above and launcher blob below;
+- candidate tree: `31c2c22b5d11dafdcd06b8fb96e5dd0e880fc1ce`;
 - Repair-3 base: `52e20e42e451955ba0d417a47d89903cadf142f2`;
 - Repair-3 base tree: `03c555267442b8ce6df5255e08152c2cd112908c`;
 - launcher blob: `5e964d9408413b968b03e334759037f906174ffd`;
