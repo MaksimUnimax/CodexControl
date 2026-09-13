@@ -206,3 +206,160 @@ P8A_PREP_READY=YES
 
 P8_REAL_DEPLOYMENT_AUTHORIZED=NO
 P9_STARTED=NO
+
+## Repair-3 final transaction repair evidence
+
+Repair-3 was executed from the exact required base:
+
+P8A_REPAIR3_BASE_HEAD=5ef7d19131335863f9c104f2ea363d6ed014cf82
+
+P8A_REPAIR3_BASE_TREE=dd66eb9e353049cd8749a2f7d40789fc10cbda92
+
+The implementation transaction is the linear commit
+`a3416c746ec59ecec19c745c2cb792aa60e2dea4` with tree
+`081f23ce6cd00c94d836eb785538172af3094fbc`. The evidence update is a
+follow-up linear commit; the final branch HEAD/tree are recorded in the
+handoff report. `origin/main` was unchanged at
+`674ea22b488cb8d4064aff504aebb62cd0516e7d` / tree
+`86329f2ce8b40e0ae81f1197ea9910e8b1bd36b2`.
+
+Changed files from the exact Repair-3 base are limited to:
+
+```text
+deploy/codex_control_deploy.py
+src/codex_control/deployment.py
+src/codex_control/service.py
+tests/unit/test_p8a_repair3_authority.py
+docs/evidence/p8/P8A_DEPLOYMENT_PACKAGE_ROLLBACK_PREP_EVIDENCE_2026-09-13.md
+```
+
+No P7 material, ROADMAP.md, CURRENT_WORK.md, migrations, P8.B or P9 files
+changed. No secret was added.
+
+### First-install state
+
+The initializer now performs config/secrets parsing, filesystem/profile/runtime
+authority validation, installed Codex capability validation, absent-leaf and
+safe-parent checks, explicit subordinate-parent creation only beneath the
+configured controller DB root, SqliteStorage schema-v4 creation and close, and
+PRAGMA `user_version=4` readback. Canonical `state_root/controller.sqlite3`
+with an existing state root passes; a second attempt returns
+`database_already_initialized`. Symlink DB paths, existing special DB files,
+unsafe parents and missing-DB ordinary serve are rejected without DB creation.
+
+### Private-stage validation and publication
+
+Production `install_upgrade` now performs exact Git export, private executable
+build, private manifest/artifact validation, private staged executable
+`codex-control validate` against the target config/secrets/existing schema-v4
+DB/installed Codex authority, atomic publication to `releases/<sha>`, final
+release validation, and only then current switching. The staged command has no
+test-only authority argument. Injected staged validation failure leaves the
+new final release absent and current unchanged. A pre-existing valid identical
+release remains intact under failed revalidation. Successful private-stage
+validation published an exact source commit/tree manifest and a regular
+release-local `.venv/bin/codex-control` executable.
+
+Repair-3 implementation digests:
+
+```text
+deploy/codex_control_deploy.py = e607e94433fe5cf448b49bc0a91968504cf2958fef6664f66ae2e1895f1093f6
+src/codex_control/deployment.py = a363e9abb0aaaafa3ba36fb238ac35e12152b7386a79f107794e4bf701cb165f
+src/codex_control/service.py = b4ad4e45846c7bbe93e03d36b0501e606ce38f465cd5d3ae467517112181fb41
+tests/unit/test_p8a_repair3_authority.py = 4cf12c7139d4684709013d130bd9ba9e0971993661eb37641050470d4a20ad5b
+service unit = 7df63042b9fcf9763c33cff980c9e4c3fadb25cef3d96c6dbe97532d3ad10870
+exact-base temporary release manifest = b3e1a92e759d0c2f8493267c7213589d57f05e7b93e2047cd382ca291286632d
+```
+
+### Previous/current crash recovery
+
+`.previous.next` is now a durable, mode-0600 pending transaction record bound
+to `old_current_sha`, `new_target_sha` and one of `PREPARED`,
+`CURRENT_SWITCHED`, or `FINALIZED`. It is persisted before current switching,
+retained after a successful current switch until previous finalization is
+durable, and removed only after FINALIZED. Current replacement failure removes
+the pending record and leaves current/durable previous unchanged. Previous
+finalization failure leaves current on the new release and retains the exact
+immediate old release in pending authority. Restart recovery validates both
+release manifests, promotes that pending old release to durable previous, and
+then rollback uses it instead of stale previous data. Malformed records,
+wrong old/new SHAs, missing releases, manifest mismatches, current disagreement
+and ambiguous authority fail closed. The first-upgrade A(no previous)->B case
+was explicitly tested and recovers exact A.
+
+### CLI boundary
+
+`deploy/codex_control_deploy.py` no longer defines or reads
+`--test-only-authority`; argparse rejects that flag. Production `stage`,
+`upgrade`, `rollback` and `verify` continue to require their production
+authority inputs. Offline tests use explicit Python-level `test_only=True` or
+injected seams only.
+
+### Test and rehearsal record
+
+Repair-3 focused suite, including all required named tests:
+
+```text
+PYTHONPATH=src python -m pytest -q tests/unit/test_p8a_repair3_authority.py tests/unit/test_p8a_repair2_authority.py tests/unit/test_p8a_configuration_transport.py tests/acceptance/test_p8a_deployment_offline.py
+41 passed, 3 subtests passed
+```
+
+Repair-2 focused authorities were re-run in that suite; the prior Repair-2
+focused baseline remains `28 passed, 3 subtests passed`. The complete safe
+non-real regression suite was re-run:
+
+```text
+PYTHONPATH=src python -m pytest -q tests/unit tests/integration tests/acceptance --ignore=tests/real
+1102 passed, 2 warnings, 650 subtests passed
+```
+
+The warnings are the existing pytest collection/unraisable coroutine warnings;
+no test failed. Historical real P7 gates were not run or reset.
+
+The temporary-root rehearsal passed: existing safe state root -> explicit
+first-install -> schema-v4 readback -> ordinary preflight eligibility; exact
+Git-object A private stage/build/validate/publication -> current A; exact
+Git-object B private stage/validate/publication -> A-to-B switch and previous
+authority; explicit fake health failure -> actual-schema rollback to A. It
+also injected staged validation failure before publication, current replacement
+failure, previous finalization failure, and restart recovery. Config, secrets
+and DB bytes were unchanged after first-install fixture creation. No network,
+systemd, live Telegram, Codex app-server/RPC or P7 surface was used.
+
+Final validation commands passed:
+
+```text
+python -m compileall -q src tests
+git diff --check
+tracked secret/leakage scan: no live secret material
+changed-path scope check: P8.A implementation/tests/evidence only
+```
+
+Zero-effect accounting:
+
+```text
+REAL_SYSTEMD_MUTATIONS=0
+REAL_ETC_CODEX_CONTROL_WRITES=0
+REAL_OPT_CODEX_CONTROL_WRITES=0
+REAL_VAR_LIB_CODEX_CONTROL_WRITES=0
+REAL_TELEGRAM_HTTP_CALLS=0
+REAL_TELEGRAM_MESSAGES=0
+REAL_CODEX_PROCESS_STARTS=0
+REAL_CODEX_RPC_CALLS=0
+REAL_P7_LEDGER_MUTATIONS=0
+P8B_STARTED=0
+P9_STARTED=0
+P8A_PRODUCTION_EFFECTS=0
+```
+
+P8A_REPAIR3_FIRST_INSTALL_STATE=PASS
+P8A_REPAIR3_STAGED_VALIDATE_BEFORE_PUBLICATION=PASS
+P8A_REPAIR3_PREVIOUS_CURRENT_CRASH_RECOVERY=PASS
+P8A_REPAIR3_PRODUCTION_CLI_NO_TEST_BYPASS=PASS
+P8A_REPAIR2_MAJOR_AUTHORITIES_REGRESSION=PASS
+
+P8A_PRODUCTION_EFFECTS=0
+P8A_PREP_READY=YES
+
+P8_REAL_DEPLOYMENT_AUTHORIZED=NO
+P9_STARTED=NO
