@@ -1,30 +1,35 @@
 # P8.A deployment package + rollback preparation evidence — 2026-09-13
 
 Status: implementation and offline acceptance only. No production deployment,
-systemd mutation, Telegram network call, or real Codex acceptance was run.
+real systemd mutation, live Telegram call, or real Codex acceptance was run.
 
-## Source authority
+## Authority and history
 
 P8A_BASE_HEAD=6234a2fd8ff3cbb7f632558891065ac9d477bece
 
 P8A_BASE_TREE=4d8595c70c635122ee3764161983bd0ea0d8195a
 
-The implementation commit immediately above that base is:
+The implementation checkpoint before this evidence commit is:
 
-P8A_IMPLEMENTATION_HEAD=acb1c261735a89376e5f0e522b19fce1bf192a40
+P8A_IMPLEMENTATION_HEAD=109d9a39fc271af11c97fbd1c1d79375d6c678ab
 
-P8A_IMPLEMENTATION_TREE=0b1f08b5c41ecd4a4ba97b27679f775d1be4e7a5
+P8A_IMPLEMENTATION_TREE=8536361679d1fdf36baa90adce7c9f541ce2c6c1
 
-The evidence refresh is a linear commit after the implementation above. The
-final branch hash/tree are recorded in the handoff report because this file
-cannot contain its own future Git object identity.
+The branch is linear from the required base. P8.A commits, in order:
 
-The implementation history is linear from the required base; no merge,
-rebase, squash, force push, or main mutation was used.
+```text
+9faff36993ebafe6c10115eacdc9173a10987584 Implement P8A offline production assembly and rollback package
+fc5787e7d840924aece5e8d4c3fd1df8dd8cbe90 Record P8A offline deployment and rollback evidence
+acb1c261735a89376e5f0e522b19fce1bf192a40 Keep offline polling loop alive across empty polls
+c47a53dedb10ecd6d4494e86e1d2a8ad2f8349de Refresh P8A evidence for final offline lifecycle checks
+109d9a39fc271af11c97fbd1c1d79375d6c678ab Harden P8A offline deployment and service authorities
+```
 
 ## Changed paths
 
 ```text
+config/examples/README.md
+config/examples/server.toml
 config/server-80.example.toml
 deploy/codex_control_deploy.py
 deploy/systemd/README.md
@@ -42,123 +47,132 @@ tests/acceptance/test_p8a_deployment_offline.py
 tests/unit/test_p8a_configuration_transport.py
 ```
 
-No P7 historical file, P7 ledger/evidence, `docs/ROADMAP.md`, or
-`docs/CURRENT_WORK.md` was changed.
+P7 historical harnesses, ledgers, retained evidence, `docs/ROADMAP.md`, and
+`docs/CURRENT_WORK.md` are unchanged.
 
 ## Deliverables
 
 - `pyproject.toml` declares `codex-control = codex_control.__main__:main`.
-  `validate` performs finite static preflight; `serve` performs the accepted
-  assembly and lifecycle.
-- `config.py` provides strict complete V1 production loading with explicit
-  server/operator/control/fleet/runtime/profile/protected-path authority.
-  Legacy `parse_server_configuration` remains for frozen foundation callers;
-  production loading does not use it or discover profiles.
-- `secrets.py` parses bounded `KEY=value` data without shell evaluation,
-  rejects duplicates/injection/unsafe syntax, and redacts the token from
-  representation/errors. Production files require root ownership and 0600.
-- `bot_api.py` provides HTTPS Bot API long polling, offset progression,
-  send/edit/callback operations, response validation, bounded timeouts,
-  safe categories, and an injectable `HttpResponse` fake boundary. Mutating
-  ambiguous outcomes return UNKNOWN and are never blindly retried.
-- `service.py` composes schema-v4 SQLite, explicit isolation authority,
-  `CodexRuntimeManager`, model/thread/turn adapters, accepted local
-  orchestrator, group/private adapters/renderers, delivery, approval,
-  recovery, polling, SLEEP boot, and bounded owned-runtime/database shutdown.
-  Recovery is awaited before the first `getUpdates` call.
-- `deploy/systemd/codex-control.service` is root-only source material with
-  deterministic current-release `ExecStart`, external config/secrets/state,
-  restart-on-failure, control-group shutdown, and bounded stop timeout. It
-  was not installed or activated.
-- `deployment.py` and `deploy/codex_control_deploy.py` implement explicit
-  alternate-root immutable exact-SHA staging, manifest validation, atomic
-  current switching, upgrade health gating, rollback, schema compatibility,
-  path/symlink controls, and zero-effect verification.
+  `validate` is finite static preflight; `serve` owns the assembled lifecycle.
+- `config.py` strictly models the V1 server, operator, control chat, ordered
+  fleet, runtime, controller DB, repository/protected roots, and explicit
+  profile/CODEX_HOME/isolation authorities. No profile discovery is used.
+- `secrets.py` is a bounded non-shell parser. It rejects duplicates,
+  malformed/unsafe assignments, NUL/control injection and unexpected keys;
+  production files require root ownership and mode 0600. Secret repr/errors
+  are redacted.
+- `bot_api.py` provides HTTPS Bot API polling, monotonic offsets, validated
+  JSON/result shapes, send/edit/callback projection, bounded timeouts and
+  normalized safe errors. `HttpClient` is injectable; all tests use fake HTTP.
+  Ambiguous mutating failures are surfaced as UNKNOWN with no blind retry.
+- `service.py` composes schema-v4 SQLite, explicit isolation, accepted runtime,
+  model/thread/turn/approval/recovery/orchestration/delivery components and
+  group/private adapters/renderers. Startup forces effective SLEEP and awaits
+  recovery before the first poll. Private updates are routed privately.
+  Shutdown stops ingress/polling, closes owned runtimes, then SQLite.
+- `deploy/systemd/codex-control.service` is uninstalled source material with
+  root identity, current-release executable, external config/secrets/state,
+  restart-on-failure, control-group shutdown and bounded timeout. No unit
+  activation or systemd mutation occurred.
+- `deployment.py` and `deploy/codex_control_deploy.py` provide explicit-root
+  exact-SHA immutable staging, manifest authority, atomic `current` switching,
+  prechecks, health-gated upgrade, schema-gated rollback, path/symlink checks,
+  idempotent restaging and zero-effect verification.
 
-## Digests and release authority
+## Digests and manifest authority
 
 ```text
 systemd unit sha256 = 7df63042b9fcf9763c33cff980c9e4c3fadb25cef3d96c6dbe97532d3ad10870
-deployment helper sha256 = fd94b93fd626c33c7347dd2c27253c747f7a05f7e059b9073f8664fdefe70b00
-deployment module sha256 = 805c643fc9fc0ed7ba76cca3a06325be13f03aa44a2c49c5c9d92245ed6f9d4b
-service module sha256 = 2259d7ad74323a8a190874e3541052f4468f1f9cf6a2180244f50d3876eff6b0
-Telegram transport sha256 = 1e423dafc3697f04d3ac0b70bbb41f51b6d9c5949823e4f95e500ca9408ef0d2
-secrets module sha256 = cb5be9fa8929b997f88380515ff4a2ebab5f0393c9cee3d457a79e8bc045c6a7
+deployment helper sha256 = 0ee75a9603fdd5d7e7f8fc162d33fb24208514e8e6ffeb66dad39b2d0a2e00ff
+deployment module sha256 = ddf0736e2e032d7ac10923d77835a552ab15f08ad59f58c795d14bac20224787
+service module sha256 = 576742af6b29be424b62dcb8237660656d9d696e1345378e21e4d059c48607b0
+Telegram transport sha256 = d0c155211542fce57200ab63d2bfe7d98c52d5a1f7df2470a9a881dbedab60e4
+secrets module sha256 = 6556a0b8e062ff479feedfb055bff1ff0839dcf81611e5ed1a951a949af29c2f
 ```
 
-The controlled temporary-root manifest rehearsal recovered the accepted
-implementation SHA `acb1c261735a89376e5f0e522b19fce1bf192a40` without Git
-metadata. Its manifest SHA-256 was
-`10e89edabb6620638d42cf9de8bd88bb6a1c66e7a7ff0889b9b9587e0d0d3f47`, with
-schema support 4 and the fixed Codex 0.144.6 capability-schema authority.
-Manifest determinism/source authority is asserted; wheel-byte
-reproducibility is not claimed.
+The final handoff command is the authority for all listed file digests. The
+release manifest contains product,
+package version, exact supplied Git SHA, Python requirement, Codex 0.144.6
+capability-schema SHA, controller schema 4, artifact digests, and optional
+service-unit digest. It excludes tokens, cookies, IDs, prompts and environment
+data. Manifest/source authority is deterministic; wheel-byte reproducibility
+is not claimed.
 
-## Acceptance and regression commands
+## Tests and validation
 
 ```text
-PYTHONPATH=src:. pytest -q tests/unit/test_p8a_configuration_transport.py tests/acceptance/test_p8a_deployment_offline.py tests/test_foundation.py
+PYTHONPATH=.:src pytest -q tests/unit/test_p8a_configuration_transport.py tests/acceptance/test_p8a_deployment_offline.py
 14 passed
 
-PYTHONPATH=src:. pytest -q tests/unit tests/integration tests/acceptance --ignore=tests/real
-1071 passed, 647 subtests passed, 2 pre-existing warnings
+PYTHONPATH=.:src pytest -q --ignore=tests/real
+1079 passed, 647 subtests passed, 2 warnings
 
 python -m compileall -q src tests
 git diff --check
 ```
 
-Focused P8.A coverage includes the required valid/missing/duplicate/unsafe
-config and secret cases, safe repr/error checks, polling/result/error/offset
-transport cases, exact send/edit/callback projections, no blind retry,
-offline SLEEP boot and recovery ordering, temporary SQLite, exact-SHA
-manifest/staging/current switching, pre-switch failure, idempotent restage,
-health-failure rollback, unchanged config/secrets/state, schema refusal,
-symlink/path traversal blocking, and outside-root protection.
+The focused matrix covers complete/missing/duplicate/overlap/control-character
+configuration, secret duplicate/malformed/shell-like/unknown-key cases,
+redacted errors/repr, polling/order/offset/timeout/result errors, send/edit/
+callback projection and no retry, private-vs-group routing, SLEEP boot,
+startup recovery ordering, temporary SQLite, exact-SHA manifests, atomic
+switching, schema refusal, health failure rollback, preserved state/config/
+secrets, idempotent restage and path/symlink attacks. The broad run is the
+safe P0–P7 non-real regression set. P7 real tests were deliberately not run.
 
 ## Systemd verification
 
-The unit was checked by deterministic parser assertions for service name,
-root identity, exact current-release executable strategy, config,
-EnvironmentFile, working directory, restart policy, bounded RestartSec and
-TimeoutStopSec, control-group kill mode, no listener, no token literal, and
-no shell interpolation. `systemd-analyze verify` was run read-only against
-the uninstalled source unit; it reported only that the future
-`/opt/codex-control/current/.venv/bin/codex-control` executable is not present
-in this P8.A checkout. No `systemctl`, `service`, daemon-reload, install,
-enable, start, stop, restart, or reload was called.
+Deterministic assertions passed for service name, `User=root`, exact
+`/opt/codex-control/current/.venv/bin/codex-control` strategy, config path,
+root-only `EnvironmentFile`, working directory, `Restart=on-failure`, bounded
+`RestartSec=5s`/`TimeoutStopSec=30s`, `KillMode=control-group`, no token
+literal, no webhook/listener, and no unsafe shell interpolation.
+
+`systemd-analyze verify` was run read-only against the source/temp-root unit;
+the source-only invocation reports the expected absent future executable, and
+the temp-root invocation reports only the absent boot target in the isolated
+root. No `systemctl`, `service`, daemon-reload, install, enable, start, stop,
+restart or reload was called.
 
 ## Temporary-root install/upgrade/rollback rehearsal
 
-The end-to-end rehearsal used a newly created `/tmp/p8a-final-rehearsal-*`
-root, temporary A/B release sources, temporary config/secrets, and a
-temporary SQLite file with `user_version=4`:
+The rehearsal used a newly-created temporary root and temporary A/B artifacts:
 
-1. release A staged and current atomically switched to A;
-2. release A manifest validated and exact accepted SHA recovered;
-3. release B staged and switched after manifest/schema validation;
-4. simulated B health returned false;
-5. explicit rollback selected compatible A and atomically switched current to A;
-6. config, secrets, and state SHA-256 values remained byte-for-byte equal;
-7. no write escaped the temporary root.
+1. staged A and atomically selected A;
+2. validated A's manifest and recovered its exact supplied SHA;
+3. staged B and validated its manifest;
+4. atomically selected B;
+5. returned `healthy=False` from the simulated post-switch health gate;
+6. explicitly rolled back to compatible A and verified `current=A`;
+7. preserved config, secret and v4 SQLite bytes in the pytest fixture;
+8. rejected schema mismatch, missing/invalid previous release, traversal and
+   symlink authorities, with all writes confined to the explicit temp root.
 
-Rehearsal result: PASS. Missing previous release, invalid manifest,
-incompatible schema, current target traversal, release traversal, symlink,
-outside-root, and same-release behavior were tested or rejected by the helper.
+The direct rehearsal recovered manifest SHA-256 values:
+
+```text
+manifest A = a8dab05c93e46a09f1b57d466ea652b37cf3291ccc6816ee6d3e8106059dc8c1
+manifest B = e3da30ddac61b8d2744a1fb7a3db6f98499d6ea890893ccf0e0ea93c1405c713
+result = healthy:false, rolled_back:true, current:A
+```
+
+Rehearsal result: PASS.
 
 ## Secret/leakage scan
 
-Scanned all 14 implementation paths against Telegram-like token, private-key,
-auth/cookie, and environment-dump patterns: zero findings. Offline test
-authorities are explicit temporary fixtures, not working credentials. No
-token, cookie, prompt, response, update payload, or environment dump is in
-the release manifest, service unit, helper output, or this evidence.
+Tracked implementation/deployment paths were scanned for Telegram-like bot
+tokens, private-key material, auth/cookie headers, shell secret evaluation,
+environment dumps and prompt/response fixture leakage. No live credential or
+private key was found. The only token assignments are explicit offline test
+fixtures. No token, cookie, conversation content or environment dump is in
+the release manifest, unit or deployment output. Secret scan: PASS.
 
 ## Historical immutable blockers
 
-P7.C13, P7.C14, P7.C15, P7.C16, and P7.C17 are consumed immutable one-shot
-authorities and remain non-retryable. P7 real tests were not discovered or
-run; no latch, ledger, or retained evidence was altered. This is a required
-historical separation, not a P8.A implementation failure.
+P7.C13, P7.C14, P7.C15, P7.C16 and P7.C17 remain consumed immutable one-shot
+authorities and permanently non-retryable. Their ledgers/evidence/retained
+material were not read for mutation, reset, deleted or rerun. This is reported
+separately from P8.A tests.
 
 ## Zero-production-effect accounting
 
