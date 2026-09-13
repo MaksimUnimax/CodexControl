@@ -1,18 +1,39 @@
 [server]
 server_id = "server-80"
 display_name = "SERVER-80"
+operator_user_id = 123456789
+control_chat_id = -1001234567890
+fleet_version = "v1"
+
+[fleet]
+[[fleet.servers]]
+server_id = "server-80"
+display_name = "SERVER-80"
+
+[runtime]
+state_root = "/var/lib/codex-control"
+working_directory = "/root"
+repository_root = "/opt/codex-control/releases/REPLACE_WITH_FULL_GIT_SHA"
+telegram_text_limit = 3800
+controller_db_path = "/var/lib/codex-control/controller.sqlite3"
+controller_db_root = "/var/lib/codex-control"
+codex_executable = "/usr/local/bin/codex"
+expected_codex_version = "0.144.6"
 
 [[profiles]]
 profile_id = "codex1"
 codex_home = "/root/.codex"
 display_name = "Codex account 1"
+isolated_state_root = "/var/lib/codex-control-profile-codex1"
 
 [[profiles]]
 profile_id = "codex2"
 codex_home = "/root/.codex_second"
 display_name = "Codex account 2"
+isolated_state_root = "/var/lib/codex-control-profile-codex2"
 
 [[profiles]]
 profile_id = "codex3"
 codex_home = "/root/.codex_third"
 display_name = "Codex account 3"
+isolated_state_root = "/var/lib/codex-control-profile-codex3"

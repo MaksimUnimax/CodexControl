@@ -1,0 +1,19 @@
+[Unit]
+Description=CodexControl autonomous per-server controller
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/var/lib/codex-control
+EnvironmentFile=/etc/codex-control/secrets.env
+ExecStart=/opt/codex-control/current/.venv/bin/codex-control serve --config /etc/codex-control/server.toml --secrets /etc/codex-control/secrets.env
+Restart=on-failure
+RestartSec=5s
+KillMode=control-group
+TimeoutStopSec=30s
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

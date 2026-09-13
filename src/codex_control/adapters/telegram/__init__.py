@@ -12,6 +12,7 @@ from .private_updates import (
 from .fleet_keyboard import TelegramFleetKeyboardRenderer
 from .group_updates import TelegramGroupUpdateAdapter
 from .fleet_status_render import TelegramFleetStatusRenderer
+from .bot_api import HttpResponse, TelegramBotApiTransport, TelegramTransportError, UrlLibHttpClient
 
 __all__ = [
     "PrivateInboundKind",
@@ -24,4 +25,8 @@ __all__ = [
     "TelegramFleetKeyboardRenderer",
     "TelegramGroupUpdateAdapter",
     "TelegramFleetStatusRenderer",
+    "HttpResponse",
+    "TelegramBotApiTransport",
+    "TelegramTransportError",
+    "UrlLibHttpClient",
 ]
