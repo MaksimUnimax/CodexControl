@@ -36,57 +36,70 @@ Architect acceptance:
 
 `P8A_COMPLETE=YES`
 
-## P8.B first attempt
+## P8.B blocked history
 
-The first P8.B attempt stopped correctly before any production mutation because owner-specific routing and Telegram secret authority were absent.
+The original P8.B attempt stopped correctly before production mutation because owner routing/Telegram secret authority was absent.
 
-Historical blocked evidence commit:
-
-`7985bb0cc740af2c29f4daac7556f18c5ef2c501`
-
-Historical branch:
+Historical branch/evidence:
 
 `real-p8b-server80-deployment-2026-09-13`
 
-This branch is immutable historical evidence and MUST NOT be reset to release B.
+`7985bb0cc740af2c29f4daac7556f18c5ef2c501`
 
-Architect review:
+Resume-1 then used the corrected drift-safe architect authority and again reached the real owner-authority gate. It also stopped correctly with zero production mutations.
 
-`docs/evidence/p8/P8B_BLOCKED_PREMUTATION_ARCHITECT_REVIEW_2026-09-14.md`
-
-`P8B_PRODUCTION_MUTATIONS=0`
-
-`P8B_IMPLEMENTATION_REPAIR_REQUIRED=NO`
-
-## Superseded initial prompt authority
-
-The original P8.B prompt SHA gates are **SUPERSEDED**.
-
-In particular, executors MUST NOT require:
-
-- architect `origin/main=0074c7f820f328d4eae913529ba7e3f4658e965d`;
-- historical branch `real-p8b-server80-deployment-2026-09-13` to equal release B.
-
-Do NOT restore `main` to the old SHA.
-Do NOT reset the historical evidence branch.
-
-Binding supersession notice:
-
-`docs/evidence/p8/P8B_INITIAL_PROMPT_SUPERSEDED_NOTICE_2026-09-14.md`
-
-## Current executable slice — P8.B Resume-1
-
-P8.B remains the current slice, but execution must use the Resume-1 authority.
-
-Binding resume contract:
-
-`docs/evidence/p8/P8B_OWNER_AUTHORITY_RESUME_CONTRACT_2026-09-14.md`
-
-Fresh evidence branch:
+Historical Resume-1 branch/evidence:
 
 `real-p8b-server80-deployment-resume1-2026-09-14`
 
-Required Resume-1 base:
+`8589c174dff16a189004457fd1c7ec7a69a7f96f`
+
+Both branches are immutable historical evidence and MUST NOT be reset to release B or reused for a later successful deployment.
+
+Resume-1 architect review:
+
+`docs/evidence/p8/P8B_RESUME1_BLOCKED_OWNER_AUTHORITY_ARCHITECT_REVIEW_2026-09-14.md`
+
+`P8B_IMPLEMENTATION_REPAIR_REQUIRED=NO`
+
+`P8B_PRODUCTION_MUTATIONS=0`
+
+## Superseded SHA gates
+
+The initial P8.B hard-coded architect-main SHA gates are **SUPERSEDED**. Do not restore `main` to an older SHA and do not reset historical evidence branches.
+
+Binding notices:
+
+`docs/evidence/p8/P8B_INITIAL_PROMPT_SUPERSEDED_NOTICE_2026-09-14.md`
+
+`docs/evidence/p8/P8B_RESUME1_EXECUTION_AUTHORITY_V2_2026-09-14.md`
+
+Future P8.B execution reads current live `origin/main` authority documents and hard-gates only the accepted A/B release objects plus material execution boundaries.
+
+## Current executable slice — owner provisioning before P8.B Resume-2
+
+P8.B remains the current roadmap stage but **must not be executed again until owner authority has actually been provisioned on server-80**.
+
+Required local root-only authority files:
+
+- `/root/.codexcontrol-owner/p8b-routing.env`;
+- `/root/.codexcontrol-owner/p8b-secrets.env`.
+
+Owner provisioning runbook:
+
+`docs/evidence/p8/P8B_OWNER_PROVISIONING_RUNBOOK_2026-09-14.md`
+
+Only after both files exist and pass owner/mode/type/bounded-parser validation may Resume-2 execute.
+
+Binding Resume-2 contract:
+
+`docs/evidence/p8/P8B_OWNER_AUTHORITY_RESUME2_CONTRACT_2026-09-14.md`
+
+Fresh Resume-2 evidence branch:
+
+`real-p8b-server80-deployment-resume2-2026-09-14`
+
+Required Resume-2 base remains exact release B:
 
 `1273b273ed7f58ba235b35cbce485b623c340b8d`
 
@@ -94,32 +107,22 @@ Tree:
 
 `8def3b3e8591e82f77f0cea8c5f9f690949979f5`
 
-Resume-1 is authorized only after explicit root-only owner-provided local authority exists for:
+P8.B remains stopped-service acceptance:
 
-- real `operator_user_id`;
-- real `control_chat_id`;
-- real `TELEGRAM_BOT_TOKEN`.
-
-Repository example IDs are placeholders and never production authority.
-
-All original stopped-service P8.B restrictions remain binding:
-
-- service remains inactive;
-- service remains disabled;
+- service inactive;
+- service disabled;
 - no Telegram HTTP/message effects;
 - no Codex app-server/RPC effects;
 - no P7 mutation;
 - no P9.
 
-After owner authority exists, Resume-1 must rerun every pre-mutation gate and then perform the accepted real A→B→A→B deployment/rollback acceptance with final current=B and service still stopped/disabled.
+After provisioning and all pre-mutation gates pass, Resume-2 performs the accepted real A→B→A→B deployment/rollback sequence with final current=B and service still stopped/disabled.
 
-`P8B_INITIAL_PROMPT_SUPERSEDED=YES`
+`P8B_OWNER_PROVISIONING_REQUIRED=YES`
 
-`P8B_OLD_MAIN_RESTORE_AUTHORIZED=NO`
+`P8B_RESUME1_BRANCH_RESET_AUTHORIZED=NO`
 
-`P8B_HISTORICAL_BRANCH_RESET_AUTHORIZED=NO`
-
-`P8B_RESUME1_BRANCH_REQUIRED=YES`
+`P8B_RESUME2_AUTHORIZED_ONLY_AFTER_OWNER_PROVISIONING=YES`
 
 `P8B_SERVICE_ACTIVE=NO`
 
@@ -129,4 +132,4 @@ After owner authority exists, Resume-1 must rerun every pre-mutation gate and th
 
 ## After P8.B
 
-Only independent architect acceptance of exact successful P8.B Resume-1 evidence may unblock P9. P9 owns the first live service start, Telegram polling and user-visible real workflow acceptance.
+Only independent architect acceptance of a successful P8.B Resume-2 (or later explicitly authorized fresh attempt) may unblock P9. P9 owns the first live service start, Telegram polling and user-visible real workflow acceptance.
