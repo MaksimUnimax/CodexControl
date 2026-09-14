@@ -2,6 +2,28 @@
 
 Date: 2026-09-14
 
+## PROJECT FREEZE — OWNER PAUSE
+
+The project is **FROZEN BY OWNER** until an explicit owner instruction resumes it.
+
+Binding freeze checkpoint:
+
+`docs/evidence/p8/PROJECT_FREEZE_CHECKPOINT_2026-09-14.md`
+
+Frozen resume point:
+
+**P8.B owner provisioning before Resume-2.**
+
+Do not execute P8.B, provision production paths, start/enable CodexControl, start P9, reset historical evidence branches, or restart superseded P8.B prompts while the project is frozen.
+
+When the owner resumes the project, first fetch current `origin/main`, read this file and the freeze checkpoint in full, then continue only from the latest architect authority.
+
+`PROJECT_FROZEN_BY_OWNER=YES`
+
+`FROZEN_STAGE=P8B_OWNER_PROVISIONING_BEFORE_RESUME2`
+
+`P9_STARTED=NO`
+
 ## Accepted baseline
 
 - Repository: `MaksimUnimax/CodexControl`.
