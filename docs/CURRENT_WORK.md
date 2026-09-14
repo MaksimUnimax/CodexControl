@@ -1,46 +1,32 @@
 # Current work authority
 
-Date: 2026-09-13
+Date: 2026-09-14
 
 ## Accepted baseline
 
 - Repository: `MaksimUnimax/CodexControl`.
 - Installed server-80 authority: `codex-cli 0.144.6`; generated app-server schema SHA-256 `40c67e463e6170a8666b681caa4636a030e303cee94e7f0cc893fa8af7680466`.
-- P0–P6 are architect complete. P6 accepted implementation: `0409ad4a0744159aad875a5ddea4deaf1181699e`.
-- Controller schema authority is v4 with migration `0004_delete_local_containment`, SHA-256 `400a475cb074da6b82238af105412d8299b45816273136bfd54a2cbd2308e059`.
-- ADR-0045 remains binding: authenticated persistent `CODEX_HOME` may be shared; CodexControl owns only its own child/generation, isolated state root, controller SQLite and process-local reservation/quiescence.
-
-## P7 final authority
-
-P7 hard-delete correction is **COMPLETE / ARCHITECT_ACCEPTED**.
-
-Final successful one-shot:
-
-- successor: P7.C17;
-- execution source HEAD `3da1817172f7f197276ec388c94e399fa0d31640`;
-- execution tree `70effe87dd31acd92cd2e2984e65e0d114e2451b`;
-- real evidence commit `cd793ffcc3afac6aaf83d14e1baba6599ecc25a9`;
-- architect acceptance `docs/evidence/p7c17/P7C17_FINAL_HARD_DELETE_REAL_ARCHITECT_ACCEPTANCE_2026-09-13.md`.
-
-All consumed P7 real probes/successors remain immutable and non-retryable.
+- P0–P6 are architect complete.
+- P7 hard-delete correction is COMPLETE / ARCHITECT_ACCEPTED. All consumed P7 real probes/successors remain immutable and non-retryable.
+- Controller schema authority is v4 with migration `0004_delete_local_containment`.
 
 ## P8.A final authority
 
 P8.A is **COMPLETE / ARCHITECT_ACCEPTED**.
 
-Final accepted branch:
-
-`impl-p8a-deployment-package-rollback-repair4-2026-09-13`
-
-Final accepted HEAD/tree:
+Final accepted release B:
 
 `1273b273ed7f58ba235b35cbce485b623c340b8d`
 
+Tree:
+
 `8def3b3e8591e82f77f0cea8c5f9f690949979f5`
 
-Final production-code checkpoint/tree:
+Accepted-code rollback base A:
 
 `6ffd5193962115d6e07114369e4d442ea25c34d1`
+
+Tree:
 
 `0c16a336f70008461daa002e0f4af87f7ca70656`
 
@@ -48,63 +34,92 @@ Architect acceptance:
 
 `docs/evidence/p8/P8A_FINAL_ARCHITECT_ACCEPTANCE_2026-09-13.md`
 
-Accepted surface:
-
-- `codex-control validate` / `serve` production assembly;
-- strict V1 config and root-only secrets authority;
-- concrete Telegram Bot API transport with bounded long-poll margin;
-- actual installed-Codex `0.144.6` preflight before writable storage/polling;
-- explicit first-install schema-v4 controller-state initialization;
-- exact Git commit/tree release export;
-- private release staging + release-local executable;
-- staged executable validation before final atomic publication;
-- production/rehearsal transaction separation;
-- actual DB-schema gates;
-- finite deployment health states;
-- truthful installed verification;
-- crash-recoverable atomic pending previous/current journal;
-- zero real P8.A production effects.
-
 `P8A_COMPLETE=YES`
 
-`P8A_PRODUCTION_EFFECTS=0`
+## P8.B first attempt
 
-## Current executable slice
+The first P8.B attempt stopped correctly before any production mutation because owner-specific routing and Telegram secret authority were absent.
 
-**P8.B — server-80 real production installation + rollback acceptance, with service kept stopped.**
+Historical blocked evidence commit:
 
-Binding contract:
+`7985bb0cc740af2c29f4daac7556f18c5ef2c501`
 
-`docs/evidence/p8/P8B_SERVER80_PRODUCTION_DEPLOYMENT_ROLLBACK_CONTRACT_2026-09-13.md`
-
-P8.B may mutate only the explicitly named real deployment/config/state/systemd paths and may perform `systemctl daemon-reload` plus read-only service inspection.
-
-P8.B MUST NOT start/restart/enable the service. Consequently P8.B must produce zero Telegram HTTP/message effects and zero Codex app-server/RPC effects. The first service start belongs to P9.
-
-P8.B real rollback acceptance uses:
-
-- temporary immediately-previous accepted-code release A: `6ffd5193962115d6e07114369e4d442ea25c34d1`;
-- final operational release B: `1273b273ed7f58ba235b35cbce485b623c340b8d`.
-
-Required final production current release is B.
-
-Before any production mutation, P8.B must resolve real owner-specific routing IDs, Telegram secret authority and exact accepted profile/CODEX_HOME authority. Repository example IDs are placeholders and must never be deployed. Missing owner identity/secret/profile authority is a hard pre-mutation stop.
-
-Required real sequence after gates pass:
-
-- create/validate production config/state roots;
-- stage exact A and B Git releases;
-- initialize or validate controller DB schema v4;
-- install A as current;
-- install B;
-- rollback B→A using actual schema authority;
-- install B again;
-- install exact systemd unit and daemon-reload;
-- verify final current B, unit loaded/inactive/disabled, production config/secrets/DB/profile/Codex authority.
-
-Evidence branch:
+Historical branch:
 
 `real-p8b-server80-deployment-2026-09-13`
+
+This branch is immutable historical evidence and MUST NOT be reset to release B.
+
+Architect review:
+
+`docs/evidence/p8/P8B_BLOCKED_PREMUTATION_ARCHITECT_REVIEW_2026-09-14.md`
+
+`P8B_PRODUCTION_MUTATIONS=0`
+
+`P8B_IMPLEMENTATION_REPAIR_REQUIRED=NO`
+
+## Superseded initial prompt authority
+
+The original P8.B prompt SHA gates are **SUPERSEDED**.
+
+In particular, executors MUST NOT require:
+
+- architect `origin/main=0074c7f820f328d4eae913529ba7e3f4658e965d`;
+- historical branch `real-p8b-server80-deployment-2026-09-13` to equal release B.
+
+Do NOT restore `main` to the old SHA.
+Do NOT reset the historical evidence branch.
+
+Binding supersession notice:
+
+`docs/evidence/p8/P8B_INITIAL_PROMPT_SUPERSEDED_NOTICE_2026-09-14.md`
+
+## Current executable slice — P8.B Resume-1
+
+P8.B remains the current slice, but execution must use the Resume-1 authority.
+
+Binding resume contract:
+
+`docs/evidence/p8/P8B_OWNER_AUTHORITY_RESUME_CONTRACT_2026-09-14.md`
+
+Fresh evidence branch:
+
+`real-p8b-server80-deployment-resume1-2026-09-14`
+
+Required Resume-1 base:
+
+`1273b273ed7f58ba235b35cbce485b623c340b8d`
+
+Tree:
+
+`8def3b3e8591e82f77f0cea8c5f9f690949979f5`
+
+Resume-1 is authorized only after explicit root-only owner-provided local authority exists for:
+
+- real `operator_user_id`;
+- real `control_chat_id`;
+- real `TELEGRAM_BOT_TOKEN`.
+
+Repository example IDs are placeholders and never production authority.
+
+All original stopped-service P8.B restrictions remain binding:
+
+- service remains inactive;
+- service remains disabled;
+- no Telegram HTTP/message effects;
+- no Codex app-server/RPC effects;
+- no P7 mutation;
+- no P9.
+
+After owner authority exists, Resume-1 must rerun every pre-mutation gate and then perform the accepted real A→B→A→B deployment/rollback acceptance with final current=B and service still stopped/disabled.
+
+`P8B_INITIAL_PROMPT_SUPERSEDED=YES`
+
+`P8B_OLD_MAIN_RESTORE_AUTHORIZED=NO`
+
+`P8B_HISTORICAL_BRANCH_RESET_AUTHORIZED=NO`
+
+`P8B_RESUME1_BRANCH_REQUIRED=YES`
 
 `P8B_SERVICE_ACTIVE=NO`
 
@@ -114,4 +129,4 @@ Evidence branch:
 
 ## After P8.B
 
-Only independent architect acceptance of exact P8.B evidence may unblock P9. P9 owns the first live service start, Telegram polling and user-visible real workflow acceptance.
+Only independent architect acceptance of exact successful P8.B Resume-1 evidence may unblock P9. P9 owns the first live service start, Telegram polling and user-visible real workflow acceptance.
